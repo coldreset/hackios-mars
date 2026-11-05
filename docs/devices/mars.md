@@ -8,7 +8,7 @@
 | Vendor | Xiaomi |
 | SoC | `lahaina` |
 | Configuration | `make mars_defconfig` |
-| Maintainer | the mars port (README.md) |
+| Maintainer | coldreset (README.md) |
 | Repository | [`devices/mars/`](https://github.com/oosexgang/hakios-xnu-kernel/tree/main/devices/mars) |
 
 ## What works

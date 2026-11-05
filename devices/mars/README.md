@@ -10,7 +10,7 @@ controller speaks **SPI ST FingerTip** rather than I2C.
 | SoC | `lahaina` (SM8350) |
 | Configuration | `python3 tools/hakios-config.py defconfig mars mini touch perf` |
 | Boot | from RAM: `fastboot boot`; nothing is flashed, no partition is touched |
-| Maintainer | the mars port (see `git log`) |
+| Maintainer | [coldreset](https://github.com/coldreset) (Yunlong Zheng) |
 
 ## The SoC arguments
 
@@ -108,6 +108,11 @@ per transfer leaves the queue standing still.
 - GPU: `fw-gpu/a660_*` from the phone's own firmware partition (not distributed here).
 - Touch protocol: `MiCode/Xiaomi_Kernel_OpenSource`, branch `star-r-oss`,
   `drivers/input/touchscreen/fts_spi/`.
+
+## Maintainer
+
+Yunlong Zheng ([@coldreset](https://github.com/coldreset)) — issues and pull requests are welcome;
+a log from the screen (see Known issues) and the phone model are the two things that help most.
 
 ## Thanks
 
