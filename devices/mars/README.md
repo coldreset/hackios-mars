@@ -121,3 +121,10 @@ project's. The display-out and Metal notes came from reading the [raphael port](
 and the [OnePlus 9 port](https://github.com/b1ackm4x/hackios-xnu-kernel); the USB/log and cold-reset
 lessons from [hakios-thyme-mi10s](https://github.com/Liquidation0619/hakios-thyme-mi10s). No code
 from those repositories is included in this tree.
+
+## What is not in this repository
+
+- `prebuilt/device-tree.dtb` — the phone's own device tree (3.2 MB), read by `tools/mkubootimg.py`. Xiaomi's, so it
+  is not redistributed here: pull it from your own phone (`adb pull /sys/firmware/fdt` on a rooted ROM, or out of the
+  stock `dtbo`/`boot` image) and put it at `devices/mars/prebuilt/device-tree.dtb`.
+- `fw-gpu/`, `fw-touch/`, `fw-modem/` — vendor firmware, loaded from the phone at run time, never committed.

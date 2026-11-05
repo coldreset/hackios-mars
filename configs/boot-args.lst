@@ -3,6 +3,7 @@ adreno_blind	k
 adreno_dirty	k
 adreno_fine	k
 adreno_keep	k
+adreno_nomeasure	k
 adreno_only	k
 adreno_pause	k
 adreno_return	k
@@ -80,6 +81,7 @@ cam_settle	k
 cam_shutter	k
 cam_vblank	k
 cc_fade	u
+cpu_busy	k
 cpufreq	k
 cpuload	k
 cpumask	l
@@ -217,6 +219,8 @@ pmic_list	k
 press_power	k
 press_power_ms	k
 privs	k
+proc_cpu	k
+quiet	k
 rd	kl
 rec_mb	k
 rec_ring	k
@@ -271,11 +275,19 @@ thermal_tm1	k
 torch	kl
 torch_max_s	k
 torch_secs	k
+touch_bitbang	k
+touch_diag	k
 touch_flip	k
+touch_geniprobe	k
 touch_lat	ku
+touch_panic_secs	k
 touch_poll_us	k
 touch_rate	k
+touch_reset_ms	k
 touch_spi_hz	k
+touch_trace	k
+touch_trap	k
+touch_wd_se	k
 touchscreen	k
 ufs	l
 ufs_bench	k

@@ -3,6 +3,7 @@ ADRENO_BLIND	arg	adreno_blind	GPU and display	k	hakios.adreno.c
 ADRENO_DIRTY	arg	adreno_dirty	GPU and display	k	hakios.adreno.c	
 ADRENO_FINE	arg	adreno_fine	GPU and display	k	hakios.adreno.c	the newest step waits like that before every single access
 ADRENO_KEEP	arg	adreno_keep	GPU and display	k	hakios.adreno.c	
+ADRENO_NOMEASURE	arg	adreno_nomeasure	GPU and display	k	hakios.adreno.c	
 ADRENO_ONLY	arg	adreno_only	GPU and display	k	hakios.adreno.c	step K alone (what steps 6 to 10 need, they check for themselves: within one session of the loader, power and clocks stay as an earlier run left them)
 ADRENO_PAUSE	arg	adreno_pause	GPU and display	k	hakios.adreno.c	how long the newest step waits after announcing a group of accesses (default 2200)
 ADRENO_RETURN	arg	adreno_return	GPU and display	k	hakios.adreno.c	when all is over, go back to the loader instead of starting the system
@@ -74,6 +75,7 @@ CAM_SETTLE	arg	cam_settle	Cameras	k	hakios.camera.c
 CAM_SHUTTER	arg	cam_shutter	Cameras	k	hakios.camera.c	
 CAM_VBLANK	arg	cam_vblank	Cameras	k	hakios.camera.c	
 CC_FADE	arg	cc_fade	User space	u	inject_sb.c	
+CPU_BUSY	arg	cpu_busy	User space	k	hakios.focaltech.c	
 CPULOAD	arg	cpuload	CPU, memory and boot	k	hakios.cpufreq.c	every MS milliseconds, how busy each of our cores was meanwhile, in percent, to the loader's log (tools/frames.py shows it per gesture)
 CPUMASK	arg	cpumask	Loader	l	loader.c	
 DDR	arg	ddr	CPU, memory and boot	k	hakios.cpufreq.c	the memory's bus clock managers ("BCM") in the command database the boot loader left, with what is needed to vote for bandwidth on them -- only read
@@ -196,6 +198,8 @@ PMIC_LIST	arg	pmic_list	Chip, thermal and PMIC	k	hakios.pmic.c	only the clock, n
 PRESS_POWER	arg	press_power	Touch and buttons	k	hakios.buttons.c	a short press of the power key that many seconds after boot, and another ten seconds later, given to Darwin as the key's own are (hakios_touch_post):
 PRESS_POWER_MS	arg	press_power_ms	Touch and buttons	k	hakios.buttons.c	
 PRIVS	arg	privs	Security stand-ins	k	kern_minimac.c	
+PROC_CPU	arg	proc_cpu	User space	k	hakios.focaltech.c	
+QUIET	arg	quiet	User space	k	hakios.focaltech.c	
 RD	arg	rd	CPU, memory and boot	kl	(patch),loader.c	
 REC_MB	arg	rec_mb	GPU and display	k	MiniIOMobileFramebuffer.cpp	
 REC_RING	arg	rec_ring	GPU and display	k	MiniIOMobileFramebuffer.cpp	
@@ -244,11 +248,19 @@ THERMAL_TM1	arg	thermal_tm1	Chip, thermal and PMIC	k	hakios.thermal.c
 TORCH	arg	torch	Haptics and torch	kl	hakios.torch.c,loader.c	a look, reading only: the arbiter's channel for the module and who may write through it, the module's type, its registers, the PMIC's temperature
 TORCH_MAX_S	arg	torch_max_s	Haptics and torch	k	hakios.torch.c	
 TORCH_SECS	arg	torch_secs	Haptics and torch	k	hakios.torch.c	
-TOUCH_FLIP	arg	touch_flip	Touch and buttons	k	hakios.goodix.c	
-TOUCH_LAT	arg	touch_lat	GPU and display	ku	HakiosMetalCA.m,MiniIOMobileFramebuffer.cpp,eagl.c,hakios.goodix.c,hakios.gpu.cpp,hakios.input.c,inject.c,inject_sb.c	a line for every wait of a program's for the GPU that took a millisecond or more ("tl: f KIND US at US"), for telling apart what holds a frame up
-TOUCH_POLL_US	arg	touch_poll_us	Touch and buttons	k	hakios.goodix.c	
+TOUCH_BITBANG	arg	touch_bitbang	User space	k	hakios.focaltech.c	
+TOUCH_DIAG	arg	touch_diag	User space	k	hakios.focaltech.c	
+TOUCH_FLIP	arg	touch_flip	Touch and buttons	k	hakios.focaltech.c,hakios.goodix.c	
+TOUCH_GENIPROBE	arg	touch_geniprobe	User space	k	hakios.focaltech.c	
+TOUCH_LAT	arg	touch_lat	GPU and display	ku	HakiosMetalCA.m,MiniIOMobileFramebuffer.cpp,eagl.c,hakios.focaltech.c,hakios.goodix.c,hakios.gpu.cpp,hakios.input.c,inject.c,inject_sb.c	a line for every wait of a program's for the GPU that took a millisecond or more ("tl: f KIND US at US"), for telling apart what holds a frame up
+TOUCH_PANIC_SECS	arg	touch_panic_secs	User space	k	hakios.focaltech.c	
+TOUCH_POLL_US	arg	touch_poll_us	Touch and buttons	k	hakios.focaltech.c,hakios.goodix.c	
 TOUCH_RATE	arg	touch_rate	Touch and buttons	k	hakios.goodix.c	the chip reports twice as often (Xiaomi's game mode; 240 otherwise)
-TOUCH_SPI_HZ	arg	touch_spi_hz	Touch and buttons	k	hakios.goodix.c	the bus at N Hz (Android's device tree gives the chip 5 MHz)
+TOUCH_RESET_MS	arg	touch_reset_ms	User space	k	hakios.focaltech.c	how long the chip gets to boot (vendor: 50 ms at least, 200 safe)
+TOUCH_SPI_HZ	arg	touch_spi_hz	Touch and buttons	k	hakios.focaltech.c,hakios.goodix.c	the bus at N Hz (the device tree gives the chip 7 MHz)
+TOUCH_TRACE	arg	touch_trace	User space	k	hakios.focaltech.c	
+TOUCH_TRAP	arg	touch_trap	User space	k	hakios.focaltech.c	
+TOUCH_WD_SE	arg	touch_wd_se	User space	k	hakios.focaltech.c	
 UFS_BENCH	arg	ufs_bench	Storage and APFS	k	hakios.ufs.c	what one request through the loader costs, by size
 UFS_CHECK	arg	ufs_check	Storage and APFS	k	hakios.ufs.c	
 UFS_NATIVE	arg	ufs_native	Storage and APFS	kl	hakios.ufs.c,loader.c	through this kernel's own driver instead, its own transfer list in the controller for the run, if all is as expected; 2: only look; 3: a dry run --

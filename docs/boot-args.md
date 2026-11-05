@@ -2,13 +2,13 @@
 
 Made by `tools/boot-args.py --markdown`; CI fails if it is out of date with the source (`tools/boot-args.py --check`).
 
-Every argument that the kernel, the loader or user space of this port reads, and which file reads it. **339 arguments**: 276 read by the kernel, 14 by the loader, 59 by user space (one is read in more than one place).
+Every argument that the kernel, the loader or user space of this port reads, and which file reads it. **351 arguments**: 288 read by the kernel, 14 by the loader, 59 by user space (one is read in more than one place).
 
 This is a catalogue of what exists and who reads it, not a manual. What an argument means is in the head of the file that reads it. The stable switches have a symbol in the configuration (`tools/hakios-config.py help SYMBOL`, `docs/configs.md`); the rest are the knobs of bring-up (a driver's steps, pauses, traces, test modes) and can change with the driver. Any of them can be given in a configuration with `CONFIG_BOOTARGS="name=value ..."`, which checks that each name is in this list.
 
 Layers: **K** the kernel, **L** the loader, **U** user space (through `sysctl kern.bootargs`).
 
-## GPU and display (74)
+## GPU and display (75)
 
 | Argument | Layer | Read by | Configuration | Set by |
 |---|---|---|---|---|
@@ -17,6 +17,7 @@ Layers: **K** the kernel, **L** the loader, **U** user space (through `sysctl ke
 | `adreno_dirty` | K | `hakios.adreno.c` | `CONFIG_ADRENO_DIRTY` |  |
 | `adreno_fine` | K | `hakios.adreno.c` | `CONFIG_ADRENO_FINE` |  |
 | `adreno_keep` | K | `hakios.adreno.c` | `CONFIG_ADRENO_KEEP` |  |
+| `adreno_nomeasure` | K | `hakios.adreno.c` | `CONFIG_ADRENO_NOMEASURE` |  |
 | `adreno_only` | K | `hakios.adreno.c` | `CONFIG_ADRENO_ONLY` |  |
 | `adreno_pause` | K | `hakios.adreno.c` | `CONFIG_ADRENO_PAUSE` |  |
 | `adreno_return` | K | `hakios.adreno.c` | `CONFIG_ADRENO_RETURN` |  |
@@ -84,7 +85,7 @@ Layers: **K** the kernel, **L** the loader, **U** user space (through `sysctl ke
 | `surf_wrap` | K | `MiniIOSurface.cpp` | `CONFIG_SURF_WRAP` |  |
 | `surftrace` | K | `MiniIOSurface.cpp` | `CONFIG_SURFTRACE` |  |
 | `surftrace_of` | K | `MiniIOSurface.cpp` | `CONFIG_SURFTRACE_OF` |  |
-| `touch_lat` | KU | `HakiosMetalCA.m`, `MiniIOMobileFramebuffer.cpp`, `eagl.c`, `hakios.goodix.c`, `hakios.gpu.cpp`, `hakios.input.c`, `inject.c`, `inject_sb.c` | `CONFIG_TOUCH_LAT` |  |
+| `touch_lat` | KU | `HakiosMetalCA.m`, `MiniIOMobileFramebuffer.cpp`, `eagl.c`, `hakios.focaltech.c`, `hakios.goodix.c`, `hakios.gpu.cpp`, `hakios.input.c`, `inject.c`, `inject_sb.c` | `CONFIG_TOUCH_LAT` |  |
 | `vblur` | U | `eagl.c` | `CONFIG_VBLUR` |  |
 
 ## Security stand-ins (1)
@@ -251,11 +252,11 @@ Layers: **K** the kernel, **L** the loader, **U** user space (through `sysctl ke
 | `buttons_steps` | K | `hakios.buttons.c` | `CONFIG_BUTTONS_STEPS` |  |
 | `press_power` | K | `hakios.buttons.c` | `CONFIG_PRESS_POWER` |  |
 | `press_power_ms` | K | `hakios.buttons.c` | `CONFIG_PRESS_POWER_MS` |  |
-| `touch_flip` | K | `hakios.goodix.c` | `CONFIG_TOUCH_FLIP` |  |
-| `touch_poll_us` | K | `hakios.goodix.c` | `CONFIG_TOUCH_POLL_US` |  |
+| `touch_flip` | K | `hakios.focaltech.c`, `hakios.goodix.c` | `CONFIG_TOUCH_FLIP` |  |
+| `touch_poll_us` | K | `hakios.focaltech.c`, `hakios.goodix.c` | `CONFIG_TOUCH_POLL_US` |  |
 | `touch_rate` | K | `hakios.goodix.c` | `CONFIG_TOUCH_RATE` |  |
-| `touch_spi_hz` | K | `hakios.goodix.c` | `CONFIG_TOUCH_SPI_HZ` |  |
-| `touchscreen` | K | `hakios.buttons.c`, `hakios.goodix.c` | `CONFIG_TOUCHSCREEN` |  |
+| `touch_spi_hz` | K | `hakios.focaltech.c`, `hakios.goodix.c` | `CONFIG_TOUCH_SPI_HZ` |  |
+| `touchscreen` | K | `hakios.buttons.c`, `hakios.focaltech.c`, `hakios.goodix.c` | `CONFIG_TOUCHSCREEN` |  |
 | `virtio_input` | K | `hakios.virtio_input.c` | `CONFIG_VIRTIO_INPUT` |  |
 
 ## Storage and APFS (43)
@@ -395,7 +396,7 @@ Layers: **K** the kernel, **L** the loader, **U** user space (through `sysctl ke
 | `ufs` | L | `loader.c` | `CONFIG_UFS` |  |
 | `ufs_probe` | L | `loader.c` | `CONFIG_UFS_PROBE` |  |
 
-## User space (27)
+## User space (38)
 
 | Argument | Layer | Read by | Configuration | Set by |
 |---|---|---|---|---|
@@ -407,6 +408,7 @@ Layers: **K** the kernel, **L** the loader, **U** user space (through `sysctl ke
 | `ca_vbl` | U | `inject.c` | `CONFIG_CA_VBL` |  |
 | `caenv` | U | `inject.c`, `inject_sb.c` | `CONFIG_CAENV` |  |
 | `cc_fade` | U | `inject_sb.c` | `CONFIG_CC_FADE` |  |
+| `cpu_busy` | K | `hakios.focaltech.c` | `CONFIG_CPU_BUSY` |  |
 | `gl` | U | `inject.c`, `inject_sb.c` | `CONFIG_GL` |  |
 | `glcompile` | U | `inject.c` | `CONFIG_GLCOMPILE` |  |
 | `glno` | U | `inject.c` | `CONFIG_GLNO` |  |
@@ -421,8 +423,18 @@ Layers: **K** the kernel, **L** the loader, **U** user space (through `sysctl ke
 | `metal_skip` | U | `HakiosMetalCA.m` | `CONFIG_METAL_SKIP` |  |
 | `metal_trace` | U | `HakiosMetalCA.m` | `CONFIG_METAL_TRACE` |  |
 | `metal_watch` | U | `inject.c` | `CONFIG_METAL_WATCH` |  |
+| `proc_cpu` | K | `hakios.focaltech.c` | `CONFIG_PROC_CPU` |  |
+| `quiet` | K | `hakios.focaltech.c` | `CONFIG_QUIET` |  |
 | `root_apfs` | U | `init.c` | `CONFIG_ROOT_APFS` |  |
 | `sb_delay` | U | `inject_sb.c` |  | xl (XL_SB_DELAY) |
 | `switcher_wallpaper` | U | `inject_sb.c` | `CONFIG_SWITCHER_WALLPAPER` |  |
+| `touch_bitbang` | K | `hakios.focaltech.c` | `CONFIG_TOUCH_BITBANG` |  |
+| `touch_diag` | K | `hakios.focaltech.c` | `CONFIG_TOUCH_DIAG` |  |
+| `touch_geniprobe` | K | `hakios.focaltech.c` | `CONFIG_TOUCH_GENIPROBE` |  |
+| `touch_panic_secs` | K | `hakios.focaltech.c` | `CONFIG_TOUCH_PANIC_SECS` |  |
+| `touch_reset_ms` | K | `hakios.focaltech.c` | `CONFIG_TOUCH_RESET_MS` |  |
+| `touch_trace` | K | `hakios.focaltech.c` | `CONFIG_TOUCH_TRACE` |  |
+| `touch_trap` | K | `hakios.focaltech.c` | `CONFIG_TOUCH_TRAP` |  |
+| `touch_wd_se` | K | `hakios.focaltech.c` | `CONFIG_TOUCH_WD_SE` |  |
 | `var_hfs` | U | `init.c` | `CONFIG_VAR_HFS` |  |
 | `var_store` | U | `init.c` | `CONFIG_VAR_STORE` |  |

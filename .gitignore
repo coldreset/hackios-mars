@@ -126,6 +126,6 @@ __pycache__/
 
 # --- mars port (our device) -------------------------------------------------------------------
 !/devices/mars/
-/devices/mars/prebuilt/
+/devices/mars/prebuilt/*.dtb
 *.bak
 *.bak-*
