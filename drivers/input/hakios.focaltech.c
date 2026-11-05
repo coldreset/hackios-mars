@@ -825,6 +825,18 @@ static uint32_t max_x = 1440, max_y = 3200;    /* the device tree's x-max/y-max 
  * id (0x13 enter/motion, 0x14 leave), byte 1 is the touch id in the high nibble and the touch type
  * in the low nibble, bytes 2-4 hold a 12-bit x and y, byte 5 the angle and bytes 6-7 the major and
  * minor axis. */
+/* HAKIOS: touch_trace also shows what the driver hands to iOS, which is what the gesture
+ * recogniser actually sees. */
+static int fts_trace;
+
+static void
+trace_post(const char *what, uint32_t id, uint32_t x, uint32_t y)
+{
+	if (fts_trace) {
+		printf("focaltech: post %s id %u %u,%u\n", what, id, x, y);
+	}
+}
+
 static void
 fts_report(const uint8_t *event)
 {
@@ -876,13 +888,16 @@ fts_report(const uint8_t *event)
 	seen.last_y = y;
 	if (type == FTS_EVT_LEAVE) {
 		if (contact[id].down) {
+			trace_post("up", id, x, y);
 			hakios_touch_post(HAKIOS_TOUCH_UP, id, x, y);
 		}
 		contact[id].down = false;
 	} else if (!contact[id].down) {
+		trace_post("down", id, x, y);
 		hakios_touch_post(HAKIOS_TOUCH_DOWN, id, x, y);
 		contact[id].down = true;
 	} else if (contact[id].x != x || contact[id].y != y) {
+		trace_post("move", id, x, y);
 		hakios_touch_post(HAKIOS_TOUCH_MOVE, id, x, y);
 	}
 	contact[id].x = x;
@@ -1435,6 +1450,7 @@ hakios_focaltech_init(void)
 	printf("focaltech: probe: touchscreen=%u, starting the thread\n", enabled);
 	PE_parse_boot_argn("quiet", &fts_quiet, sizeof(fts_quiet));
 	PE_parse_boot_argn("touch_watch", &fts_watch, sizeof(fts_watch));
+	PE_parse_boot_argn("touch_trace", &fts_trace, sizeof(fts_trace));
 	PE_parse_boot_argn("touch_flip", &flip, sizeof(flip));
 	if (kernel_thread_start(focaltech_thread, NULL, &thread) == KERN_SUCCESS) {
 		if (fts_watch) {
