@@ -17,6 +17,10 @@ In the repository:
 - the FocalTech touch firmware, drivers/input/hakios.focaltech_fw.h: the touch vendor's;
   generated from a device blob, redistribution terms "to verify" (THIRD_PARTY_LICENSES.md).
 
+- U-Boot (DENX and contributors), devices/mars/u-boot/files/: a defconfig, an env file, a board device
+  tree and the SM8350 clock driver (BSD-3-Clause, Linaro Ltd.) that devices/mars/u-boot/apply.sh drops
+  into a U-Boot tree before building the loader. Their SPDX headers are kept as they are.
+
 - the Wi-Fi driver: Linux's ath11k (BSD-3-Clause-Clear) and FreeBSD's LinuxKPI headers (BSD-2-Clause) are
   fetched by tools/mk-ath11k.sh at pinned releases and built on our layer wifi/lx (MIT); only the layer is here.
 
