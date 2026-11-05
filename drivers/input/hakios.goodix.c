@@ -1036,7 +1036,19 @@ focaltech_write(uint8_t address, const uint8_t *data, uint32_t length)
 #define FTS_ROMBOOT_CMD_START_APP       0x08
 #define FTS_FLASH_PACKET_LENGTH         32		/* bytes per PRAM write */
 
+/*
+ * The firmware this driver hands to a chip sitting in its boot ROM is FocalTech's, and is not in
+ * this repository -- the vendor's, like the GPU's, the DSP's and the modem's. A build either has
+ * the header beside this file (tools/touch-fw.py --header makes one out of a blob somebody pulled
+ * from their own phone) or, with no header, reads fw/focaltech_ts_fw.bin out of the small image at
+ * run time, where userland/build.sh puts what it finds in ../fw-touch.
+ */
+#if __has_include("hakios.focaltech_fw.h")
 #include "hakios.focaltech_fw.h"
+#define HAKIOS_FOCALTECH_FW_BUILTIN 1
+#else
+#define HAKIOS_FOCALTECH_FW_BUILTIN 0
+#endif
 
 /*
  * Vendor fts_read_bootid(): send { 0x55, 0xAA } as a 2-byte framed write (treated as a write of
@@ -1148,6 +1160,10 @@ static bool
 focaltech_probe(bool verbose)
 {
 	uint8_t high = 0, low = 0;
+	const uint8_t *firmware = NULL;
+	uint32_t firmware_length = 0;
+	uint64_t firmware_size = 0;
+	int firmware_on_disk = 0;
 
 	/* Maybe firmware is already running (previous session, warm boot). */
 	if (focaltech_wait_valid(&high, &low)) {
@@ -1161,8 +1177,25 @@ focaltech_probe(bool verbose)
 		return false;
 	}
 
-	printf("focaltech: downloading %u bytes of firmware to PRAM...\n", FOCALTECH_FW_LENGTH);
-	if (!focaltech_write_pram(focaltech_fw, FOCALTECH_FW_LENGTH)) {
+#if HAKIOS_FOCALTECH_FW_BUILTIN
+	firmware = focaltech_fw;
+	firmware_length = FOCALTECH_FW_LENGTH;
+#else
+	firmware = hakios_image_file("fw", "focaltech_ts_fw.bin", &firmware_size, &firmware_on_disk);
+	if (firmware != NULL) {
+		firmware_length = (uint32_t)firmware_size;
+	}
+	if (firmware == NULL || firmware_length == 0) {
+		printf("focaltech: the chip is in its boot ROM and the small image has no "
+		    "fw/focaltech_ts_fw.bin to give it: put the phone's own "
+		    "/vendor/firmware/focaltech_ts_fw.bin at fw-touch/ and build the small image "
+		    "again (the vendor's firmware is never in this repository)\n");
+		return false;
+	}
+#endif
+
+	printf("focaltech: downloading %u bytes of firmware to PRAM...\n", firmware_length);
+	if (!focaltech_write_pram(firmware, firmware_length)) {
 		printf("focaltech: PRAM download failed\n");
 		return false;
 	}

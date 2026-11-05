@@ -1,0 +1,6 @@
+# Files that drivers/map names but that a build of this repository may not have, and what puts
+# them there. Every other file drivers/map names must be present, or the build stops: a driver
+# that silently does not reach the kernel is worse than one that fails to build.
+#
+# <path in the kernel tree>	<what puts it there>
+bsd/dev/hakios.focaltech_fw.h	tools/touch-fw.py --header, out of the FocalTech firmware of the user's own phone

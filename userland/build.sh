@@ -447,6 +447,13 @@ if [ -f ../fw-haptic/aw8697_haptic.bin ]; then
 	mkdir -p root/fw
 	install -m 0644 ../fw-haptic/aw8697_haptic.bin root/fw/
 fi
+# ... and the touch controller's firmware, the phone's /vendor/firmware/focaltech_ts_fw.bin, from ../fw-touch
+# (drivers/input/hakios.goodix.c, on the devices whose controller is FocalTech's; the vendor's, so never in the
+# repository: tools/touch-fw.py puts it there. mars's controller is ST's and needs none of this)
+if [ -f ../fw-touch/focaltech_ts_fw.bin ]; then
+	mkdir -p root/fw
+	install -m 0644 ../fw-touch/focaltech_ts_fw.bin root/fw/
+fi
 # ... and the cameras' register tables (drivers/camera/hakios.camera.c, cam=2 and up), made by tools/camsensor.py out of
 # the sensors' module files of Android's camera stack, the phone's /vendor/lib64/camera/com.qti.sensormodule.
 # hakios_<maker>_<sensor>_<camera>.bin, in ../fw-camera (the vendor's: neither they nor the tables are in the
@@ -478,7 +485,7 @@ fi
 # git worktree add has none of it, and neither has one whose tools/new-workspace.sh predates the fw-*
 # loop there. Say what went in and what was not there to go in; what each one is for is above.
 fwhave= fwnone=
-for d in gpu wifi haptic camera audio; do
+for d in gpu wifi haptic touch camera audio; do
 	if [ -d ../fw-$d ]; then fwhave="$fwhave $d"; else fwnone="$fwnone $d"; fi
 done
 echo "build.sh: fw/: $(ls -1 root/fw 2>/dev/null | wc -l) files from ../fw-*:${fwhave:- none present}${fwnone:+, absent:$fwnone}"

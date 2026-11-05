@@ -33,9 +33,16 @@ cp -a "$HERE/files/." .
 # the drivers are kept by subsystem (drivers/<subsystem>/), not at their place in Apple's tree: drivers/map says where
 # each one goes, one line per file: "<subsystem> <path in the tree>"
 NDRIVERS=0
+optional=" $(awk '!/^#/ && NF >= 1 { print $1 }' "$HERE/../drivers/optional" 2>/dev/null | tr '\n' ' ') "
 while read -r sub tree _; do
 	case "$sub" in ''|'#'*) continue ;; esac
-	[ -f "$HERE/../drivers/$sub/$(basename "$tree")" ] || { echo "apply.sh: drivers/$sub/$(basename "$tree") is in drivers/map but missing" >&2; false; }
+	if [ ! -f "$HERE/../drivers/$sub/$(basename "$tree")" ]; then
+		case "$optional" in
+		*" $tree "*) echo "apply.sh: drivers/$sub/$(basename "$tree") is not here (optional)" >&2; continue ;;
+		esac
+		echo "apply.sh: drivers/$sub/$(basename "$tree") is in drivers/map but missing" >&2
+		false
+	fi
 	mkdir -p "$(dirname "$tree")"
 	cp -p "$HERE/../drivers/$sub/$(basename "$tree")" "$tree"
 	NDRIVERS=$((NDRIVERS + 1))

@@ -21,6 +21,20 @@ SUBSYSTEMS = {"input", "storage", "gpu", "camera", "haptic", "audio", "power", "
 TREE_DIRS = ("bsd/dev/", "iokit/Kernel/")
 
 
+def read_optional(root):
+    """{tree path} of the files drivers/optional says a build may not have."""
+    path = os.path.join(root, "drivers", "optional")
+    if not os.path.isfile(path):
+        return set()
+    out = set()
+    with open(path, encoding="utf-8") as f:
+        for line in f:
+            text = line.split("#", 1)[0].strip()
+            if text:
+                out.add(text.split()[0])
+    return out
+
+
 def read_map(root):
     """[(subsystem, tree path)] from drivers/map, and the problems met on the way."""
     entries, problems = [], []
@@ -46,6 +60,7 @@ def read_map(root):
 
 
 def check(root):
+    optional = read_optional(root)
     entries, problems = read_map(root)
     seen_tree, seen_name = {}, {}
     for sub, tree in entries:
@@ -56,7 +71,7 @@ def check(root):
         if name in seen_name and seen_name[name] != tree:
             problems.append("%s and %s have the same name" % (seen_name[name], tree))
         seen_name[name] = tree
-        if not os.path.isfile(os.path.join(root, "drivers", sub, name)):
+        if not os.path.isfile(os.path.join(root, "drivers", sub, name)) and tree not in optional:
             problems.append("drivers/%s/%s is listed but is not there" % (sub, name))
     listed = {(sub, os.path.basename(tree)) for sub, tree in entries}
     drivers = os.path.join(root, "drivers")

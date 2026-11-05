@@ -48,10 +48,12 @@ These are flagged for review and are **not** asserted to be settled:
   with UEFIReader. Whether redistributing them is permitted has not been confirmed with the
   vendor; a user who is unsure should delete them and extract their own. Tracked in
   `THIRD_PARTY_LICENSES.md`.
-- **The FocalTech touch-controller firmware header** (`drivers/input/hakios.focaltech_fw.h`)
-  is generated from a firmware blob on the device. Its redistribution terms are the touch
-  vendor's and have not been confirmed; it is a candidate for moving to the pull-from-device
-  model the rest of the firmware already uses.
+- **The FocalTech touch-controller firmware** was, until 5 November 2026, a header in this tree
+  (`drivers/input/hakios.focaltech_fw.h`, generated from a blob on the device). It is the touch
+  vendor's and its redistribution terms were never confirmed, so it is no longer in the
+  repository: `drivers/input/hakios.goodix.c` now reads `fw/focaltech_ts_fw.bin` out of the
+  small image at run time, the way the GPU, the audio DSP and the modem read theirs, and
+  `tools/touch-fw.py` puts a copy of the user's own blob in place. Nothing to redistribute.
 - **Mu-Silicium / Project Mu** derived files under `devices/redwood/uefi/` carry upstream
   BSD-2-Clause-Patent and GPL-2.0-or-MIT headers; the derived parts keep those licenses.
 

@@ -129,3 +129,8 @@ __pycache__/
 /devices/mars/prebuilt/*.dtb
 *.bak
 *.bak-*
+
+# The touch controller's firmware, from the phone (drivers/input/hakios.goodix.c): the vendor's,
+# like every other fw-* here, and never in the repository. tools/touch-fw.py puts it in place.
+/fw-touch/
+/drivers/input/hakios.focaltech_fw.h

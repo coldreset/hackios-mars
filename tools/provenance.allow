@@ -16,8 +16,9 @@ open     devices/redwood/prebuilt/BootShim.bin   built from the shim of Mu-Silic
 pending  devices/redwood/prebuilt/device-tree.dtb          the phone's device tree, compiled from Linux sources that are GPL-2.0; confirm the headers, or have each user pull it from their own phone as tools/soc-args.py already does
 pending  devices/redwood/uefi/files/Resources/DTBs/redwood.dtb   the same device tree, for the UEFI build
 
-# --- the touch controller's firmware, compiled into a driver ---------------------------------------------
-pending  drivers/input/hakios.focaltech_fw.h   FocalTech's firmware as a C array, from a blob on the phone: the kernel (hakios.goodix.c) includes it, so it cannot simply be removed; owner to decide between a licence from the vendor and loading the blob from the phone at run time like the rest of the firmware
+# The touch controller's firmware used to be here as a C array. It is not in the tree now: the driver
+# reads fw/focaltech_ts_fw.bin out of the small image at run time, and tools/touch-fw.py puts the
+# vendor's blob beside the build (fw-touch/, git-ignored). Nothing left to explain.
 
 # --- proprietary: Qualcomm's and Xiaomi's, taken out of the phone's own UEFI; not for a public tree ---------
 vendor   devices/redwood/uefi/files/Binaries/redwood/*       UEFI drivers extracted from the vendor's xbl firmware (QcomPkg, MiPkg, RawFiles and the EDK2 modules as the vendor built them)

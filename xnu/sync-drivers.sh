@@ -9,11 +9,18 @@ HERE=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 TREE=${1:-${XNU_SRC:-$HERE/../xnu-src/xnu-8796.121.2}}
 [ -d "$TREE" ] || { echo "sync-drivers: no kernel tree at $TREE (xnu/apply.sh makes it)" >&2; exit 1; }
 [ -f "$HERE/../drivers/map" ] || { echo "sync-drivers: no drivers/map" >&2; exit 1; }
+optional=" $(awk '!/^#/ && NF >= 1 { print $1 }' "$HERE/../drivers/optional" 2>/dev/null | tr '\n' ' ') "
 copied=0
 while read -r sub tree _; do
 	case "$sub" in ''|'#'*) continue ;; esac
 	src="$HERE/../drivers/$sub/$(basename "$tree")"
-	[ -f "$src" ] || { echo "sync-drivers: drivers/$sub/$(basename "$tree") is in drivers/map but missing" >&2; exit 1; }
+	if [ ! -f "$src" ]; then
+		case "$optional" in
+		*" $tree "*) echo "sync-drivers: drivers/$sub/$(basename "$tree") is not here (optional: $(awk -v t="$tree" '$1 == t { $1 = ""; sub(/^[ \t]+/, ""); print }' "$HERE/../drivers/optional"))" >&2; continue ;;
+		esac
+		echo "sync-drivers: drivers/$sub/$(basename "$tree") is in drivers/map but missing" >&2
+		exit 1
+	fi
 	if [ ! -e "$TREE/$tree" ] || { [ "$src" -nt "$TREE/$tree" ] && ! cmp -s "$src" "$TREE/$tree"; }; then
 		mkdir -p "$(dirname "$TREE/$tree")"
 		cp -p "$src" "$TREE/$tree"

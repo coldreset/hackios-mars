@@ -19,7 +19,7 @@ This supersedes the summary in `NOTICE`, which stays as the short, canonical lis
 | mkbootimg.py | `devices/redwood/prebuilt/mkbootimg.py` | Android Open Source Project | Apache-2.0 | |
 | Mu-Silicium / Project Mu derived files | `devices/redwood/uefi/` | Project Silicium, Microsoft, contributors | BSD-2-Clause-Patent; some GPL-2.0+ OR MIT | derived parts keep upstream license |
 | Qualcomm/Xiaomi UEFI driver binaries | `devices/redwood/uefi/files/Binaries/` | Qualcomm / Xiaomi (from device `xbl.img`) | vendor's — **to verify** | needed only to rebuild UEFI; removable, re-extract with UEFIReader |
-| FocalTech touch firmware header | `drivers/input/hakios.focaltech_fw.h` | FocalTech (device firmware blob) | vendor's — **to verify** | candidate to move to pull-from-device |
+| FocalTech touch firmware (not distributed) | `fw-touch/`, `drivers/input/hakios.focaltech_fw.h` | FocalTech (device firmware blob) | not distributed; read from the user's own phone at run time | `tools/touch-fw.py` puts it where the build and the small image can find it |
 | Apple host headers (build only) | `xnu-deps/hostinc/mach-o/`, `.../mach/` | Apple (open-source cctools/xnu headers) | APSL 2.0 | host-side Mach-O headers for the cross build |
 | Pre-built kernel & user space | `prebuilt/` | built from this repo | APSL 2.0 / MIT (as source) | reproducible from source here |
 
