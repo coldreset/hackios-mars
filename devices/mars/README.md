@@ -68,6 +68,8 @@ Boot arguments that matter on this phone:
 | `touch_bitbang=1` | drive the pads by hand instead of through the serial engine |
 | `adreno_nomeasure=1` | SM8350 has no usable GCC debug counter to check the GPU clock |
 | `quiet=1` | suppress periodic counters so the tail of the kernel log stays readable |
+| `touch_watch=1` | start the touch watchdog: a line every 5 s with the stage it is in, and the periodic counters |
+| `touch_trace=1` | print every raw touch event with the time it was read |
 
 ## Touch: what this phone actually has
 
