@@ -641,10 +641,16 @@ static bool (*spi_transfer)(const uint8_t *tx, uint8_t *rx, uint32_t length);
 #define FTS_EVENT_SIZE          8               /* bytes per FIFO event */
 #define FTS_EVT_NOEVENT         0x00
 #define FTS_EVT_CONTROLLER_READY 0x03           /* the controller has finished coming up */
-#define FTS_EVT_ENTER           0x13            /* a finger has landed or moved (FTM5) */
-#define FTS_EVT_MOTION          0x23            /* a finger that is already down has moved */
-#define FTS_EVT_LEAVE           0x33            /* it has lifted */
 #define FTS_EVT_ERROR           0xf0            /* something is wrong */
+/* The event id is the high nibble of byte 0: the vendor driver dispatches on evt_data[0] >> 4
+ * (fts.c, fts_ts_sleep_work). The low nibble carries how many fingers the chip is tracking, so
+ * 0x13 and 0x11 are the same event and must not be compared for equality. Enter (0x1x) and
+ * motion (0x2x) are both one sample of a finger on the glass -- the vendor hands both to
+ * fts_enter_pointer_event_handler -- and 0x3x is the lift. */
+#define FTS_EVT_ID(e)           ((e) & 0xf0)
+#define FTS_EVT_ENTER           0x10            /* a finger has landed or moved */
+#define FTS_EVT_MOTION          0x20            /* the same, once the finger is known */
+#define FTS_EVT_LEAVE           0x30            /* it has lifted */
 
 static uint8_t spi_tx[FTS_MAX_TRANSFER], spi_rx[FTS_MAX_TRANSFER];
 
@@ -822,7 +828,7 @@ static uint32_t max_x = 1440, max_y = 3200;    /* the device tree's x-max/y-max 
 static void
 fts_report(const uint8_t *event)
 {
-	uint32_t type = event[0], id = event[1] >> 4;
+	uint32_t type = FTS_EVT_ID(event[0]), id = event[1] >> 4;
 	uint32_t x = ((uint32_t)(event[3] & 0x0f) << 8) | event[2];
 	uint32_t y = ((uint32_t)event[4] << 4) | ((event[3] & 0xf0) >> 4);
 
@@ -845,53 +851,6 @@ fts_report(const uint8_t *event)
 		}
 	}
 
-/* HAKIOS: touch_start -- the first samples of a new touch, raw and scaled, so that the point a
- * swipe starts from can be checked against the screen edge iOS tests it against. */
-	{
-		static int starts, follow;
-		uint32_t sx = x, sy = y, nx, ny;
-
-		if (sx >= max_x) sx = max_x ? max_x - 1 : 0;
-		if (sy >= max_y) sy = max_y ? max_y - 1 : 0;
-		nx = max_x ? sx * 65535 / max_x : 0;
-		ny = max_y ? sy * 65535 / max_y : 0;
-		if (flip & 1) nx = 65535 - nx;
-		if (flip & 2) ny = 65535 - ny;
-		{
-			static uint64_t last_event;
-			uint64_t now = mach_absolute_time();
-
-			last_event = now;
-		}
-		if (type == FTS_EVT_ENTER && id < FTS_MAX_TOUCHES && starts < 400) {
-			static uint64_t last_us;
-			uint64_t now = mach_absolute_time();
-			uint64_t us;
-
-			absolutetime_to_nanoseconds(now, &us);
-			us /= 1000;
-			if (last_us == 0 || us - last_us > 40000) {
-				starts++;
-				follow = 2;
-				printf("focaltech: touch start %d: raw %u,%u scaled %u,%u (event %02x %02x %02x %02x %02x)\n",
-				    starts, x, y, nx, ny, event[0], event[1], event[2], event[3], event[4]);
-			}
-			last_us = us;
-		} else if (follow > 0 && (type == FTS_EVT_ENTER || type == FTS_EVT_MOTION)) {
-			follow--;
-			printf("focaltech: touch move %d: raw %u,%u scaled %u,%u\n", starts, x, y, nx, ny);
-		}
-	}
-
-	if (seen.touches < 20) {
-/* HAKIOS: touch_trap -- one event proves the chip reports; the machine stops with the bytes on screen */
-		{ static int trap_arg = -1; if (trap_arg < 0) { trap_arg = 0; PE_parse_boot_argn("touch_trap", &trap_arg, sizeof(trap_arg)); }
-		  if (trap_arg) panic("HAKIOS touch_trap: event %02x %02x %02x %02x %02x %02x %02x %02x",
-		      (unsigned)event[0], (unsigned)event[1], (unsigned)event[2], (unsigned)event[3],
-		      (unsigned)event[4], (unsigned)event[5], (unsigned)event[6], (unsigned)event[7]); }
-		printf("focaltech: event %02x %02x %02x %02x %02x %02x %02x %02x -> id %u at %u, %u\n",
-		    event[0], event[1], event[2], event[3], event[4], event[5], event[6], event[7], id, x, y);
-	}
 	if (type != FTS_EVT_ENTER && type != FTS_EVT_MOTION && type != FTS_EVT_LEAVE) {
 		return;
 	}
@@ -1056,6 +1015,7 @@ fts_spi4_setup(void)
 
 static const char *volatile fts_stage = "init";
 static int fts_quiet;   /* boot-arg quiet: keep the log for the touch lines only */
+static int fts_watch;   /* boot-arg touch_watch: the watchdog thread and the periodic lines */
 
 /* Read a few registers first: if the bus itself is dead, this is where it shows. */
 static void
@@ -1366,7 +1326,10 @@ focaltech_thread(__unused void *parameter, __unused wait_result_t result)
 		for (unsigned r = 0;; r++) {
 			fts_ticks++;
 			sleep_ms(5000);
-			printf("focaltech: still no touch screen: stage %s, step %s, retry %u\n", fts_stage, fts_step, r);
+			if (fts_watch) {
+				printf("focaltech: still no touch screen: stage %s, step %s, retry %u\n",
+				    fts_stage, fts_step, r);
+			}
 			if (r % 6 == 5) {
 				(void)bring_up();
 			}
@@ -1424,7 +1387,7 @@ focaltech_thread(__unused void *parameter, __unused wait_result_t result)
 			    panic_secs, seen.reports, seen.touches, seen.bad, gpio_get(PIN_INT) ? 1 : 0, seen.last_x, seen.last_y);
 		  } }
 		if ((tick % (2 * (1000000 / poll_us))) == 1) {
-			if (fts_quiet) { goto quiet_alive_skip; }
+			if (!fts_watch || fts_quiet) { goto quiet_alive_skip; }
 			printf("focaltech: alive tick %u, %u events, int %s\n", tick, seen.reports, gpio_get(PIN_INT) ? "high" : "low");
 quiet_alive_skip: ;
 		}
@@ -1448,7 +1411,7 @@ quiet_alive_skip: ;
 		}
 		before = looked;
 		if (tick % (2 * (1000000 / poll_us)) == 0) {
-			if (fts_quiet) { goto quiet_seen_skip; }
+			if (!fts_watch || fts_quiet) { goto quiet_seen_skip; }
 		printf("focaltech: seen %u events, %u finger positions, %u bad, int %s, last %u,%u\n",
 			    seen.reports, seen.touches, seen.bad, gpio_get(PIN_INT) ? "high" : "low",
 			    seen.last_x, seen.last_y);
@@ -1471,10 +1434,13 @@ hakios_focaltech_init(void)
 	}
 	printf("focaltech: probe: touchscreen=%u, starting the thread\n", enabled);
 	PE_parse_boot_argn("quiet", &fts_quiet, sizeof(fts_quiet));
+	PE_parse_boot_argn("touch_watch", &fts_watch, sizeof(fts_watch));
 	PE_parse_boot_argn("touch_flip", &flip, sizeof(flip));
 	if (kernel_thread_start(focaltech_thread, NULL, &thread) == KERN_SUCCESS) {
-		thread_t wd;
-		kernel_thread_start(focaltech_watchdog, NULL, &wd);
+		if (fts_watch) {
+			thread_t wd;
+			kernel_thread_start(focaltech_watchdog, NULL, &wd);
+		}
 		thread_deallocate(thread);
 	}
 }
