@@ -1,0 +1,4 @@
+# HakiOS defconfig for the Xiaomi 11 Pro (mars): the common kernel, the lahaina family's facts, and this device's own.
+#include common_defconfig
+#include lahaina.config
+#include mars.config
