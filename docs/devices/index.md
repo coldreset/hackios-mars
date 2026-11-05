@@ -7,6 +7,7 @@ Every device with a repository, and how far each part of it works. A device of y
 
 | Device | SoC | display | touch | buttons | cpu | gpu | storage | audio | battery | haptic | camera | torch | wifi | bluetooth | cellular | network | thermal |
 |---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| [Xiaomi 11 Pro](mars.md) | `lahaina` | yes | yes | no | yes | yes | partly | no | no |  | no |  | no |  |  |  | no |
 | [QEMU virt (aarch64)](qemu.md) | `none` | yes | yes | yes |  | no | yes | yes |  |  |  |  |  |  |  | yes |  |
 | [POCO X5 Pro 5G](redwood.md) | `sc7280` | yes | yes | yes | yes | yes | yes | yes | partly | yes | yes | partly | yes | no | partly |  | partly |
 
@@ -16,4 +17,5 @@ An empty cell is a part nobody has looked at on that device yet.
 
 | SoC | What | |
 |---|---|---|
+| `lahaina` | Snapdragon 888 (SM8350) | carried by mars (`devices/mars/soc/`) |
 | `sc7280` | Qualcomm SC7280 family (SM7325 "Snapdragon 778G", QCM6490; "yupik", "kodiak") | carried by redwood (`devices/redwood/soc/`) |

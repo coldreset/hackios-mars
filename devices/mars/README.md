@@ -1,97 +1,118 @@
-# Device: Qualcomm Technologies, Inc. Lahaina V2.1 SoC (mars)
+# Xiaomi 11 Pro (`mars`)
 
-Made by `tools/new-device.py` on 2026-11-03, from the file vendor_0.dtb. Edit it as the port goes.
+Qualcomm **SM8350 "lahaina"** / Snapdragon 888, 12 GB RAM, 1440x3200 AMOLED, Adreno 660, UFS 3.1.
+This is the first SM8350 device in the tree, and the first device in the project whose touch
+controller speaks **SPI ST FingerTip** rather than I2C.
 
-| What | Value |
+| | |
 |---|---|
-| Board (the tree's `model`) | Qualcomm Technologies, Inc. Lahaina V2.1 SoC |
-| Compatible | `qcom,lahaina` |
+| Vendor | Xiaomi |
+| SoC | `lahaina` (SM8350) |
+| Configuration | `python3 tools/hakios-config.py defconfig mars mini touch perf` |
+| Boot | from RAM: `fastboot boot`; nothing is flashed, no partition is touched |
+| Maintainer | the mars port (see `git log`) |
 
-## The SoC addresses
+## The SoC arguments
 
-No reference tree to compare with (devices/redwood/prebuilt/device-tree.dtb is missing).
+`soc.args` and `soc/configs/lahaina.config` were read out of the phone's own device tree by
+`tools/soc-args.py` / `pull-soc.sh`. Three entries the generator could not find are still missing and
+matter only for cellular, which this port does not try to bring up: `soc_cmd_db`, `soc_mpss_mem`,
+`modem_ipa_fw_at`.
 
-| Argument | Value | Against the reference |
+Everything else the kernel needs comes from `devices/mars/configs/mars.config` and the shared
+`configs/*.config` fragments.
+
+## What works
+
+| Part | State | |
 |---|---|---|
-| `soc_ipa_base` | `0x1e40000` |  |
-| `soc_gsi_base` | `0x1e04000` |  |
-| `soc_ipcc` | `0x408000` |  |
-| `soc_aoss` | `0xc300000` |  |
-| `soc_rsc` | `0x18220000` |  |
-| `soc_apps_smmu` | `0x15000000` |  |
-| `soc_cmd_db` | `(not found)` | **missing**: the tree has no node this was read from; see the table in devices/redwood/README.md |
-| `soc_mpss_mem` | `(not found)` | **missing**: the tree has no node this was read from; see the table in devices/redwood/README.md |
-| `modem_ipa_fw_at` | `(not found)` | **missing**: the tree has no node this was read from; see the table in devices/redwood/README.md |
-| `soc_smem` | `0x80900000` |  |
-| `soc_imem` | `0x14600000` |  |
-| `soc_ipa_stream` | `0x5c0` |  |
-| `soc_ipa_stream_uc` | `0x5c2` |  |
-| `soc_pas_mpss` | `0x4` |  |
-| `soc_pas_ipa` | `0xf` |  |
-| `soc_ipa_fw` | `ipa_fws` |  |
+| boot chain | works | the loader comes up in RAM and hands over to XNU |
+| display | works | 1440x3200 through the loader's framebuffer; drawn by the GPU |
+| touch | works | ST FingerTip FTM5 on `qupv3_se11_spi`; taps land where you tap, drags register (gesture classification is still rough, see Known issues) |
+| cpu | works | all 8 cores (`cpus=8`); the A78/X1 cores sit at their top OPP with `cpufreq=1` |
+| gpu | works | Adreno 660, all 21 bring-up steps pass; OpenGL ES through Mesa freedreno (`gpu=1 adreno_nomeasure=1 gl=1`) |
+| storage | read only | the system image is resident in RAM; `var_store` / UFS writes are not enabled yet |
+| buttons, battery, thermal, wifi, audio, camera | not started | the drivers exist in the tree but are off in this device's config |
 
-`soc.args` is what `tools/soc-args.py` read out of the tree; `pull-soc.sh` makes it again from the phone on
-adb. The run scripts add it to the kernel command line. Where each argument comes from in the tree:
-`devices/redwood/README.md`.
+## Building
 
-## What is this phone's own
+```sh
+python3 tools/hakios-config.py defconfig mars mini touch perf
+make kernel                      # about 3 minutes
+(cd xnuloader && ./build.sh)     # loader.efi
+```
 
-The kernel, loader and user space know nothing about a phone: addresses, interrupts, rails and firmware
-come from its tree and its Android. What is written for one phone is the list below. The head of each file
-says where its numbers came from; that is the map of what to rewrite.
+`configs/mini.config` switches off the parts this port has not brought up, `configs/touch.config`
+turns on `CONFIG_HAKIOS_FOCALTECH` (the driver that speaks the ST protocol on this phone) and
+`configs/perf.config` turns on `CONFIG_HAKIOS_CPUFREQ`.
 
-- [ ] **UEFI**: the firmware that starts the loader: devices/redwood/uefi/ is a port of Mu-Silicium; the vendor's drivers are extracted from your own phone (uefi/README.md)
-- [ ] **Display, buttons, touch**: drivers/input/hakios.input.c, hakios.buttons.c, hakios.goodix.c (the reference phone's controller; another phone has another)
-- [ ] **Storage**: hakios.ufs.c and hakios.ufshc.c (UFS); a phone with eMMC needs another driver
-- [ ] **CPU clocks**: hakios.cpufreq.c
-- [ ] **GPU**: hakios.adreno.c (Adreno 642L here: another generation needs its own firmware and registers)
-- [ ] **Wi-Fi**: hakios.wifi.c, hakios.lx.c and wifi/lx/ (the WCN6750 radio of the reference phone)
-- [ ] **Audio and battery**: hakios.adsp.c, hakios.audio.c, hakios.sound.c, hakios.speaker.c, hakios.mic.c, hakios.battery.c
-- [ ] **Cellular**: hakios.mpss.c, hakios.qmi.c, hakios.nas.c, hakios.ipa.c, hakios.cell.c; soc.args carries the addresses, the IPA layout is for IPA 4.11 (docs/cellular.md)
-- [ ] **Haptics and cameras**: hakios.haptic.c, hakios.camera.c
+## Running
 
-## Configuration
+```sh
+export DEVICE=mars                   # xl defaults to redwood
+adb reboot bootloader
+./xl enter                           # the UEFI loader into RAM
+./xl ramdisk userland/system.apfs    # 2.3 GB resident system image, about 75 s
+XL_RAMDISK=userland/root.apfs XL_SECS=240 \
+XL_CMDLINE="debug=0x8 cpus=8 rd=md0 touchscreen=1 cpufreq=1" ./xl run
+```
 
-The kernel's settings are layered the way an Android kernel's are: the common kernel, the SoC's, this phone's
-(`docs/configs.md`). Two short files make this phone a configuration:
+Boot arguments that matter on this phone:
 
-    configs/mars.config          CONFIG_DEVICE="mars"   and whatever is true of this phone only
-    configs/mars_defconfig       #include common_defconfig
-                                   #include <the SoC's fragment: sc7280.config for the SC7280 family>
-                                   #include mars.config
-
-Then `make mars_defconfig`. Turn on only what this phone has been shown to do; `tools/hakios-config.py check` says what the
-choice needs.
-
-The drivers are part of the configuration too (`docs/drivers-config.md`): every one is built unless a configuration leaves it out,
-and the addresses, pins and rails in each are the reference phone's. Leave out in `configs/mars.config` what has not been
-ported to this phone yet (`# CONFIG_HAKIOS_GOODIX is not set`, ...; `configs/qemu_defconfig` leaves out all of them), and put
-each one back when it has been made to work here. `tools/hakios-config.py show` lists what is built in.
-
-## Firmware
-
-Pulled from your own phone, never committed: `devices/redwood/pull-firmware.sh`, or
-`pull-firmware-root.sh` where the firmware is readable by root only. Check with `make doctor`.
-
-## Before you open a pull request
-
-`tools/provenance-check.py` must pass: no vendor firmware, no UEFI drivers, no Apple files in the tree.
-
-## The repository
-
-A HakiOS device repository: what is true of this device and of no other. The kernel, the loader, the drivers and the tools are
-the common repository's; the lahaina family's facts are in `soc/`, carried with the device. How the three are put together:
-[docs/porting/repositories.md](https://github.com/oosexgang/hakios-xnu-kernel/blob/main/docs/porting/repositories.md).
-
-| File | What |
+| Argument | Why |
 |---|---|
-| `device.conf` | what the device is, and how far each part of it works: its page in the documentation is made from it |
-| `configs/mars_defconfig` | the common kernel, the SoC's fragment, this device's: `make mars_defconfig` |
-| `configs/mars.config` | what is this device's own: the drivers built in, the arguments it needs |
-| `soc/` | its SoC family's layer (lahaina): `soc.conf`, `configs/lahaina.config`, the SoC's drivers; carried here so that this one repository is all the device needs |
-| `drivers/` | drivers of its own, if it needs any (`drivers/<subsystem>/conf`, as in the common repository) |
+| `cpus=8` | all eight cores; the slower ones join about 28 s into the boot |
+| `cpufreq=1` | without it the A78/X1 stay at their lowest OPP and the UI runs at 7 fps instead of 18 |
+| `touchscreen=1` | the touch driver does nothing without it |
+| `touch_reset_ms=N` | how long the controller is given after reset (default 200 ms) |
+| `touch_bitbang=1` | drive the pads by hand instead of through the serial engine |
+| `adreno_nomeasure=1` | SM8350 has no usable GCC debug counter to check the GPU clock |
+| `quiet=1` | suppress periodic counters so the tail of the kernel log stays readable |
 
-Every phone driver of the common repository is left out to begin with: their addresses and pins are the phone they were written
-for. Put one back in `configs/mars.config` when it has been made to work here, and say so in `device.conf`.
+## Touch: what this phone actually has
 
-Check with `tools/hakios-device.py check mars`.
+The vendor device tree says `fts@0 { compatible = "st,spi" }` on `qupv3_se11_spi` (`spi@a8c000`):
+an **ST FingerTip FTM5**, not a FocalTech part, even though several Xiaomi trees call the driver
+folder `focaltech_spi`. Three things have to be right:
+
+1. **Reads use `0xFB`, writes use `0xFA`.** The I2C driver uses `0xFA` for both.
+2. **The chip starts in 3-wire SPI.** It must be told to use 4 wires, by writing five registers:
+   `0x20000032=0x10`, `0x20000034=0x02`, `0x2000003f=0x07`, `0x2000003d=0x30`, `0x2000002d=0x02`.
+3. **Do not system-reset it after that.** A reset puts it back into 3-wire mode, and the SPI
+   controller then reads back its own bytes instead of the chip's.
+
+The chip ID reads `36 39` (`DCHIP_ID_0` / `DCHIP_ID_1`). Events are 8 bytes: `0x13` enter, `0x23`
+motion, `0x33` leave; `x = ((e[3] & 0x0f) << 8) | e[2]`, `y = (e[4] << 4) | ((e[3] & 0xf0) >> 4)`.
+The FIFO has to be drained in bursts (`FTS_CMD_READONE_FIFO 0x87` + dummy + n x 8 bytes); one event
+per transfer leaves the queue standing still.
+
+## Known issues
+
+- **Home swipe is misread.** A swipe up from the bottom sometimes opens Control Center instead of
+  going home, and a swipe often needs a second try. During a drag the panel re-sends an *enter*
+  event (`0x13`) for every sample, with the x coordinate jumping, so the system sees a series of
+  taps rather than one finger. Under investigation.
+- **10-18 fps.** The compositor is CPU-bound: the GPU and the framebuffer driver are not the limit
+  (about 1.7 ms of GL and 5.8 ms of present per frame). Process-level CPU accounting is not working
+  yet, so the biggest consumer is still unknown.
+- **A run usually ends with the loader wedged in fastboot** (`fastboot devices` shows
+  `????????????`); a 15 s power-button hold recovers it. The loader's cold-reset path is being made
+  reliable.
+- **Logs are read off the screen.** After the kernel returns, the loader prints the last 64 KB of
+  the kernel log and waits 300 s, then cold-resets. USB is not available in that window.
+
+## Where the numbers come from
+
+- SoC layer: the phone's own device tree (`soc.args`, `soc/configs/lahaina.config`).
+- Panel, touch pins, rails: the vendor device tree, `mars-sm8350.dtsi` in LineageOS's SM8350 tree.
+- GPU: `fw-gpu/a660_*` from the phone's own firmware partition (not distributed here).
+- Touch protocol: `MiCode/Xiaomi_Kernel_OpenSource`, branch `star-r-oss`,
+  `drivers/input/touchscreen/fts_spi/`.
+
+## Thanks
+
+The device repository layout, the loader, the driver framework and the user space are the HakiOS
+project's. The display-out and Metal notes came from reading the [raphael port](https://github.com/HeliumStudio-Dev/hackios-xnu-kernel)
+and the [OnePlus 9 port](https://github.com/b1ackm4x/hackios-xnu-kernel); the USB/log and cold-reset
+lessons from [hakios-thyme-mi10s](https://github.com/Liquidation0619/hakios-thyme-mi10s). No code
+from those repositories is included in this tree.
