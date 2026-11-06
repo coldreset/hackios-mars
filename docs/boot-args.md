@@ -2,7 +2,7 @@
 
 Made by `tools/boot-args.py --markdown`; CI fails if it is out of date with the source (`tools/boot-args.py --check`).
 
-Every argument that the kernel, the loader or user space of this port reads, and which file reads it. **351 arguments**: 288 read by the kernel, 14 by the loader, 59 by user space (one is read in more than one place).
+Every argument that the kernel, the loader or user space of this port reads, and which file reads it. **352 arguments**: 289 read by the kernel, 14 by the loader, 59 by user space (one is read in more than one place).
 
 This is a catalogue of what exists and who reads it, not a manual. What an argument means is in the head of the file that reads it. The stable switches have a symbol in the configuration (`tools/hakios-config.py help SYMBOL`, `docs/configs.md`); the rest are the knobs of bring-up (a driver's steps, pauses, traces, test modes) and can change with the driver. Any of them can be given in a configuration with `CONFIG_BOOTARGS="name=value ..."`, which checks that each name is in this list.
 
@@ -396,7 +396,7 @@ Layers: **K** the kernel, **L** the loader, **U** user space (through `sysctl ke
 | `ufs` | L | `loader.c` | `CONFIG_UFS` |  |
 | `ufs_probe` | L | `loader.c` | `CONFIG_UFS_PROBE` |  |
 
-## User space (38)
+## User space (39)
 
 | Argument | Layer | Read by | Configuration | Set by |
 |---|---|---|---|---|
@@ -433,8 +433,9 @@ Layers: **K** the kernel, **L** the loader, **U** user space (through `sysctl ke
 | `touch_geniprobe` | K | `hakios.focaltech.c` | `CONFIG_TOUCH_GENIPROBE` |  |
 | `touch_panic_secs` | K | `hakios.focaltech.c` | `CONFIG_TOUCH_PANIC_SECS` |  |
 | `touch_reset_ms` | K | `hakios.focaltech.c` | `CONFIG_TOUCH_RESET_MS` |  |
+| `touch_selftest` | K | `hakios.focaltech.c` | `CONFIG_TOUCH_SELFTEST` |  |
 | `touch_trace` | K | `hakios.focaltech.c` | `CONFIG_TOUCH_TRACE` |  |
-| `touch_trap` | K | `hakios.focaltech.c` | `CONFIG_TOUCH_TRAP` |  |
+| `touch_watch` | K | `hakios.focaltech.c` | `CONFIG_TOUCH_WATCH` |  |
 | `touch_wd_se` | K | `hakios.focaltech.c` | `CONFIG_TOUCH_WD_SE` |  |
 | `var_hfs` | U | `init.c` | `CONFIG_VAR_HFS` |  |
 | `var_store` | U | `init.c` | `CONFIG_VAR_STORE` |  |

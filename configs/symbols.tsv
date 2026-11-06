@@ -257,9 +257,10 @@ TOUCH_PANIC_SECS	arg	touch_panic_secs	User space	k	hakios.focaltech.c
 TOUCH_POLL_US	arg	touch_poll_us	Touch and buttons	k	hakios.focaltech.c,hakios.goodix.c	
 TOUCH_RATE	arg	touch_rate	Touch and buttons	k	hakios.goodix.c	the chip reports twice as often (Xiaomi's game mode; 240 otherwise)
 TOUCH_RESET_MS	arg	touch_reset_ms	User space	k	hakios.focaltech.c	how long the chip gets to boot (vendor: 50 ms at least, 200 safe)
+TOUCH_SELFTEST	arg	touch_selftest	User space	k	hakios.focaltech.c	
 TOUCH_SPI_HZ	arg	touch_spi_hz	Touch and buttons	k	hakios.focaltech.c,hakios.goodix.c	the bus at N Hz (the device tree gives the chip 7 MHz)
 TOUCH_TRACE	arg	touch_trace	User space	k	hakios.focaltech.c	
-TOUCH_TRAP	arg	touch_trap	User space	k	hakios.focaltech.c	
+TOUCH_WATCH	arg	touch_watch	User space	k	hakios.focaltech.c	
 TOUCH_WD_SE	arg	touch_wd_se	User space	k	hakios.focaltech.c	
 UFS_BENCH	arg	ufs_bench	Storage and APFS	k	hakios.ufs.c	what one request through the loader costs, by size
 UFS_CHECK	arg	ufs_check	Storage and APFS	k	hakios.ufs.c	

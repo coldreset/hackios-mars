@@ -284,9 +284,10 @@ touch_panic_secs	k
 touch_poll_us	k
 touch_rate	k
 touch_reset_ms	k
+touch_selftest	k
 touch_spi_hz	k
 touch_trace	k
-touch_trap	k
+touch_watch	k
 touch_wd_se	k
 touchscreen	k
 ufs	l
