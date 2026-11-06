@@ -4069,9 +4069,9 @@ fb_command(char *cmd)
 						 * boot messages are what say whether the GPU was kept and GL loaded.
 						 */
 						static const char *const wanted[] = {
-							"hakios-gl: frame", "hakios-gl: after", "hakios: the server",
-							"hakios: no GPU", "frames in", "cpu 5s", "focaltech: gesture",
-							"touch screen ready", "hakios-gl: asked for string 0x1f01",
+							"frames in", "hakios: the server", "hakios: no GPU",
+							"touch screen ready", "MiniIOMobileFramebuffer: frame time",
+							"HakiosGPU:", "adreno: 17:", "the speed wanted",
 						};
 						static uint32_t at_line[4096];
 						const char *klog = (const char *)loader_ctx[CTX_LOG_PA];
