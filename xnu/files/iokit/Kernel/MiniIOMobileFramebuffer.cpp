@@ -193,8 +193,8 @@ panel_thread_start(thread_continue_t continuation, void * parameter, thread_t * 
 	}
 	return kernel_thread_start(continuation, parameter, thread);
 }
-#define SWAP_QUEUE              2                       /* frames that may wait for the panel at most (fb_queue) */
-static TUNABLE(uint32_t, gQueue, "fb_queue", 2);
+#define SWAP_QUEUE              3                       /* frames that may wait for the panel at most (fb_queue) */
+static TUNABLE(uint32_t, gQueue, "fb_queue", 3);
 static inline unsigned
 swapQueue(void)
 {
@@ -337,6 +337,10 @@ public:
 	uint32_t        fStatHeld, fStatLost;   /* swaps that waited for the one before; that gave up waiting */
 	uint64_t        fSwapTime;              /* when the last swap was handed over */
 	uint32_t        fStatSwapsLate;         /* swaps that came more than a refresh and a quarter after the one before (and no pause) */
+
+	/* HAKIOS: where a frame's time goes (asked for: measure before changing the display path) */
+	uint64_t        fTimeCount, fTimePresent, fTimePresentMax, fTimeWaitSlot, fTimeCopy, fTimeSurf;
+	uint64_t        fTimePrev, fTimeGap, fTimeFetch, fTimeFetchMax, fTimePresentWait;
 	uint64_t        fStatWaiting;           /* how long frames waited for the GPU here */
 	/* how the display is doing: frames and time spent drawing them here since fStatSince */
 	uint32_t        fStatFrames;
@@ -1032,7 +1036,7 @@ IOMobileFramebuffer::present(const uint8_t * swap)
 {
 	AbsoluteTime deadline;
 
-	uint64_t now = mach_absolute_time(), period, pause;
+	uint64_t now = mach_absolute_time(), enter = now, period, pause;
 
 	/* (a frame that is late on the panel was late here already, or it was not: for telling whose it is) */
 	nanoseconds_to_absolutetime(NSEC_PER_SEC / refreshHz() * 5 / 4, &period);
@@ -1053,13 +1057,39 @@ IOMobileFramebuffer::present(const uint8_t * swap)
 			return;
 		}
 	}
+	{
+		uint64_t ns;
+
+		absolutetime_to_nanoseconds(mach_absolute_time() - enter, &ns);
+		fTimeWaitSlot += ns / 1000;
+	}
 	unsigned slot = (fSwapFirst + fSwapsWaiting) % SWAP_QUEUE;
 
+	uint64_t t_copy = mach_absolute_time(), t_surf;
+
 	memcpy(fSwap[slot], swap, SWAP_SIZE);
+	t_surf = mach_absolute_time();
 	for (unsigned layer = 0; layer < SWAP_LAYERS; layer++) {
 		uint32_t sid = swapWord(swap, SWAP_SURFACE(layer));
 
 		fSwapSurfaces[slot][layer] = sid != 0 ? MiniIOSurfaceCopy(sid) : NULL;
+	}
+	{
+		uint64_t ns;
+
+		absolutetime_to_nanoseconds(t_surf - t_copy, &ns);
+		fTimeCopy += ns / 1000;
+		absolutetime_to_nanoseconds(mach_absolute_time() - t_surf, &ns);
+		fTimeSurf += ns / 1000;
+		absolutetime_to_nanoseconds(now - enter, &ns);
+		fTimePresent += ns / 1000;
+		fTimePresentMax = MAX(fTimePresentMax, ns / 1000);
+		fTimeCount++;
+		if (fTimePrev != 0) {
+			absolutetime_to_nanoseconds(now - fTimePrev, &ns);
+			fTimeGap += ns / 1000;
+		}
+		fTimePrev = now;
 	}
 	fSwapsWaiting++;
 	IOLockWakeup(fSwapLock, fSwap, true);
@@ -1080,6 +1110,8 @@ IOMobileFramebuffer::presenter(void)
 	bool unsettled = false;                 /* the frame on the panel was drawn unfiltered, and its surfaces are held */
 
 	for (;;) {
+		uint64_t woke = mach_absolute_time();
+
 		IOLockLock(fSwapLock);
 		while (fSwapsWaiting == 0) {
 			uint64_t deadline;
@@ -1096,6 +1128,12 @@ IOMobileFramebuffer::presenter(void)
 				IOLockLock(fSwapLock);
 			}
 		}
+		{
+			uint64_t ns;
+
+			absolutetime_to_nanoseconds(mach_absolute_time() - woke, &ns);
+			fTimePresentWait += ns / 1000;
+		}
 		IOLockUnlock(fSwapLock);
 		/* the frame before is done with now, settled or not */
 		for (unsigned layer = 0; layer < SWAP_LAYERS; layer++) {
@@ -1104,11 +1142,34 @@ IOMobileFramebuffer::presenter(void)
 				surfaces[layer] = NULL;
 			}
 		}
+		uint64_t fetch = mach_absolute_time();
+
 		IOLockLock(fSwapLock);
 		memcpy(swap, fSwap[fSwapFirst], SWAP_SIZE);
 		memcpy(surfaces, fSwapSurfaces[fSwapFirst], sizeof(surfaces));
 		IOLockUnlock(fSwapLock);
-		show(swap, surfaces);
+		{
+			uint64_t ns;
+
+			absolutetime_to_nanoseconds(mach_absolute_time() - fetch, &ns);
+			fTimeFetch += ns / 1000;
+			fTimeFetchMax = MAX(fTimeFetchMax, ns / 1000);
+		}
+			show(swap, surfaces);
+		{ static int quiet = -1; if (quiet < 0) { quiet = 0; PE_parse_boot_argn("quiet", &quiet, sizeof(quiet)); }
+		  if (quiet) { fTimeCount = 0; goto frame_time_done; } }
+		if (fTimeCount >= 40) {
+			uint64_t gaps = fTimeCount > 0 ? fTimeGap / (fTimeCount - 1) : 0;
+
+			IOLog("MiniIOMobileFramebuffer: frame time: %llu frames, gap %llu us, present %llu us (max %llu), "
+			    "of it slot wait %llu + copy %llu + surfaces %llu; presenter waited %llu us, fetched %llu us (max %llu)\n",
+			    fTimeCount, gaps, fTimePresent / fTimeCount, fTimePresentMax, fTimeWaitSlot / fTimeCount,
+			    fTimeCopy / fTimeCount, fTimeSurf / fTimeCount, fTimePresentWait / fTimeCount,
+			    fTimeFetch / fTimeCount, fTimeFetchMax);
+			fTimeCount = fTimePresent = fTimePresentMax = fTimeWaitSlot = fTimeCopy = fTimeSurf = 0;
+			fTimeGap = fTimePresentWait = fTimeFetch = fTimeFetchMax = 0;
+		}
+frame_time_done: ;
 		unsettled = gFilter == 2;
 		if (!unsettled) {
 			for (unsigned layer = 0; layer < SWAP_LAYERS; layer++) {
@@ -1287,7 +1348,7 @@ IOMobileFramebuffer::show(const uint8_t * swap, MiniIOSurface ** surfaces)
 		fStatSince = began;
 	}
 	absolutetime_to_nanoseconds(mach_absolute_time() - fStatSince, &nanos);
-	if (nanos >= 5 * NSEC_PER_SEC) {
+	if (nanos >= 120 * NSEC_PER_SEC) {
 		uint64_t drawing, waiting, beat;
 		unsigned different;
 
