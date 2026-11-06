@@ -3198,7 +3198,7 @@ hakios_adreno_quiesce(void)
 #define EVENT_INVALIDATE_DEPTH  0x18
 #define EVENT_INVALIDATE_COLOR  0x19
 
-static uint32_t gpu_recover;            /* boot-arg gpu_recover=1: a core that has stopped answering is reset and given work again */
+static uint32_t gpu_recover = 1;        /* boot-arg gpu_recover=1: a core that has stopped answering is reset and given work again */
 static uint32_t gpu_recoveries;         /* ... and how many times that has been done in this run */
 #define GPU_RECOVERIES  8
 static bool gpu_kept;

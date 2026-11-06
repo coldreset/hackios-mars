@@ -538,7 +538,7 @@ HakiosGPUUserClient::freeBuffer(struct gpu_buffer * slot)
 	bool busy = hakios_gpu_ready() && b->fence != 0 && !hakios_gpu_done(b->fence);
 
 	if (busy && fLeftCount == GPU_LEFT) {
-		busy = !gpuWait(b->fence, 1000);        /* (nowhere to keep it: this one is waited for) */
+		busy = !gpuWait(b->fence, 250);        /* (nowhere to keep it: this one is waited for) */
 	}
 	if (busy && fLeftCount < GPU_LEFT) {
 		struct gpu_left * left = &fLeft[fLeftCount++];
@@ -615,7 +615,7 @@ HakiosGPUUserClient::clientClose(void)
 		IOLockLock(gGPULock);
 		/* what the client had the GPU do last may still be going on, in these buffers */
 		if (hakios_gpu_ready()) {
-			gpuWait(hakios_gpu_last(), 1000);
+			gpuWait(hakios_gpu_last(), 250);
 		}
 		for (uint32_t i = 0; i < GPU_BUFFERS; i++) {
 			if (fBuffers[i].memory != NULL) {
