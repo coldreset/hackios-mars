@@ -3366,6 +3366,12 @@ run_kernel(int have_checkpoint, uint64_t checkpoint)
 
 	/* the product: screen class, artwork scale, name ... as on the real phone */
 	dt_begin(&w, "product");
+	/* HAKIOS: with the placeholder identity (mkidentity.sh not run) this node would be empty and
+	 * Darwin would take the machine for a phone with a home button. These two at least name it;
+	 * the shape of the screen -- notch, thin bezel, no home button -- comes from the identity
+	 * header, which has to be made from the IPSW the user space came from. */
+	dt_prop_str(&w, "target-type", "D22AP");
+	dt_prop_str(&w, "product-type", "iPhone10,3");
 	dt_identity(&w, identity_product, sizeof(identity_product) / sizeof(identity_product[0]), identity_product_data);
 	/*
 	 * and its haptics: "closed-loop" (MobileGestalt's DeviceSupportsClosedLoopHaptics) makes Darwin play

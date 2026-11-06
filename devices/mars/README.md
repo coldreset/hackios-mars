@@ -28,7 +28,7 @@ Everything else the kernel needs comes from `devices/mars/configs/mars.config` a
 |---|---|---|
 | boot chain | works | the loader comes up in RAM and hands over to XNU |
 | display | works | 1440x3200 through the loader's framebuffer; drawn by the GPU |
-| touch | works | ST FingerTip FTM5 on `qupv3_se11_spi`; taps land where you tap, drags register (gesture classification is still rough, see Known issues) |
+| touch | works | ST FingerTip FTM5 on `qupv3_se11_spi`; taps land where you tap, drags and the home / app-switcher swipe work |
 | cpu | works | all 8 cores (`cpus=8`); the A78/X1 cores sit at their top OPP with `cpufreq=1` |
 | gpu | works | Adreno 660, all 21 bring-up steps pass; OpenGL ES through Mesa freedreno (`gpu=1 adreno_nomeasure=1 gl=1`) |
 | storage | read only | the system image is resident in RAM; `var_store` / UFS writes are not enabled yet |
@@ -39,8 +39,15 @@ Everything else the kernel needs comes from `devices/mars/configs/mars.config` a
 ```sh
 python3 tools/hakios-config.py defconfig mars mini touch perf
 make kernel                      # about 3 minutes
-(cd xnuloader && ./build.sh)     # loader.efi
+(cd xnuloader && ./mkidentity.sh /path/to/iPhone10,3_16.5_20F66_Restore.ipsw && ./build.sh)
 ```
+
+`mkidentity.sh` lifts the `/product` node out of the device tree inside the IPSW -- on this phone
+61 properties, among them `thin-bezel`, `oled-display` and `artwork-device-idiom`. Without it the
+loader builds with a placeholder identity, and Darwin then reads the machine as an older phone with
+a home button: **no home indicator, and a swipe up from the bottom brings up Control Center instead
+of the home screen.** Nothing from Apple is downloaded or committed; the header stays out of the
+tree (`.gitignore`).
 
 `configs/mini.config` switches off the parts this port has not brought up, `configs/touch.config`
 turns on `CONFIG_HAKIOS_FOCALTECH` (the driver that speaks the ST protocol on this phone) and
@@ -84,16 +91,18 @@ folder `focaltech_spi`. Three things have to be right:
    controller then reads back its own bytes instead of the chip's.
 
 The chip ID reads `36 39` (`DCHIP_ID_0` / `DCHIP_ID_1`). Events are 8 bytes: `0x13` enter, `0x23`
-motion, `0x33` leave; `x = ((e[3] & 0x0f) << 8) | e[2]`, `y = (e[4] << 4) | ((e[3] & 0xf0) >> 4)`.
+motion, `0x33` leave -- and the id is the **high nibble** of the first byte, so during a drag the
+panel keeps sending enters and that is normal; the low nibble carries the touch count.
+`x = ((e[3] & 0x0f) << 8) | e[2]`, `y = (e[4] << 4) | ((e[3] & 0xf0) >> 4)`.
 The FIFO has to be drained in bursts (`FTS_CMD_READONE_FIFO 0x87` + dummy + n x 8 bytes); one event
 per transfer leaves the queue standing still.
 
 ## Known issues
 
-- **Home swipe is misread.** A swipe up from the bottom sometimes opens Control Center instead of
-  going home, and a swipe often needs a second try. During a drag the panel re-sends an *enter*
-  event (`0x13`) for every sample, with the x coordinate jumping, so the system sees a series of
-  taps rather than one finger. Under investigation.
+- **The identity has to be built in.** Without `xnuloader/mkidentity.sh` the phone is taken for a
+  home-button model: no home indicator, and a swipe up from the bottom opens Control Center. The
+  touch pipeline itself was never at fault -- the panel reports one finger from the bottom edge up
+  the screen, and the driver posts it sample by sample.
 - **10-18 fps.** The compositor is CPU-bound: the GPU and the framebuffer driver are not the limit
   (about 1.7 ms of GL and 5.8 ms of present per frame). Process-level CPU accounting is not working
   yet, so the biggest consumer is still unknown.
