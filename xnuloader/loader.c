@@ -4070,8 +4070,9 @@ fb_command(char *cmd)
 						 */
 						static const char *const wanted[] = {
 							"hakios-gl", "hakios: the server", "hakios: no GPU", "hakios: gl=",
-							"HakiosGPU", "frames in", "frame time", "from one frame to the next", "cpu 5s", "focaltech: gesture",
-							"touch screen ready", "adreno: gpu:", "THE 3D CORE", "tl: ",
+							"HakiosGPU", "frames in", "frame time", "from one frame to the next",
+							"cpu 5s", "focaltech: gesture", "touch screen ready", "adreno: gpu:",
+							"THE 3D CORE", "exited with", "census: ", "no program",
 						};
 						static uint32_t at_line[4096];
 						const char *klog = (const char *)loader_ctx[CTX_LOG_PA];
