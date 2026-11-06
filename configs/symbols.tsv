@@ -97,6 +97,7 @@ FBTRACE	arg	fbtrace	GPU and display	k	MiniIOMobileFramebuffer.cpp	log the first 
 FBWIDTH	arg	fbwidth	GPU and display	k	MiniIOMobileFramebuffer.cpp	
 GAMUT	arg	gamut	Loader	l	loader.c	
 GL	arg	gl	User space	u	inject.c,inject_sb.c	not even with a GPU; gl=1: also without one, by Mesa's software driver (slow; for working on eagl.c in QEMU)
+GLBIN	arg	glbin	GPU and display	u	eagl.c	
 GLBLIT	arg	glblit	GPU and display	u	eagl.c	the surface's memory, as before
 GLCENSUS	arg	glcensus	GPU and display	u	eagl.c	
 GLCOMPILE	arg	glcompile	User space	u	inject.c	
@@ -134,6 +135,7 @@ GLWAIT	arg	glwait	GPU and display	u	eagl.c
 GLYES	arg	glyes	User space	u	inject.c	the renderer is made to answer that it has those functions after all
 GPU_CACHED	arg	gpu_cached	GPU and display	k	hakios.gpu.cpp	
 GPU_EXACT	arg	gpu_exact	GPU and display	k	hakios.adreno.c	
+GPU_FLUSH	arg	gpu_flush	GPU and display	k	hakios.adreno.c	
 GPU_KEEP	arg	gpu_keep	GPU and display	k	hakios.gpu.cpp	
 GPU_LOG	arg	gpu_log	GPU and display	k	hakios.adreno.c	
 GPU_RECOVER	arg	gpu_recover	GPU and display	k	hakios.adreno.c	the 3D core is put back where step 20 and step 21 left it, and everything it had been given is given up, so that the next submission is its own again

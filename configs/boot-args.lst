@@ -106,6 +106,7 @@ fbtrace	k
 fbwidth	k
 gamut	l
 gl	u
+glbin	u
 glblit	u
 glcensus	u
 glcompile	u
@@ -144,6 +145,7 @@ glyes	u
 gpu	k
 gpu_cached	k
 gpu_exact	k
+gpu_flush	k
 gpu_keep	k
 gpu_log	k
 gpu_recover	k
