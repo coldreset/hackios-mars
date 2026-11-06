@@ -58,6 +58,7 @@ uint32_t hakios_gpu_submit(const uint64_t * addresses, const uint32_t * words, u
 extern uint32_t gpu_log;
 bool hakios_gpu_done(uint32_t fence);
 uint32_t hakios_gpu_last(void);
+uint32_t hakios_gpu_core(void);
 void hakios_gpu_worked(uint64_t * microseconds, uint32_t * submissions, uint32_t by[7]);
 void hakios_gpu_report(const char * why);
 void hakios_gpu_stop(void);
@@ -185,6 +186,11 @@ static struct {
 	uint64_t making;                        /* ... and the time it took to make the others */
 } gGPUStat;
 
+extern uint32_t gpu_ring_full;                  /* from hakios.adreno.c */
+static uint32_t gRingFullLast;
+static bool gSlowPrinted;
+static bool gLockPrinted;
+
 /* Wait for the 3D core to be done with submission `fence`; with the lock held, which is let go of while waiting. */
 static bool
 gpuWait(uint32_t fence, uint64_t milliseconds)
@@ -195,8 +201,17 @@ gpuWait(uint32_t fence, uint64_t milliseconds)
 	for (bool waited = false;; waited = true) {
 		if (hakios_gpu_done(fence)) {
 			if (waited) {
+				uint64_t took = mach_absolute_time() - began, ns;
+
+				absolutetime_to_nanoseconds(took, &ns);
 				gGPUStat.waits++;
-				gGPUStat.waiting += mach_absolute_time() - began;
+				gGPUStat.waiting += took;
+				/* the first slow one, with both numbers: is the core behind, or is the word stale? */
+				if (ns > 5 * NSEC_PER_MSEC && !gSlowPrinted) {
+					gSlowPrinted = true;
+					IOLog("HakiosGPU: a wait of %llu us for submission %u: the core has done %u of %u\n",
+					    ns / NSEC_PER_USEC, fence, hakios_gpu_core(), hakios_gpu_last());
+				}
 			}
 			return true;
 		}
@@ -221,7 +236,15 @@ MiniIOSurfaceDrawn(MiniIOSurface * surface, uint64_t milliseconds)
 	bool done = true;
 
 	if (fence != 0 && gGPULock != NULL) {
+		uint64_t lockBegan = mach_absolute_time(), taken, ns;
+
 		IOLockLock(gGPULock);
+		taken = mach_absolute_time() - lockBegan;
+		absolutetime_to_nanoseconds(taken, &ns);
+		if (ns > 5 * NSEC_PER_MSEC && !gLockPrinted) {
+			gLockPrinted = true;
+			IOLog("HakiosGPU: the presenter waited %llu us for the lock, not for the core\n", ns / NSEC_PER_USEC);
+		}
 		done = !hakios_gpu_ready() || gpuWait(fence, milliseconds);
 		IOLockUnlock(gGPULock);
 	}
@@ -506,6 +529,10 @@ HakiosGPUUserClient::freeBuffer(struct gpu_buffer * slot)
 			}
 			if (said++ < 8) {
 				IOLog("HakiosGPU: the GPU is not done with what it was given: a buffer of %llu bytes stays its own\n", b->size);
+				if (!gGPUReported) {
+					gGPUReported = true;
+					hakios_gpu_report("a submission has not come back");
+				}
 			}
 		} else if (b->surface == NULL && hakios_gpu_ready() && keep(b->memory, b->kernel, b->address, b->size, b->flags)) {
 			b->memory = NULL;               /* (now the kept one's) */
@@ -1032,6 +1059,9 @@ HakiosGPUUserClient::submit(struct msm_gem_submit * request)
 		    gGPUStat.waits, gGPUStat.waits ? waiting / NSEC_PER_USEC / gGPUStat.waits : 0, gGPUStat.over,
 		    gGPUStat.surfaces, gGPUStat.surfaces ? taking / NSEC_PER_USEC / gGPUStat.surfaces : 0, fBufferCount,
 		    fBufferBytes >> 20);
+		IOLog("HakiosGPU: the ring was full for %u submissions; the core is at %u of %u\n",
+		    gpu_ring_full - gRingFullLast, hakios_gpu_last(), 0u);
+		gRingFullLast = gpu_ring_full;
 		bzero(&gGPUStat, sizeof(gGPUStat));
 	}
 	IOLockUnlock(gGPULock);

@@ -3196,6 +3196,8 @@ hakios_adreno_quiesce(void)
 
 static bool gpu_kept;
 static uint32_t gpu_fence;              /* the number of the last submission */
+uint32_t gpu_ring_full;                 /* submissions refused because the ring had no room */
+static bool gpu_ring_reported;
 static uint32_t gpu_timed;              /* ... of the last whose times have been added up */
 static uint64_t gpu_ticks;              /* how long the core has worked on the submissions added up */
 static uint32_t gpu_timed_count;
@@ -3404,6 +3406,16 @@ hakios_gpu_last(void)
 	return gpu_fence;
 }
 
+/* What the core itself says it has finished: the word it writes at the end of a submission. */
+uint32_t
+hakios_gpu_core(void)
+{
+	volatile uint32_t *word = (volatile uint32_t *)(core_scratch.memory + GPU_FENCE_AT);
+
+	to_memory((vm_offset_t)word, 4);
+	return *word;
+}
+
 /* The core is to write down what time it is: at one end of submission `fence`. */
 static void
 ring_time(uint32_t fence, uint32_t end)
@@ -3470,6 +3482,8 @@ hakios_gpu_worked(uint64_t *microseconds, uint32_t *submissions, uint32_t by[7])
  * Linux's a6xx_submit puts them in the ring. Returns the submission's number; 0: the ring is
  * full and the core is not reading it.
  */
+void hakios_gpu_report(const char *why);
+
 uint32_t
 hakios_gpu_submit(const uint64_t *addresses, const uint32_t *words, uint32_t count)
 {
@@ -3483,6 +3497,11 @@ hakios_gpu_submit(const uint64_t *addresses, const uint32_t *words, uint32_t cou
 		sleep_us(100);
 	}
 	if (room < wanted) {
+		gpu_ring_full++;
+		if (!gpu_ring_reported) {
+			gpu_ring_reported = true;
+			hakios_gpu_report("the ring is full and the core is not reading it");
+		}
 		return 0;
 	}
 	gpu_times();
@@ -3503,13 +3522,13 @@ hakios_gpu_submit(const uint64_t *addresses, const uint32_t *words, uint32_t cou
 	if (gpu_exact) {
 		ring_command(CP_WAIT_FOR_IDLE, 0);      /* the time is the pipeline's, not the command processor's, which is ahead of it */
 	}
-	ring_time(gpu_fence, 1);
 	ring_register(CP_SCRATCH_REG2, gpu_fence);
 	ring_command(CP_EVENT_WRITE, 4);
 	ring(EVENT_CACHE_FLUSH);
 	ring(CORE_SCRATCH_ADDRESS + GPU_FENCE_AT);
 	ring(0);
 	ring(gpu_fence);
+	ring_time(gpu_fence, 1);                /* after the cache flush: what it costs is part of the submission */
 	ring_send();
 	return gpu_fence;
 }
@@ -3520,12 +3539,12 @@ hakios_gpu_report(const char *why)
 {
 	uint32_t context = smmu_context(&core_space);
 
-	printf("adreno: gpu: %s: submission %u is the last, the core has done %u; ring: read up to %u, written up to %u; status "
+	printf("HakiosGPU: stuck: %s: submission %u is the last, the core has done %u; ring: read up to %u, written up to %u; status "
 	    "%#x, interrupts %#x; command processor: fault %#x, interrupts %#x, protection %#x\n", why, gpu_fence,
 	    *(volatile uint32_t *)(core_scratch.memory + GPU_FENCE_AT), rd(gpu.base + CP_RB_RPTR), ring_at,
 	    rd(gpu.base + RBBM_STATUS), rd(gpu.base + RBBM_INT_0_STATUS), rd(gpu.base + CP_HW_FAULT),
 	    rd(gpu.base + CP_INTERRUPT_STATUS), rd(gpu.base + CP_PROTECT_STATUS));
-	printf("adreno: gpu:   in the first command buffer at %#llx, %u words to go; in the second at %#llx, %u to go\n",
+	printf("HakiosGPU: stuck:   in the first command buffer at %#llx, %u words to go; in the second at %#llx, %u to go\n",
 	    (uint64_t)rd(gpu.base + CP_IB1_BASE + 4) << 32 | rd(gpu.base + CP_IB1_BASE), rd(gpu.base + CP_IB1_REM_SIZE),
 	    (uint64_t)rd(gpu.base + CP_IB2_BASE + 4) << 32 | rd(gpu.base + CP_IB2_BASE), rd(gpu.base + CP_IB2_REM_SIZE));
 	step = 0;
