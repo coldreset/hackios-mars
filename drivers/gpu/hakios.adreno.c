@@ -3302,7 +3302,12 @@ hakios_gpu_recover(void)
 		return false;
 	}
 	if (gpu_recoveries >= GPU_RECOVERIES) {
-		printf("adreno: gpu: the 3D core has been recovered %u times in this run already: no more\n", gpu_recoveries);
+		static uint32_t said;
+
+		if (said == 0) {                        /* (once: the waits that follow are not more news) */
+			said = 1;
+			printf("adreno: gpu: the 3D core has been recovered %u times in this run already: no more\n", gpu_recoveries);
+		}
 		return false;
 	}
 	{
@@ -3636,6 +3641,20 @@ hakios_gpu_submit(const uint64_t *addresses, const uint32_t *words, uint32_t cou
 	return gpu_fence;
 }
 
+/* The sixteen ring words from where the core has stopped: the command it is on. */
+void
+hakios_gpu_ring_dump(const char * tag)
+{
+	uint32_t at = rd(gpu.base + CP_RB_RPTR) % RING_WORDS;
+	volatile uint32_t * words = (volatile uint32_t *) core_ring.memory;
+
+	printf("HakiosGPU: stuck: %s ring from %u (written up to %u):", tag, at, ring_at % RING_WORDS);
+	for (unsigned i = 0; i < 16; i++) {
+		printf(" %08x", words[(at + i) % RING_WORDS]);
+	}
+	printf("\n");
+}
+
 /* A submission does not come back: what the 3D core and its SMMU context say. */
 void
 hakios_gpu_report(const char *why)
@@ -3647,16 +3666,8 @@ hakios_gpu_report(const char *why)
 	    *(volatile uint32_t *)(core_scratch.memory + GPU_FENCE_AT), rd(gpu.base + CP_RB_RPTR), ring_at,
 	    rd(gpu.base + RBBM_STATUS), rd(gpu.base + RBBM_INT_0_STATUS), rd(gpu.base + CP_HW_FAULT),
 	    rd(gpu.base + CP_INTERRUPT_STATUS), rd(gpu.base + CP_PROTECT_STATUS));
-	{
-		uint32_t at = rd(gpu.base + CP_RB_RPTR) % RING_WORDS;
-		volatile uint32_t *words = (volatile uint32_t *) core_ring.memory;
-
-		printf("HakiosGPU: stuck:   the ring, 16 words from %u (written up to %u):", at, ring_at % RING_WORDS);
-		for (unsigned i = 0; i < 16; i++) {
-			printf(" %08x", words[(at + i) % RING_WORDS]);
-		}
-		printf("\n");
-	}
+	hakios_gpu_ring_dump("  ");
+	hakios_gpu_ring_dump("(again, last)");
 	printf("HakiosGPU: stuck:   in the first command buffer at %#llx, %u words to go; in the second at %#llx, %u to go\n",
 	    (uint64_t)rd(gpu.base + CP_IB1_BASE + 4) << 32 | rd(gpu.base + CP_IB1_BASE), rd(gpu.base + CP_IB1_REM_SIZE),
 	    (uint64_t)rd(gpu.base + CP_IB2_BASE + 4) << 32 | rd(gpu.base + CP_IB2_BASE), rd(gpu.base + CP_IB2_REM_SIZE));

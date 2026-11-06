@@ -62,6 +62,7 @@ uint32_t hakios_gpu_last(void);
 uint32_t hakios_gpu_core(void);
 void hakios_gpu_worked(uint64_t * microseconds, uint32_t * submissions, uint32_t by[7]);
 void hakios_gpu_report(const char * why);
+void hakios_gpu_ring_dump(const char * tag);
 void hakios_gpu_stop(void);
 
 void HakiosGPUStart(void);
@@ -1093,6 +1094,16 @@ HakiosGPUUserClient::submit(struct msm_gem_submit * request)
 		IOLog("HakiosGPU: the ring was full for %u submissions; the core is at %u of %u\n",
 		    gpu_ring_full - gRingFullLast, hakios_gpu_last(), 0u);
 		gRingFullLast = gpu_ring_full;
+		{
+			static uint32_t was = ~0u;
+			uint32_t now = hakios_gpu_last();
+
+			if (now == was && gpu_ring_full != 0) {
+				/* (once every five seconds while it does not move: the last one is the end of the log) */
+				hakios_gpu_ring_dump("still");
+			}
+			was = now;
+		}
 		bzero(&gGPUStat, sizeof(gGPUStat));
 	}
 	IOLockUnlock(gGPULock);
