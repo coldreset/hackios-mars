@@ -944,27 +944,45 @@ HakiosGPUUserClient::submit(struct msm_gem_submit * request)
 	 */
 	began = mach_absolute_time();
 	nanoseconds_to_absolutetime(GPU_PUSH_AGAIN_MS * NSEC_PER_MSEC, &again);
-	for (uint32_t i = 0; i < request->nr_bos; i++) {
-		struct gpu_buffer * b = buffer(bos[i].handle);
+	{
+		void *    flush[GPU_BUFFERS];
+		uint64_t  sizes[GPU_BUFFERS];
+		uint32_t  flushing = 0;
 
-		if (b == NULL) {
-			continue;
-		}
-		if (b->surface != NULL) {
-			uint32_t seed = b->surface->shared()->seed;
+		for (uint32_t i = 0; i < request->nr_bos && flushing < GPU_BUFFERS; i++) {
+			struct gpu_buffer * b = buffer(bos[i].handle);
 
-			if (seed == b->seed && !b->seen && began - b->pushed < again) {
+			if (b == NULL) {
 				continue;
 			}
-			b->seed = seed;
-			b->pushed = began;
-		} else if (!b->seen || !gGPUCached) {
-			continue;
+			if (b->surface != NULL) {
+				uint32_t seed = b->surface->shared()->seed;
+
+				if (seed == b->seed && !b->seen && began - b->pushed < again) {
+					continue;
+				}
+				b->seed = seed;
+				b->pushed = began;
+			} else if (!b->seen || !gGPUCached) {
+				continue;
+			}
+			flush[flushing] = b->kernel;
+			sizes[flushing] = b->size;
+			flushing++;
 		}
-		hakios_gpu_to_memory(b->kernel, b->size);
-		gGPUStat.flushed += b->size;
+		/*
+		 * Putting a whole surface out of this processor's cache is some thirty thousand
+		 * instructions, and the presenter waits for the lock this is taken under: out of the
+		 * lock they go, so a frame drawn into an 11 MB surface does not stop the screen.
+		 */
+		IOLockUnlock(gGPULock);
+		for (uint32_t i = 0; i < flushing; i++) {
+			hakios_gpu_to_memory(flush[i], sizes[i]);
+			gGPUStat.flushed += sizes[i];
+		}
+		hakios_gpu_to_memory(NULL, 0);                 /* (and what was written last is in memory: a barrier) */
+		IOLockLock(gGPULock);
 	}
-	hakios_gpu_to_memory(NULL, 0);                 /* (and what was written last is in memory: a barrier) */
 	gGPUStat.flushing += mach_absolute_time() - began;
 	gGPUStat.buffers += request->nr_bos;
 	for (uint32_t i = 0; i < request->nr_cmds; i++) {
