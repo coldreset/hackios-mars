@@ -4064,43 +4064,38 @@ fb_command(char *cmd)
 					print("usb: the kernel is back; cold resetting the machine\n");
 					{
 						/*
-						 * Only the interesting lines: the whole log does not fit on the screen and
-						 * the adreno steps alone are thousands of lines. A line is kept when it
-						 * holds one of these, cut to 220 characters.
+						 * Only the interesting lines, the first ones and the last ones: the screen
+						 * scrolls, so a dump that runs to the end hides the boot messages, and the
+						 * boot messages are what say whether the GPU was kept and GL loaded.
 						 */
 						static const char *const wanted[] = {
 							"hakios", "frame time", "frames in", "cpu 5s", "cpu busy",
-							"process cpu", "focaltech: gesture", "focaltech: seen", "touch screen ready",
+							"process cpu", "focaltech: gesture", "touch screen ready",
 						};
+						static uint32_t at_line[4096];
 						const char *klog = (const char *)loader_ctx[CTX_LOG_PA];
 						uint64_t klog_len = loader_ctx[CTX_LOG_LEN];
 						uint64_t start = klog_len > (1u << 20) ? klog_len - (1u << 20) : 0;
-						uint64_t kept = 0;
+						uint64_t at = start, lines = 0, head, tail, i;
 
-						print("\n== THE KERNEL LOG, INTERESTING LINES ONLY (%d of %d) ==\n", 0, klog_len - start);
+						print("\n== THE KERNEL LOG: INTERESTING LINES, FIRST AND LAST ==\n");
 						if (klog != NULL && klog_len > 0 && klog_len <= (1u << 20)) {
-							uint64_t at = start;
-
 							while (at < klog_len) {
 								uint64_t end = at, n = 0;
 								int keep = 0;
 								char line[224];
 
 								while (end < klog_len && klog[end] != '\n') {
-									uint64_t i, j;
-
 									if (n < sizeof(line) - 1) {
 										line[n++] = klog[end];
 									}
 									for (i = 0; i < sizeof(wanted) / sizeof(wanted[0]) && !keep; i++) {
-										uint64_t len = 0;
+										uint64_t len = 0, j, k;
 
 										while (wanted[i][len] != 0) {
 											len++;
 										}
 										for (j = 0; j + len <= n; j++) {
-											uint64_t k;
-
 											for (k = 0; k < len && line[j + k] == wanted[i][k]; k++) {
 											}
 											if (k == len) {
@@ -4111,21 +4106,32 @@ fb_command(char *cmd)
 									}
 									end++;
 								}
-								if (keep) {
-									for (uint64_t i = 0; i < n; i++) {
-										put_char(line[i]);
-									}
-									put_char('\n');
-									BS->stall(20000);
-									wdt_pet();
-									kept++;
+								if (keep && lines < sizeof(at_line) / sizeof(at_line[0])) {
+									at_line[lines++] = (uint32_t)at;
 								}
 								at = end + 1;
 							}
 						}
-						print("== %d lines of the kernel log, of %d bytes ==\n", kept, klog_len - start);
-						print("\n== END OF LOG: the machine cold resets now ==\n");
+						head = lines > 100 ? 80 : lines;
+						tail = lines > 100 ? 40 : 0;
+						for (i = 0; i < head + tail; i++) {
+							uint64_t line_at = at_line[i < head ? i : lines - tail + (i - head)];
+							uint64_t n = 0;
+
+							if (i == head) {
+								print("== ... %d lines in between ... ==\n", (int)(lines - head - tail));
+							}
+							while (line_at + n < klog_len && klog[line_at + n] != '\n' && n < 220) {
+								put_char(klog[line_at + n]);
+								n++;
+							}
+							put_char('\n');
+							BS->stall(20000);
+							wdt_pet();
+						}
+						print("== %d interesting lines of the kernel log, of %d bytes ==\n", lines, klog_len - start);
 					}
+					print("\n== END OF LOG: the machine cold resets now ==\n");
 					/* No usb_poll_command() here: after the kernel has run the endpoints are dead, and
 					 * polling them hangs the loader with the phone enumerating but answering nothing.
 					 * The log is on the screen; the machine resets from here. */
