@@ -4334,6 +4334,14 @@ install(void)
 				}
 			}
 		}
+		/* Binning does not survive every command stream the system makes: a draw is left
+		 * unfinished, the cache flush behind it waits for the pipeline and the core stops.
+		 * Drawing into memory instead of the tile buffer does not stop, so that is the
+		 * default until the binning path is understood (glbin=1 asks for it back). */
+		if (strstr(arguments, "glbin=1") == NULL && getenv("FD_MESA_DEBUG") == NULL) {
+			setenv("FD_MESA_DEBUG", "sysmem", 1);
+			say("hakios-gl: no binning: FD_MESA_DEBUG=sysmem (glbin=1 asks for it back)\n");
+		}
 	}
 
 	if (class == Nil) {

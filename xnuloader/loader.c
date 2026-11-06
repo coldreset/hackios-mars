@@ -4077,10 +4077,10 @@ fb_command(char *cmd)
 						const char *klog = (const char *)loader_ctx[CTX_LOG_PA];
 						uint64_t klog_len = loader_ctx[CTX_LOG_LEN];
 						uint64_t start = klog_len > (1u << 20) ? klog_len - (1u << 20) : 0;
-						uint64_t at = start, lines = 0, head, tail, i;
+						uint64_t at = start, lines = 0, head, tail, i, w;
 
 						print("\n== THE KERNEL LOG: INTERESTING LINES, FIRST AND LAST ==\n");
-						if (klog != NULL && klog_len > 0 && klog_len <= (1u << 20)) {
+						if (klog != NULL && klog_len > 0) {
 							while (at < klog_len) {
 								uint64_t end = at, n = 0;
 								int keep = 0;
@@ -4090,14 +4090,14 @@ fb_command(char *cmd)
 									if (n < sizeof(line) - 1) {
 										line[n++] = klog[end];
 									}
-									for (i = 0; i < sizeof(wanted) / sizeof(wanted[0]) && !keep; i++) {
+									for (w = 0; w < sizeof(wanted) / sizeof(wanted[0]) && !keep; w++) {
 										uint64_t len = 0, j, k;
 
-										while (wanted[i][len] != 0) {
+										while (wanted[w][len] != 0) {
 											len++;
 										}
 										for (j = 0; j + len <= n; j++) {
-											for (k = 0; k < len && line[j + k] == wanted[i][k]; k++) {
+											for (k = 0; k < len && line[j + k] == wanted[w][k]; k++) {
 											}
 											if (k == len) {
 												keep = 1;
