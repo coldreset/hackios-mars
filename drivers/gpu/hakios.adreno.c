@@ -3353,6 +3353,12 @@ hakios_gpu_recover(void)
 	printf("adreno: gpu: the 3D core's half has been reset: status %#x, interrupts %#x, ring at %u, fence was %#x\n",
 	    rd(gpu.base + RBBM_STATUS), rd(gpu.base + RBBM_INT_0_STATUS), ring_at, fence_status);
 
+	/*
+	 * HAKIOS: the core stopped at CP_WAIT_FOR_IDLE (a draw that never retires), so the reset above
+	 * is a guess at what clears it: the pipeline is reset with the CP, which a6xx_recover relies on.
+	 * If the next submission makes no progress at all, gpuWait() reports it again, and the second
+	 * report is what says the guess was wrong.
+	 */
 	if (!step_core_start() || !step_core_commands()) {
 		/*
 		 * The core's own half is not enough: what is wedged is in the CX half (the CP is fed from
