@@ -3291,6 +3291,8 @@ hakios_gpu_ready(void)
  *     Everything wedged is in that half. The CX half is not reset, so the SMMU keeps its tables and
  *     the memory stays where it was mapped; nothing has to be made again.
  */
+static bool gpu_restart(void);
+
 bool
 hakios_gpu_recover(void)
 {
@@ -3337,6 +3339,15 @@ hakios_gpu_recover(void)
 	    rd(gpu.base + RBBM_STATUS), rd(gpu.base + RBBM_INT_0_STATUS), ring_at, fence_status);
 
 	if (!step_core_start() || !step_core_commands()) {
+		/*
+		 * The core's own half is not enough: what is wedged is in the CX half (the CP is fed from
+		 * there). Power the whole block down and make it again from step 3, the way the boot did.
+		 */
+		if (gpu_restart()) {
+			printf("adreno: gpu: the block did not come back where it was reset: it was made again from the start\n");
+			wr(gmu.base + GMU_PWR_COL_KEEPALIVE, 0);
+			return true;
+		}
 		printf("adreno: gpu: THE 3D CORE DOES NOT TAKE COMMANDS AGAIN after the reset: it is given up for this run\n");
 		wr(gmu.base + GMU_PWR_COL_KEEPALIVE, 0);
 		return false;
@@ -3643,6 +3654,31 @@ static bool(*const steps[])(void) = {
 	step_gmu_start, step_gmu_queues, step_core_power, step_core_space, step_zap_load, step_core_start, step_core_commands,
 	step_frame,
 };
+
+/*
+ * The whole block, made again: powered down as the end of a run does, then steps 3 to 20 in order.
+ * Used when the GX reset did not bring the core back -- a core wedged in the CP cannot be reset out
+ * of it from the GX side, and the CP is fed from CX.
+ */
+static bool
+gpu_restart(void)
+{
+	uint32_t saved = step;
+
+	printf("adreno: gpu: powering the block down and making it again\n");
+	gpu_block_stop();
+	for (uint32_t i = 3; i <= 20; i++) {
+		step = i;
+		if (!steps[i]()) {
+			printf("adreno: gpu: the block did not come back: step %u failed\n", i);
+			step = saved;
+			return false;
+		}
+	}
+	step = saved;
+	return true;
+}
+
 #define STEPS                   ((uint32_t)(sizeof(steps) / sizeof(steps[0])))
 
 /* ---- beside the steps: how warm the GPU is ------------------------------------------------------------------ */

@@ -230,7 +230,7 @@ gpuWait(uint32_t fence, uint64_t milliseconds)
 	 * The core has stopped answering. With gpu_recover=1 it is reset and given work again, and this
 	 * wait is the one that is lost -- not the rest of the run.
 	 */
-	if (milliseconds >= 1000) {
+	if (milliseconds >= 200) {            /* (the callers ask for a quarter of a second) */
 		if (hakios_gpu_recover()) {
 			gGPUReported = false;
 			IOLog("HakiosGPU: the core had stopped; it has been reset and is given work again\n");
