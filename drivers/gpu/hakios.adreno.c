@@ -3305,6 +3305,16 @@ hakios_gpu_recover(void)
 		printf("adreno: gpu: the 3D core has been recovered %u times in this run already: no more\n", gpu_recoveries);
 		return false;
 	}
+	{
+		static uint64_t last;
+		uint64_t now = mach_absolute_time(), gap;
+
+		nanoseconds_to_absolutetime(500ull * NSEC_PER_MSEC, &gap);
+		if (last != 0 && now - last < gap) {
+			return false;           /* (the waits that follow the first are not more attempts) */
+		}
+		last = now;
+	}
 	gpu_recoveries++;
 	step = 0;                               /* (the steps are over: no line of theirs waits for the loader any more) */
 
@@ -3637,6 +3647,16 @@ hakios_gpu_report(const char *why)
 	    *(volatile uint32_t *)(core_scratch.memory + GPU_FENCE_AT), rd(gpu.base + CP_RB_RPTR), ring_at,
 	    rd(gpu.base + RBBM_STATUS), rd(gpu.base + RBBM_INT_0_STATUS), rd(gpu.base + CP_HW_FAULT),
 	    rd(gpu.base + CP_INTERRUPT_STATUS), rd(gpu.base + CP_PROTECT_STATUS));
+	{
+		uint32_t at = rd(gpu.base + CP_RB_RPTR) % RING_WORDS;
+		volatile uint32_t *words = (volatile uint32_t *) core_ring.memory;
+
+		printf("HakiosGPU: stuck:   the ring, 16 words from %u (written up to %u):", at, ring_at % RING_WORDS);
+		for (unsigned i = 0; i < 16; i++) {
+			printf(" %08x", words[(at + i) % RING_WORDS]);
+		}
+		printf("\n");
+	}
 	printf("HakiosGPU: stuck:   in the first command buffer at %#llx, %u words to go; in the second at %#llx, %u to go\n",
 	    (uint64_t)rd(gpu.base + CP_IB1_BASE + 4) << 32 | rd(gpu.base + CP_IB1_BASE), rd(gpu.base + CP_IB1_REM_SIZE),
 	    (uint64_t)rd(gpu.base + CP_IB2_BASE + 4) << 32 | rd(gpu.base + CP_IB2_BASE), rd(gpu.base + CP_IB2_REM_SIZE));
