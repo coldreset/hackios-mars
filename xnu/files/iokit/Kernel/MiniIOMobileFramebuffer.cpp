@@ -166,7 +166,7 @@ static TUNABLE(uint32_t, gRefreshHz, "fb_hz", kFBRefreshHz);
  * (tools/frames.py: frames every 16.7 ms, with or without CADisableMinimumFrameDurationOnPhone, CA_FORCE_120HZ and
  * CA_ENABLE_HIGH_FRAME_RATE_RESTRICTION=0, 30 October). The refreshes themselves still come at fb_hz.
  */
-static TUNABLE(uint32_t, gCARefreshHz, "fb_ca_hz", 0);
+static TUNABLE(uint32_t, gCARefreshHz, "fb_ca_hz", 120);   /* (CoreAnimation draws at half the rate it is told) */
 static TUNABLE(uint32_t, gOnTheBeat, "fb_beat", 1);
 /*
  * Boot-arg fb_threads=N (1 to 8): so many processors scale a frame onto the panel together (see
