@@ -1242,12 +1242,14 @@ extern int fill_task_rusage(task_t task, rusage_info_current *ri);
 static char process_cpu_line[448];
 static uint64_t proc_cpu_last[512];
 static int      proc_cpu_pid[512];
+/* the three largest absolute totals, so that "nothing printed" can be told apart from "all zero" */
+static struct { char comm[24]; uint64_t total; } proc_cpu_top[3];
 
 static int
 process_cpu_collect(proc_t p, void *arg)
 {
 	rusage_info_current ri = { 0 };
-	uint64_t now, delta = 0;
+	uint64_t now, delta = 0, delta_ns = 0;
 	unsigned at = *(unsigned *)arg;
 	int pid = p->p_pid;
 	unsigned slot;
@@ -1256,6 +1258,21 @@ process_cpu_collect(proc_t p, void *arg)
 		return 0;
 	}
 	now = ri.ri_user_time + ri.ri_system_time;
+	{
+		uint64_t total_ns = 0;
+
+		absolutetime_to_nanoseconds(now, &total_ns);
+		for (int k = 0; k < 3; k++) {
+			if (total_ns > proc_cpu_top[k].total) {
+				for (int j = 2; j > k; j--) {
+					proc_cpu_top[j] = proc_cpu_top[j - 1];
+				}
+				snprintf(proc_cpu_top[k].comm, sizeof(proc_cpu_top[k].comm), "%s", p->p_comm);
+				proc_cpu_top[k].total = total_ns;
+				break;
+			}
+		}
+	}
 	slot = (unsigned)pid % 512;
 	if (proc_cpu_pid[slot] != pid) {
 		proc_cpu_pid[slot] = pid;
@@ -1264,9 +1281,11 @@ process_cpu_collect(proc_t p, void *arg)
 	}
 	delta = now > proc_cpu_last[slot] ? now - proc_cpu_last[slot] : 0;
 	proc_cpu_last[slot] = now;
-	if (delta >= 40 * NSEC_PER_MSEC && at < 320) {
+	/* the rusage times are in mach absolute time, not nanoseconds: convert before comparing */
+	absolutetime_to_nanoseconds(delta, &delta_ns);
+	if (delta_ns >= 20 * NSEC_PER_MSEC && at < 320) {
 		at += snprintf(process_cpu_line + at, sizeof(process_cpu_line) - at, " %s:%llu", p->p_comm,
-		    delta / NSEC_PER_MSEC);
+		    delta_ns / NSEC_PER_MSEC);
 	}
 	return 0;
 }
@@ -1277,9 +1296,16 @@ process_cpu_print(void)
 	unsigned at = 0;
 
 	process_cpu_line[0] = 0;
+	for (int k = 0; k < 3; k++) {
+		proc_cpu_top[k].comm[0] = 0;
+		proc_cpu_top[k].total = 0;
+	}
 	at = snprintf(process_cpu_line, sizeof(process_cpu_line), "focaltech: process cpu (ms):");
 	proc_iterate(PROC_ALLPROCLIST, process_cpu_collect, &at, NULL, NULL);
-	at += snprintf(process_cpu_line + at, sizeof(process_cpu_line) - at, "\n");
+	at += snprintf(process_cpu_line + at, sizeof(process_cpu_line) - at,
+	    " | totals:%s:%llu%s:%llu%s:%llu\n", proc_cpu_top[0].comm, proc_cpu_top[0].total / NSEC_PER_MSEC,
+	    proc_cpu_top[1].comm, proc_cpu_top[1].total / NSEC_PER_MSEC,
+	    proc_cpu_top[2].comm, proc_cpu_top[2].total / NSEC_PER_MSEC);
 	printf("%s", process_cpu_line);
 }
 
