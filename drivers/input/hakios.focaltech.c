@@ -829,11 +829,77 @@ static uint32_t max_x = 1440, max_y = 3200;    /* the device tree's x-max/y-max 
  * recogniser actually sees. */
 static int fts_trace;
 
+/* HAKIOS: touch_trace keeps the shape of the last gesture and prints it once, at the lift: the
+ * point the finger landed on, how far it travelled and where it left. Printed at the lift so it
+ * is the last thing on the screen rather than the first thing scrolled off it. */
+static struct {
+	bool live;
+	uint32_t id, down_x, down_y, last_x, last_y, moves, top, bottom;
+	uint64_t down_us, up_us;
+} gesture;
+
+static uint64_t
+now_us(void)
+{
+	uint64_t us = 0;
+
+	absolutetime_to_nanoseconds(mach_absolute_time(), &us);
+	return us / 1000;
+}
+
+/* HAKIOS: touch_selftest -- one swipe of our own, from the bottom edge to the top, posted through
+ * the same path the chip's samples take. Nothing about the controller is involved. */
+static void
+selftest_swipe(void)
+{
+	const uint32_t x = 720 * 65535 / max_x;
+	uint32_t y;
+
+	printf("focaltech: selftest: one swipe from the bottom edge\n");
+	hakios_touch_post(HAKIOS_TOUCH_DOWN, 0, x, 65514);
+	for (y = 65000; y > 4000; y -= 1200) {
+		sleep_ms(12);
+		hakios_touch_post(HAKIOS_TOUCH_MOVE, 0, x, y);
+	}
+	sleep_ms(12);
+	hakios_touch_post(HAKIOS_TOUCH_UP, 0, x, y);
+	printf("focaltech: selftest: the swipe has been posted\n");
+}
+
 static void
 trace_post(const char *what, uint32_t id, uint32_t x, uint32_t y)
 {
-	if (fts_trace) {
-		printf("focaltech: post %s id %u %u,%u\n", what, id, x, y);
+	if (!fts_trace) {
+		return;
+	}
+	if (what[0] == 'd') {
+		gesture.live = true;
+		gesture.id = id;
+		gesture.down_x = gesture.last_x = x;
+		gesture.down_y = gesture.last_y = y;
+		gesture.top = gesture.bottom = y;
+		gesture.moves = 0;
+		gesture.down_us = now_us();
+	} else if (gesture.live) {
+		gesture.moves++;
+		gesture.last_x = x;
+		gesture.last_y = y;
+		if (y < gesture.top) {
+			gesture.top = y;
+		}
+		if (y > gesture.bottom) {
+			gesture.bottom = y;
+		}
+		if (what[0] == 'u') {
+			gesture.live = false;
+			gesture.up_us = now_us();
+			printf("focaltech: gesture id %u down %u,%u y %u..%u upto %u,%u\n"
+			    "focaltech: gesture %u samples in %llu us, y went %u -> %u -> %u (%u tall)\n",
+			    id, gesture.down_x, gesture.down_y, gesture.down_y, gesture.top,
+			    gesture.last_x, gesture.last_y,
+			    gesture.moves, gesture.up_us - gesture.down_us,
+			    gesture.down_y, y, gesture.top, gesture.down_y);
+		}
 	}
 }
 
@@ -1391,6 +1457,18 @@ focaltech_thread(__unused void *parameter, __unused wait_result_t result)
 			printf("focaltech: scan mode set to active multi-touch\n");
 		} else {
 			printf("focaltech: the scan mode command did not go out\n");
+		}
+	}
+	{
+		static int selftest = -1;
+
+		if (selftest < 0) {
+			selftest = 0;
+			PE_parse_boot_argn("touch_selftest", &selftest, sizeof(selftest));
+		}
+		if (selftest) {
+			sleep_ms(70000);
+			selftest_swipe();
 		}
 	}
 	for (unsigned tick = 1;; tick++) {
