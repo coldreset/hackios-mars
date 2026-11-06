@@ -4069,9 +4069,9 @@ fb_command(char *cmd)
 						 * boot messages are what say whether the GPU was kept and GL loaded.
 						 */
 						static const char *const wanted[] = {
-							"frames in", "hakios: the server", "hakios: no GPU",
-							"touch screen ready", "MiniIOMobileFramebuffer: frame time",
-							"HakiosGPU:", "adreno: 17:", "the speed wanted",
+							"hakios-gl", "hakios: the server", "hakios: no GPU", "hakios: gl=",
+							"HakiosGPU", "frames in", "frame time", "cpu 5s", "focaltech: gesture",
+							"touch screen ready", "tl: ",
 						};
 						static uint32_t at_line[4096];
 						const char *klog = (const char *)loader_ctx[CTX_LOG_PA];
@@ -4113,6 +4113,20 @@ fb_command(char *cmd)
 								at = end + 1;
 							}
 						}
+						if (lines == 0) {
+							/* Nothing matched: the buffer is not what we think it is.
+							 * Show the tail raw so the screen is never blank. */
+							uint64_t from = klog_len > 3000 ? klog_len - 3000 : 0;
+
+							print("== no line matched: the last %d bytes, raw ==\n", (int)(klog_len - from));
+							for (i = from; i < klog_len; i++) {
+								char c = klog[i];
+
+								put_char((c >= 32 && c < 127) || c == '\n' ? c : '.');
+							}
+							put_char('\n');
+						}
+
 						head = lines > 60 ? 25 : lines;
 						tail = lines > 60 ? 20 : 0;
 						for (i = 0; i < head + tail; i++) {
@@ -4136,8 +4150,8 @@ fb_command(char *cmd)
 					/* No usb_poll_command() here: after the kernel has run the endpoints are dead, and
 					 * polling them hangs the loader with the phone enumerating but answering nothing.
 					 * The log is on the screen; the machine resets from here. */
-					print("== the machine cold resets in 300 seconds ==\n");
-					for (int k = 0; k < 300; k++) {
+					print("== the machine cold resets in 120 seconds ==\n");
+					for (int k = 0; k < 120; k++) {
 						wdt_pet();
 						BS->stall(1000000);
 					}
