@@ -3209,6 +3209,7 @@ static uint32_t gpu_timed;              /* ... of the last whose times have been
 static uint64_t gpu_ticks;              /* how long the core has worked on the submissions added up */
 static uint32_t gpu_timed_count;
 static uint32_t gpu_timed_by[7];        /* ... how many of them under 0.1, 0.25, 0.5, 1, 2, 4 ms, and longer */
+static uint32_t gpu_flush = 1;        /* boot-arg gpu_flush=0: a submission does not end with a cache flush */
 static uint32_t gpu_exact = 1;          /* boot-arg gpu_exact=0: the core does not wait to be idle before it notes the time */
 uint32_t gpu_log;                       /* boot-arg gpu_log=1: a line for every submission and the time the core spent on it */
 extern void hakios_tl(const char *format, ...) __printflike(1, 2);
@@ -3637,11 +3638,18 @@ hakios_gpu_submit(const uint64_t *addresses, const uint32_t *words, uint32_t cou
 		ring_command(CP_WAIT_FOR_IDLE, 0);      /* the time is the pipeline's, not the command processor's, which is ahead of it */
 	}
 	ring_register(CP_SCRATCH_REG2, gpu_fence);
-	ring_command(CP_EVENT_WRITE, 4);
-	ring(EVENT_CACHE_FLUSH);
-	ring(CORE_SCRATCH_ADDRESS + GPU_FENCE_AT);
-	ring(0);
-	ring(gpu_fence);
+	if (gpu_flush) {
+		ring_command(CP_EVENT_WRITE, 4);
+		ring(EVENT_CACHE_FLUSH);
+		ring(CORE_SCRATCH_ADDRESS + GPU_FENCE_AT);
+		ring(0);
+		ring(gpu_fence);
+	} else {
+		ring_command(CP_MEM_WRITE, 3);          /* (no flush: the fence is written without waiting for the pipeline) */
+		ring(CORE_SCRATCH_ADDRESS + GPU_FENCE_AT);
+		ring(gpu_fence);
+		ring(0);
+	}
 	ring_time(gpu_fence, 1);                /* after the cache flush: what it costs is part of the submission */
 	ring_send();
 	return gpu_fence;
@@ -4004,6 +4012,7 @@ hakios_adreno_init(void)
 			bzero((void *)core_scratch.memory, 4096);
 			to_memory(core_scratch.memory, 4096);
 			PE_parse_boot_argn("gpu_exact", &gpu_exact, sizeof(gpu_exact));
+			PE_parse_boot_argn("gpu_flush", &gpu_flush, sizeof(gpu_flush));
 			PE_parse_boot_argn("gpu_log", &gpu_log, sizeof(gpu_log));
 			gpu_kept = true;
 			quiet = true;

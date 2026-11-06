@@ -944,6 +944,10 @@ HakiosGPUUserClient::submit(struct msm_gem_submit * request)
 	struct msm_gem_submit_cmd * cmds = NULL;
 	uint64_t addresses[GPU_SUBMIT_CMDS];
 	uint32_t words[GPU_SUBMIT_CMDS], count = 0;
+	/* (the last commands handed over, kept so a stuck report can show them: HAKIOS) */
+	static uint8_t * lastCommands[4];
+	static uint32_t lastWords[4];
+	uint8_t * commands[GPU_SUBMIT_CMDS];
 	uint64_t began, nanos, again;
 	IOReturn ret = kIOReturnBadArgument;
 
@@ -1013,7 +1017,12 @@ HakiosGPUUserClient::submit(struct msm_gem_submit * request)
 			goto out;
 		}
 		addresses[count] = b->address + cmds[i].submit_offset;
+		commands[count] = b->kernel + cmds[i].submit_offset;
 		words[count++] = cmds[i].size / 4;
+		if (count <= 4) {
+			lastCommands[count - 1] = commands[count - 1];
+			lastWords[count - 1] = words[count - 1];
+		}
 	}
 	request->fence = hakios_gpu_submit(addresses, words, count);
 	if (gpu_log && request->fence != 0) {
@@ -1055,6 +1064,23 @@ HakiosGPUUserClient::submit(struct msm_gem_submit * request)
 	if (request->fence == 0 && !gGPUReported) {
 		gGPUReported = true;
 		hakios_gpu_report("the ring is full");
+		/* HAKIOS: the commands the core was given last: the draw that does not retire is among them */
+		for (uint32_t i = 0; i < 4 && lastCommands[i] != NULL; i++) {
+			uint32_t n = lastWords[i] < 24 ? lastWords[i] : 24;
+			uint32_t * w = (uint32_t *) lastCommands[i];
+
+			for (uint32_t k = 0; k < n; k += 8) {
+				char line[128];
+				int at = 0;
+
+				at += snprintf(line + at, sizeof(line) - at, "HakiosGPU: stuck:   cmd %u %s%u:", i,
+				    k == 0 ? "of " : "", lastWords[i]);
+				for (uint32_t j = k; j < k + 8 && j < n; j++) {
+					at += snprintf(line + at, sizeof(line) - at, " %08x", w[j]);
+				}
+				IOLog("%s\n", line);
+			}
+		}
 	}
 	if (fSubmits++ < 4) {
 		/* (addresses and words are only set up to `count`: with no command buffer among the commands, the first would be stack garbage) */
@@ -1101,6 +1127,30 @@ HakiosGPUUserClient::submit(struct msm_gem_submit * request)
 			if (now == was && gpu_ring_full != 0) {
 				/* (once every five seconds while it does not move: the last one is the end of the log) */
 				hakios_gpu_ring_dump("still");
+				/* ... and the last words of the last command buffer: the draw that does not retire is there */
+				for (uint32_t i = 3; i + 1 > 0; i--) {
+					if (lastCommands[i] == NULL) {
+						continue;
+					}
+					{
+						uint32_t n = lastWords[i], from = n > 32 ? n - 32 : 0;
+						uint32_t * w = (uint32_t *) lastCommands[i];
+						char line[128];
+						int at = 0;
+
+						at += snprintf(line + at, sizeof(line) - at, "HakiosGPU: stuck:   cmd %u of %u, last %u:", i, n, n - from);
+						for (uint32_t j = from; j < n; j++) {
+							at += snprintf(line + at, sizeof(line) - at, " %08x", w[j]);
+							if ((j - from) % 8 == 7 || j + 1 == n) {
+								IOLog("%s\n", line);
+								at = 0;
+								line[0] = 0;
+								at += snprintf(line + at, sizeof(line) - at, "HakiosGPU: stuck:    ");
+							}
+						}
+					}
+					break;
+				}
 			}
 			was = now;
 		}
