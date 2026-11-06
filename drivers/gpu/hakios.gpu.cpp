@@ -47,6 +47,7 @@ extern "C" void hakios_tl(const char * format, ...) __printflike(1, 2);
 extern "C" {
 /* drivers/gpu/hakios.adreno.c ("the GPU kept on"; declared in bsd/sys/hakios.input.h, which is not seen from here) */
 bool hakios_gpu_ready(void);
+bool hakios_gpu_recover(void);          /* gpu_recover=1: reset a core that has stopped, and go on */
 bool hakios_gpu_parameter(uint32_t which, uint64_t * value);
 uint64_t hakios_gpu_address(uint64_t size);
 void hakios_gpu_address_free(uint64_t address, uint64_t size);
@@ -191,6 +192,9 @@ static uint32_t gRingFullLast;
 static bool gSlowPrinted;
 static bool gLockPrinted;
 
+/* What the presenter spent, for the frame-time line: waiting for the lock, and waiting for the core. */
+uint64_t gGPULockNanos, gGPUWaitNanos, gGPUWaitMax;
+
 /* Wait for the 3D core to be done with submission `fence`; with the lock held, which is let go of while waiting. */
 static bool
 gpuWait(uint32_t fence, uint64_t milliseconds)
@@ -222,9 +226,20 @@ gpuWait(uint32_t fence, uint64_t milliseconds)
 		delay_for_interval(GPU_ASK_AGAIN_US, NSEC_PER_USEC);
 		IOLockLock(gGPULock);
 	}
-	if (milliseconds >= 1000 && !gGPUReported) {
-		gGPUReported = true;
-		hakios_gpu_report("no answer");
+	/*
+	 * The core has stopped answering. With gpu_recover=1 it is reset and given work again, and this
+	 * wait is the one that is lost -- not the rest of the run.
+	 */
+	if (milliseconds >= 1000) {
+		if (hakios_gpu_recover()) {
+			gGPUReported = false;
+			IOLog("HakiosGPU: the core had stopped; it has been reset and is given work again\n");
+			return false;
+		}
+		if (!gGPUReported) {
+			gGPUReported = true;
+			hakios_gpu_report("no answer");
+		}
 	}
 	return false;
 }
@@ -240,12 +255,28 @@ MiniIOSurfaceDrawn(MiniIOSurface * surface, uint64_t milliseconds)
 
 		IOLockLock(gGPULock);
 		taken = mach_absolute_time() - lockBegan;
+		{
+			uint64_t ns2;
+
+			absolutetime_to_nanoseconds(taken, &ns2);
+			gGPULockNanos += ns2;
+		}
 		absolutetime_to_nanoseconds(taken, &ns);
 		if (ns > 5 * NSEC_PER_MSEC && !gLockPrinted) {
 			gLockPrinted = true;
 			IOLog("HakiosGPU: the presenter waited %llu us for the lock, not for the core\n", ns / NSEC_PER_USEC);
 		}
-		done = !hakios_gpu_ready() || gpuWait(fence, milliseconds);
+		{
+			uint64_t waitBegan = mach_absolute_time();
+
+			done = !hakios_gpu_ready() || gpuWait(fence, milliseconds);
+			taken = mach_absolute_time() - waitBegan;
+			absolutetime_to_nanoseconds(taken, &ns);
+			gGPUWaitNanos += ns;
+			if (ns > gGPUWaitMax) {
+				gGPUWaitMax = ns;
+			}
+		}
 		IOLockUnlock(gGPULock);
 	}
 	return done;

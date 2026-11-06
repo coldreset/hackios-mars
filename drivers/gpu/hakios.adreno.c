@@ -2428,6 +2428,10 @@ step_core_power(void)
 #define CP_RB_RPTR              GPU_WORD(0x0806)
 #define CP_RB_WPTR              GPU_WORD(0x0807)
 #define CP_SQE_CNTL             GPU_WORD(0x0808)
+#define RBBM_SW_RESET_CMD       GPU_WORD(0x0043)        /* a6xx.xml; 1 holds the 3D core's own half (GX) in reset */
+#define RBBM_INT_CLEAR_CMD      GPU_WORD(0x0037)        /* the bits of rbbm_int_0_status written here are forgotten */
+#define GMU_PWR_COL_KEEPALIVE   GMU_WORD(0x50c3)        /* a6xx_gmu.xml; 1: the GMU keeps the core powered */
+#define GMU_AHB_FENCE_STATUS_CLR GMU_WORD(0x9314)       /* the bits of ahb_fence_status written here are forgotten */
 #define CP_HW_FAULT             GPU_WORD(0x0821)
 #define CP_INTERRUPT_STATUS     GPU_WORD(0x0823)
 #define CP_PROTECT_STATUS       GPU_WORD(0x0824)
@@ -3194,6 +3198,9 @@ hakios_adreno_quiesce(void)
 #define EVENT_INVALIDATE_DEPTH  0x18
 #define EVENT_INVALIDATE_COLOR  0x19
 
+static uint32_t gpu_recover;            /* boot-arg gpu_recover=1: a core that has stopped answering is reset and given work again */
+static uint32_t gpu_recoveries;         /* ... and how many times that has been done in this run */
+#define GPU_RECOVERIES  8
 static bool gpu_kept;
 static uint32_t gpu_fence;              /* the number of the last submission */
 uint32_t gpu_ring_full;                 /* submissions refused because the ring had no room */
@@ -3261,6 +3268,81 @@ bool
 hakios_gpu_ready(void)
 {
 	return gpu_kept;
+}
+
+/*
+ * boot-arg gpu_recover=1: the 3D core is put back where step 20 and step 21 left it, and everything
+ * it had been given is given up, so that the next submission is its own again. Without the boot-arg
+ * this returns false at once and touches nothing.
+ *
+ * Why it is worth doing: one submission the core never finishes otherwise costs the rest of the run.
+ * The wait gives up after the first such submission and, from then on, every wait is told at once
+ * that the core is not done -- so every later submission "succeeds" and writes nothing, which reads
+ * like a measurement of 2 frames a second and is not one. With this, a core that hangs costs one
+ * submission.
+ *
+ * What is done, and who says so (Linux, drivers/gpu/drm/msm/adreno/a6xx_gpu.c):
+ *   - the command processor is halted first, so nothing more of the ring is fetched (a6xx_recover:
+ *     "Halt SQE first", cp_sqe_cntl = 3; step 20 starts it with 1);
+ *   - the GMU is told to keep the core powered whatever it makes of what follows (a6xx_fault_detect_irq);
+ *   - what the core has under way on the bus is let finish and nothing new is taken (a6xx_recover
+ *     calls a6xx_bus_clear_pending_transactions before it pulls the reset line);
+ *   - the reset line of the core's own half (GX) is pulled and let go (a6xx_gpu_sw_reset: held 100 us).
+ *     Everything wedged is in that half. The CX half is not reset, so the SMMU keeps its tables and
+ *     the memory stays where it was mapped; nothing has to be made again.
+ */
+bool
+hakios_gpu_recover(void)
+{
+	uint32_t fence_status;
+
+	if (!gpu_kept || !gpu_recover) {
+		return false;
+	}
+	if (gpu_recoveries >= GPU_RECOVERIES) {
+		printf("adreno: gpu: the 3D core has been recovered %u times in this run already: no more\n", gpu_recoveries);
+		return false;
+	}
+	gpu_recoveries++;
+	step = 0;                               /* (the steps are over: no line of theirs waits for the loader any more) */
+
+	wr(gpu.base + CP_SQE_CNTL, 3);
+	wr(gmu.base + GMU_PWR_COL_KEEPALIVE, 1);
+	core_bus_halt(true);
+	wr(gpu.base + RBBM_SW_RESET_CMD, 1);
+	rd(gpu.base + RBBM_SW_RESET_CMD);       /* (Linux reads it back and waits, to be sure of the order) */
+	sleep_us(101);
+	wr(gpu.base + RBBM_SW_RESET_CMD, 0);
+	rd(gpu.base + RBBM_SW_RESET_CMD);
+	sleep_us(1);
+	/*
+	 * Whatever the GMU dropped of writes of ours while the core was wedged is forgotten, and its fence
+	 * is put back where it lets them through (a6xx_gmu_force_off). A fence gone to dropping writes
+	 * would swallow every register step 20 writes below, silently.
+	 */
+	fence_status = rd(gmu.base + GMU_AHB_FENCE_STATUS);
+	wr(gmu.base + GMU_AHB_FENCE_STATUS_CLR, 7);
+	wr(gmu.base + GMU_AO_AHB_FENCE_CTRL, 0);
+	/*
+	 * Where the ring stands is the core's word for it: a position left over from before would have it
+	 * fetch words it has run already, or words of a submission being given up. The two are made equal,
+	 * so there is nothing to fetch until something is submitted; step 20 writes the address and size
+	 * again itself.
+	 */
+	ring_at = ring_sent = rd(gpu.base + CP_RB_RPTR) % RING_WORDS;
+	wr(gpu.base + CP_RB_WPTR, ring_at);
+	gpu_ring_full = 0;
+	wr(gpu.base + RBBM_INT_CLEAR_CMD, rd(gpu.base + RBBM_INT_0_STATUS));
+	printf("adreno: gpu: the 3D core's half has been reset: status %#x, interrupts %#x, ring at %u, fence was %#x\n",
+	    rd(gpu.base + RBBM_STATUS), rd(gpu.base + RBBM_INT_0_STATUS), ring_at, fence_status);
+
+	if (!step_core_start() || !step_core_commands()) {
+		printf("adreno: gpu: THE 3D CORE DOES NOT TAKE COMMANDS AGAIN after the reset: it is given up for this run\n");
+		wr(gmu.base + GMU_PWR_COL_KEEPALIVE, 0);
+		return false;
+	}
+	wr(gmu.base + GMU_PWR_COL_KEEPALIVE, 0);
+	return true;
 }
 
 /* The answers to msm's GET_PARAM (Linux's adreno_get_param for this GPU; the numbers are msm_drm.h's). */
@@ -3840,6 +3922,7 @@ hakios_adreno_init(void)
 		done = step;
 	}
 	PE_parse_boot_argn("adreno_keep", &keep, sizeof(keep));
+	PE_parse_boot_argn("gpu_recover", &gpu_recover, sizeof(gpu_recover));
 	if (keep) {
 		if (done >= 21 && core_runs) {
 			gpu_free[0].start = GPU_ADDRESSES_START;

@@ -341,6 +341,7 @@ public:
 	/* HAKIOS: where a frame's time goes (asked for: measure before changing the display path) */
 	uint64_t        fTimeCount, fTimePresent, fTimePresentMax, fTimeWaitSlot, fTimeCopy, fTimeSurf;
 	uint64_t        fTimePrev, fTimeGap, fTimeFetch, fTimeFetchMax, fTimePresentWait;
+	uint64_t        fTimeLock, fTimeWaitGPU, fTimeWaitGPUMax;
 	uint64_t        fStatWaiting;           /* how long frames waited for the GPU here */
 	/* how the display is doing: frames and time spent drawing them here since fStatSince */
 	uint32_t        fStatFrames;
@@ -1162,12 +1163,14 @@ IOMobileFramebuffer::presenter(void)
 			uint64_t gaps = fTimeCount > 0 ? fTimeGap / (fTimeCount - 1) : 0;
 
 			IOLog("MiniIOMobileFramebuffer: frame time: %llu frames, gap %llu us, present %llu us (max %llu), "
-			    "of it slot wait %llu + copy %llu + surfaces %llu; presenter waited %llu us, fetched %llu us (max %llu)\n",
+			    "of it slot wait %llu + copy %llu + surfaces %llu; presenter waited %llu us (of it %llu for the lock, %llu for the core at most %llu), fetched %llu us (max %llu)\n",
 			    fTimeCount, gaps, fTimePresent / fTimeCount, fTimePresentMax, fTimeWaitSlot / fTimeCount,
 			    fTimeCopy / fTimeCount, fTimeSurf / fTimeCount, fTimePresentWait / fTimeCount,
+			    fTimeLock / fTimeCount / 1000, fTimeWaitGPU / fTimeCount / 1000, fTimeWaitGPUMax / 1000,
 			    fTimeFetch / fTimeCount, fTimeFetchMax);
 			fTimeCount = fTimePresent = fTimePresentMax = fTimeWaitSlot = fTimeCopy = fTimeSurf = 0;
 			fTimeGap = fTimePresentWait = fTimeFetch = fTimeFetchMax = 0;
+			fTimeLock = fTimeWaitGPU = fTimeWaitGPUMax = 0;
 		}
 frame_time_done: ;
 		unsettled = gFilter == 2;
@@ -1221,12 +1224,38 @@ IOMobileFramebuffer::show(const uint8_t * swap, MiniIOSurface ** surfaces)
 	bool report;
 
 	for (unsigned layer = 0; layer < SWAP_LAYERS; layer++) {
-		if (surfaces[layer] != NULL && !MiniIOSurfaceDrawn(surfaces[layer], SWAP_GPU_MS)) {
+		uint64_t oneBegan;
+		bool oneDone;
+
+		if (surfaces[layer] == NULL) {
+			continue;
+		}
+		oneBegan = mach_absolute_time();
+		oneDone = MiniIOSurfaceDrawn(surfaces[layer], SWAP_GPU_MS);
+		{
+			uint64_t took = mach_absolute_time() - oneBegan, ns;
+
+			absolutetime_to_nanoseconds(took, &ns);
+			if (ns > 20 * NSEC_PER_MSEC) {
+				IOLog("MiniIOMobileFramebuffer: swap %u: surface %u took %llu us to be seen drawn (fence %u), %s\n",
+				    swapWord(swap, SWAP_ID), swapWord(swap, SWAP_SURFACE(layer)), ns / NSEC_PER_USEC,
+				    surfaces[layer]->drawn, oneDone ? "done" : "not done");
+			}
+		}
+		if (!oneDone) {
 			IOLog("MiniIOMobileFramebuffer: swap %u: the GPU is not done with surface %u after %u ms; shown as it is\n",
 			    swapWord(swap, SWAP_ID), swapWord(swap, SWAP_SURFACE(layer)), SWAP_GPU_MS);
 		}
 	}
 	fStatWaiting += mach_absolute_time() - began;
+	{
+		extern uint64_t gGPULockNanos, gGPUWaitNanos, gGPUWaitMax;
+
+		fTimeLock += gGPULockNanos;
+		fTimeWaitGPU += gGPUWaitNanos;
+		fTimeWaitGPUMax = MAX(fTimeWaitGPUMax, gGPUWaitMax);
+		gGPULockNanos = gGPUWaitNanos = gGPUWaitMax = 0;
+	}
 	began = ready = mach_absolute_time();
 	if (gOnTheBeat) {
 		uint64_t period, aim, next;
