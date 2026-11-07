@@ -2,13 +2,13 @@
 
 Made by `tools/boot-args.py --markdown`; CI fails if it is out of date with the source (`tools/boot-args.py --check`).
 
-Every argument that the kernel, the loader or user space of this port reads, and which file reads it. **355 arguments**: 291 read by the kernel, 14 by the loader, 60 by user space (one is read in more than one place).
+Every argument that the kernel, the loader or user space of this port reads, and which file reads it. **361 arguments**: 296 read by the kernel, 15 by the loader, 60 by user space (one is read in more than one place).
 
 This is a catalogue of what exists and who reads it, not a manual. What an argument means is in the head of the file that reads it. The stable switches have a symbol in the configuration (`tools/hakios-config.py help SYMBOL`, `docs/configs.md`); the rest are the knobs of bring-up (a driver's steps, pauses, traces, test modes) and can change with the driver. Any of them can be given in a configuration with `CONFIG_BOOTARGS="name=value ..."`, which checks that each name is in this list.
 
 Layers: **K** the kernel, **L** the loader, **U** user space (through `sysctl kern.bootargs`).
 
-## GPU and display (79)
+## GPU and display (80)
 
 | Argument | Layer | Read by | Configuration | Set by |
 |---|---|---|---|---|
@@ -51,6 +51,7 @@ Layers: **K** the kernel, **L** the loader, **U** user space (through `sysctl ke
 | `glplain` | U | `eagl.c` | `CONFIG_GLPLAIN` |  |
 | `glprecision` | U | `eagl.c` | `CONFIG_GLPRECISION` |  |
 | `glprof` | U | `eagl.c` | `CONFIG_GLPROF` |  |
+| `glquiet` | K | `hakios.gpu.cpp` | `CONFIG_GLQUIET` |  |
 | `glshaders` | U | `eagl.c` | `CONFIG_GLSHADERS` |  |
 | `glshow` | U | `eagl.c` | `CONFIG_GLSHOW` |  |
 | `glshow_part` | U | `eagl.c` | `CONFIG_GLSHOW_PART` |  |
@@ -389,7 +390,7 @@ Layers: **K** the kernel, **L** the loader, **U** user space (through `sysctl ke
 | `ustacks_threads` | K | `user_exception_trace.c` | `CONFIG_USTACKS_THREADS` |  |
 | `ustacks_tname` | K | `user_exception_trace.c` | `CONFIG_USTACKS_TNAME` |  |
 
-## Loader (6)
+## Loader (7)
 
 | Argument | Layer | Read by | Configuration | Set by |
 |---|---|---|---|---|
@@ -399,11 +400,13 @@ Layers: **K** the kernel, **L** the loader, **U** user space (through `sysctl ke
 | `serial` | L | `loader.c` | `CONFIG_SERIAL` |  |
 | `ufs` | L | `loader.c` | `CONFIG_UFS` |  |
 | `ufs_probe` | L | `loader.c` | `CONFIG_UFS_PROBE` |  |
+| `usb_after` | L | `loader.c` | `CONFIG_USB_AFTER` |  |
 
-## User space (38)
+## User space (42)
 
 | Argument | Layer | Read by | Configuration | Set by |
 |---|---|---|---|---|
+| `-disable_user_faults` | K | `kern_exit.c` | `CONFIG__DISABLE_USER_FAULTS` |  |
 | `autounlock` | U | `inject_sb.c` | `CONFIG_AUTOUNLOCK` |  |
 | `bt` | K | `hakios.bt.c` | `CONFIG_BT` |  |
 | `bt_again` | K | `hakios.bt.c` | `CONFIG_BT_AGAIN` |  |
@@ -413,6 +416,7 @@ Layers: **K** the kernel, **L** the loader, **U** user space (through `sysctl ke
 | `caenv` | U | `inject.c`, `inject_sb.c` | `CONFIG_CAENV` |  |
 | `cc_fade` | U | `inject_sb.c` | `CONFIG_CC_FADE` |  |
 | `cpu_busy` | K | `hakios.focaltech.c` | `CONFIG_CPU_BUSY` |  |
+| `enable_proc_exit_lpexit_spin` | K | `kern_exit.c` | `CONFIG_ENABLE_PROC_EXIT_LPEXIT_SPIN` |  |
 | `gl` | U | `inject.c`, `inject_sb.c` | `CONFIG_GL` |  |
 | `glcompile` | U | `inject.c` | `CONFIG_GLCOMPILE` |  |
 | `glno` | U | `inject.c` | `CONFIG_GLNO` |  |
@@ -427,7 +431,9 @@ Layers: **K** the kernel, **L** the loader, **U** user space (through `sysctl ke
 | `metal_skip` | U | `HakiosMetalCA.m` | `CONFIG_METAL_SKIP` |  |
 | `metal_trace` | U | `HakiosMetalCA.m` | `CONFIG_METAL_TRACE` |  |
 | `metal_watch` | U | `inject.c` | `CONFIG_METAL_WATCH` |  |
+| `panic_on_error_exit` | K | `kern_exit.c` | `CONFIG_PANIC_ON_ERROR_EXIT` |  |
 | `proc_cpu` | K | `hakios.focaltech.c` | `CONFIG_PROC_CPU` |  |
+| `procexit` | K | `kern_exit.c` | `CONFIG_PROCEXIT` |  |
 | `root_apfs` | U | `init.c` | `CONFIG_ROOT_APFS` |  |
 | `sb_delay` | U | `inject_sb.c` |  | xl (XL_SB_DELAY) |
 | `switcher_wallpaper` | U | `inject_sb.c` | `CONFIG_SWITCHER_WALLPAPER` |  |
