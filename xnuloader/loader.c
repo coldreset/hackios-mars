@@ -4072,7 +4072,8 @@ fb_command(char *cmd)
 							"hakios-gl", "hakios: the server", "hakios: no GPU", "hakios: gl=",
 							"HakiosGPU", "frames in", "frame time", "from one frame to the next",
 							"cpu 5s", "focaltech: gesture", "touch screen ready", "adreno: gpu:",
-							"THE 3D CORE", "exited with", "census: ", "no program",
+							"THE 3D CORE", "exited with", "is sent signal", "hakios: running", "census: ", "no program",
+							"battery: ", "buttons: ",
 						};
 						static uint32_t at_line[4096];
 						const char *klog = (const char *)loader_ctx[CTX_LOG_PA];

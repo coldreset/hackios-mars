@@ -249,7 +249,7 @@ struct eagl {
 	id object;                      /* the EAGLContext */
 	struct hakios_gl *gl;
 	unsigned long api;
-	struct image images[256];
+	struct image images[512];
 	unsigned image_count;
 	GLuint framebuffer;             /* the one bound */
 	GLuint colour;                  /* ... and the texture that is its colour attachment (0: none, or no texture) */
@@ -532,13 +532,29 @@ static struct image *
 image_new(struct eagl *e, GLuint texture, IOSurfaceRef surface)
 {
 	struct image *image = image_of(e, texture);
+	const unsigned room = sizeof(e->images) / sizeof(e->images[0]);
 
 	if (image == NULL) {
-		if (e->image_count == sizeof(e->images) / sizeof(e->images[0])) {
-			say("hakios-gl: more textures with IOSurfaces than there is room for\n");
-			return NULL;
+		if (e->image_count == room) {
+			/* A texture CoreAnimation deleted without telling us: its slot can be taken back. */
+			for (unsigned i = 0; i < e->image_count; i++) {
+				if (!glIsTexture(e->images[i].texture)) {
+					if (e->images[i].mirror != 0) {
+						glDeleteTextures(1, &e->images[i].mirror);
+					}
+					CFRelease(e->images[i].surface);
+					image = &e->images[i];
+					break;
+				}
+			}
 		}
-		image = &e->images[e->image_count++];
+		if (image == NULL) {
+			if (e->image_count == room) {
+				say("hakios-gl: more textures with IOSurfaces than there is room for (%u)\n", room);
+				return NULL;
+			}
+			image = &e->images[e->image_count++];
+		}
 	} else {
 		if (image->mirror != 0) {
 			glDeleteTextures(1, &image->mirror);

@@ -178,6 +178,7 @@ struct hakios_show {
 static IOLock * gGPULock;                       /* around everything that is the GPU's (hakios_gpu_...) */
 static bool gGPUReported;
 static bool gGPUCached;                         /* boot-arg gpu_cached=1 */
+static bool gpu_quiet;                          /* boot-arg glquiet=1: no five-second report, so the end of the log is left to others */
 
 /* What the last seconds' submissions were and cost here, for the log. */
 static struct {
@@ -375,9 +376,10 @@ HakiosGPUStart(void)
 {
 	IOService * provider = IOService::getPlatform();
 	HakiosGPU * gpu;
-	uint32_t cached = 0;
+	uint32_t cached = 0, quiet = 0;
 
 	gGPUCached = PE_parse_boot_argn("gpu_cached", &cached, sizeof(cached)) && cached != 0;
+	gpu_quiet = PE_parse_boot_argn("glquiet", &quiet, sizeof(quiet)) && quiet != 0;
 	gGPULock = IOLockAlloc();
 	gpu = OSTypeAlloc(HakiosGPU);
 	if (gpu == NULL || provider == NULL || !gpu->init() || !gpu->attach(provider)) {
@@ -1094,7 +1096,12 @@ HakiosGPUUserClient::submit(struct msm_gem_submit * request)
 		gGPUStat.since = began;
 	}
 	absolutetime_to_nanoseconds(mach_absolute_time() - gGPUStat.since, &nanos);
-	if (nanos >= 5 * NSEC_PER_SEC) {
+	if (gpu_quiet) {
+		gGPUStat.since = 0;
+		gGPUStat.submissions = gGPUStat.commands = gGPUStat.buffers = gGPUStat.made = 0;
+		gGPUStat.flushed = gGPUStat.flushing = gGPUStat.waiting = gGPUStat.taking = gGPUStat.making = 0;
+		gGPUStat.waits = gGPUStat.over = gGPUStat.surfaces = 0;
+	} else if (nanos >= 5 * NSEC_PER_SEC) {
 		uint64_t flushing, waiting, taking, worked;
 		uint32_t timed, by[7];
 
