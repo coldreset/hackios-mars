@@ -264,10 +264,23 @@ static bool platform_is_lemonade(void) {
     DTEntry entry;
     const void *value;
     unsigned size;
-    if (SecureDTLookupEntry(NULL, "/arm-io", &entry) != kSuccess ||
-        SecureDTGetProperty(entry, "device_type", &value, &size) != kSuccess) {
-        return false;
+    /*
+     * mars hands the kernel the vendor's Linux-shaped tree: there is no /arm-io and nothing
+     * names the machine (the CNSS node is there, at /soc/qcom,cnss-qca6490@b0000000).  The
+     * boot argument hakiospcie_wifi= is the opt-in, so a tree that says nothing is not a
+     * refusal; only a tree that names a different machine is.
+     */
+    if (SecureDTLookupEntry(NULL, "/arm-io", &entry) != kSuccess) {
+        hakiospcie_tl("wifi-pcie: no /arm-io here (vendor-shaped tree); the boot argument is the opt-in\n");
+        return true;
     }
+    if (SecureDTGetProperty(entry, "device_type", &value, &size) != kSuccess) {
+        hakiospcie_tl("wifi-pcie: /arm-io names no machine; the boot argument is the opt-in\n");
+        return true;
+    }
+    hakiospcie_tl("wifi-pcie: /arm-io device_type is \"%.*s\" (%u bytes)\n",
+        (int)(size > 0 && ((const char *)value)[size - 1] == 0 ? size - 1 : size),
+        (const char *)value, size);
     /* The OnePlus 9 says "lemonade"; this tree runs on mars (Mi 11 Pro), the same SM8350. */
     return (size == sizeof("lemonade") && !memcmp(value, "lemonade", size)) ||
         (size == sizeof("mars") && !memcmp(value, "mars", size));
