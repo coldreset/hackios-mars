@@ -43,9 +43,12 @@ static void __attribute__((noinline)) wr(vm_offset_t address, uint32_t value) {
 static void pause_us(unsigned us) { delay_for_interval(us, NSEC_PER_USEC); }
 static bool platform_ok(void) {
     DTEntry entry; const void *value; unsigned size;
-    return SecureDTLookupEntry(NULL, "/arm-io", &entry) == kSuccess &&
-        SecureDTGetProperty(entry, "device_type", &value, &size) == kSuccess &&
-        size == sizeof("lemonade") && !memcmp(value, "lemonade", size);
+    if (SecureDTLookupEntry(NULL, "/arm-io", &entry) != kSuccess ||
+        SecureDTGetProperty(entry, "device_type", &value, &size) != kSuccess)
+        return false;
+    /* The OnePlus 9 says "lemonade"; mars is the same SM8350 with the same RSC/RPMh layout. */
+    return (size == sizeof("lemonade") && !memcmp(value, "lemonade", size)) ||
+        (size == sizeof("mars") && !memcmp(value, "mars", size));
 }
 struct radio_db_slave { uint16_t id, header, data, count, version, reserved[3]; };
 struct radio_db_header {

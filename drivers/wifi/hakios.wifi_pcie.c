@@ -1467,7 +1467,14 @@ static bool power_root(unsigned step) {
         hakiospcie_tl("wifi-pcie: root already clocked; refusing reset/power experiment\n");
         return false;
     }
-    if (!hakiospcie_radio_supply_on("ldob6", 1200) || !hakiospcie_radio_supply_on("ldob5", 880)) { return false; }
+    if (!hakiospcie_radio_supply_on("ldob6", 1200)) {
+        hakiospcie_tl("wifi-pcie: stage 2 rail ldob6 1200 mV was refused\n");
+        return false;
+    }
+    if (!hakiospcie_radio_supply_on("ldob5", 880)) {
+        hakiospcie_tl("wifi-pcie: stage 2 rail ldob5 880 mV was refused\n");
+        return false;
+    }
     hakiospcie_tl("wifi-pcie: stage 2 rails complete\n");
     if (step == 2) { return true; }
     change_gcc(0x52128, 1, 0); /* PCIe0's votable power domain */
