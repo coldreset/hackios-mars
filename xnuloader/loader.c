@@ -3195,7 +3195,12 @@ run_kernel(int have_checkpoint, uint64_t checkpoint)
 			kernel_mpidr = (uint64_t)(c[8] - '0') << PLAT->core_shift;
 		}
 		more_cores |= (starts_with(c, "cpus=") || starts_with(c, "cpumask=")) && (c == pi.cmdline || c[-1] == ' ');
-		usb_after |= starts_with(c, "usb_after=1") && (c == pi.cmdline || c[-1] == ' ');
+		if (starts_with(c, "usb_after=") && (c == pi.cmdline || c[-1] == ' ')) {
+			const char *v = c + 10;
+			int want = 0;
+			while (*v >= '0' && *v <= '9') { want = want * 10 + (*v - '0'); v++; }
+			if (*v == 0 || *v == ' ') usb_after = want;
+		}
 		{
 			unsigned n = 0;
 
@@ -4188,6 +4193,16 @@ fb_command(char *cmd)
 			fb_reply("OKAY", "");
 			log_len = 0;
 			print("== XNULOADER run (usb) ==\n");
+			/*
+			 * usb_after=4: shut the controller down *before* the kernel runs.  The gadget that is
+			 * handed over stays as it was, and the endpoints are dead when the kernel comes back
+			 * (stop() and start_ex() afterwards do not bring them back).  With the controller down
+			 * for the whole run, the restart afterwards is a first start, not a second one.
+			 */
+			if (usb_after >= 4 && USB != NULL) {
+				USB->stop();
+				print("usb: the controller is shut down for the run\n");
+			}
 			if (!run_kernel(have_cp, cp)) {
 				set_result("not-started", 0, 0);
 				compose_logs(NULL, 0);
@@ -4213,11 +4228,24 @@ fb_command(char *cmd)
 					 * usb_after=1: take the controller back for a while so the log can be fetched over
 					 * the cable (xl log, fastboot get_staged) instead of photographed. Nothing is written.
 					 */
-					if (usb_after) {
-						print("usb: the kernel is back; taking the controller again\n");
+					if (usb_after == 2) {
+						/*
+						 * usb_after=2: the same gadget, not a second usb_start().  The kernel has no USB
+						 * code of its own (no dwc3 or xhci in this tree), so the controller is exactly as
+						 * this loader left it; starting it again is what wedged the endpoints.
+						 */
+						print("usb: the kernel is back; polling the gadget that was already there\n");
+						for (unsigned n = 0; n < 24000; n++) {
+							usb_poll_command();
+							wdt_pet();
+							BS->stall(10000);
+						}
+					} else if (usb_after) {
+						print("usb: the kernel is back; taking the controller again, for four minutes\n");
+						if (usb_after >= 3 && USB != NULL) USB->stop();
 						USB = NULL;
 						if (usb_start()) {
-							for (unsigned n = 0; n < 6000; n++) {     /* 60 s, unless a command ends it */
+							for (unsigned n = 0; n < 24000; n++) {    /* 240 s, unless a command ends it */
 								usb_poll_command();
 								wdt_pet();
 								BS->stall(10000);
