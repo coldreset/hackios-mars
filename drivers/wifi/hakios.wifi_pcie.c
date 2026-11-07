@@ -24,9 +24,22 @@
 #include <sys/hakios.lx.h>
 #include <sys/hakios.qrtr.h>
 #include <sys/systm.h>
+#include <sys/random.h>
 #include <vm/memory_types.h>
 #include <vm/vm_kern.h>
 #include "hakiospcie_mhi_protocol.h"
+
+/* ---- what this file uses before it defines it (see the end of the file) ---- */
+bool hakios_qrtr_attach(int (*send)(const void *, unsigned));
+void hakios_qrtr_deliver(const void *packet, unsigned length);
+void hakios_qrtr_poll(void);
+void hakios_qrtr_detach(void);
+int  hakiospcie_lx_os_thread(const char *name, void (*function)(void *), void *argument);
+void hakiospcie_lx_os_wakeup(const void *address);
+void hakiospcie_lx_os_unlock(void);
+bool hakiospcie_lx_os_radio_address(unsigned char *address);
+void hakiospcie_lx_os_net_attach(const unsigned char *address);
+
 
 extern void hakiospcie_tl(const char *format, ...) __printflike(1, 2);
 static vm_offset_t gcc, pins, parf, dbi, phy, config, bar;
@@ -93,7 +106,7 @@ static bool wait_mask(vm_offset_t base, unsigned offset, uint32_t mask, uint32_t
         if ((rd(base, offset) & mask) == value) { return true; }
         pause_us(10);
     }
-    hakiospcie_tl("wifi-lemonade: wait failed offset %#x mask %#x value %#x actual %#x\n",
+    hakiospcie_tl("wifi-pcie: wait failed offset %#x mask %#x value %#x actual %#x\n",
         offset, mask, value, rd(base, offset));
     return false;
 }
@@ -150,7 +163,7 @@ void hakiospcie_wifi_quiesce(void) {
         wr(pins + 64 * 0x1000 + 4, rd(pins, 64 * 0x1000 + 4) & ~2u);
     }
     __asm__ volatile("dsb sy" ::: "memory");
-    hakiospcie_tl("wifi-lemonade: emergency endpoint reset; DMA pages retained; Android reboot required\n");
+    hakiospcie_tl("wifi-pcie: emergency endpoint reset; DMA pages retained; Android reboot required\n");
 }
 void hakiospcie_wifi_stop(void) {
     driver_quiesce();
@@ -167,18 +180,18 @@ void hakiospcie_wifi_stop(void) {
                     rd(config, msi_offset + 4) == msi_old_low && (rd(config, msi_data_offset) & 0xffff) == msi_old_data &&
                     (!(msi_old_control & 0x80) || rd(config, msi_offset + 8) == msi_old_high) &&
                     (!(msi_old_control & 0x100) || rd(config, msi_mask_offset) == msi_old_mask);
-                hakiospcie_tl("wifi-lemonade: PCI MSI disabled and original configuration restored\n");
-                hakiospcie_tl("wifi-lemonade: PCI MSI restore readback %s\n", restored ? "verified" : "failed");
+                hakiospcie_tl("wifi-pcie: PCI MSI disabled and original configuration restored\n");
+                hakiospcie_tl("wifi-pcie: PCI MSI restore readback %s\n", restored ? "verified" : "failed");
                 msi_saved = false;
             }
             wr16(config + 4, endpoint_command_old & ~6u);
             if (bus_master_was_enabled) {
-                hakiospcie_tl("wifi-lemonade: endpoint bus master clear %s\n", (rd(config, 4) & 4) ? "failed" : "verified");
+                hakiospcie_tl("wifi-pcie: endpoint bus master clear %s\n", (rd(config, 4) & 4) ? "failed" : "verified");
             }
             wr(config + 0x14, bar1_old); wr(config + 0x10, bar0_old);
             wr16(config + 4, endpoint_command_old);
-            hakiospcie_tl("wifi-lemonade: endpoint BAR and memory decode restored\n");
-        } else { hakiospcie_tl("wifi-lemonade: endpoint link lost during cleanup; PERST reset required\n"); }
+            hakiospcie_tl("wifi-pcie: endpoint BAR and memory decode restored\n");
+        } else { hakiospcie_tl("wifi-pcie: endpoint link lost during cleanup; PERST reset required\n"); }
         bar_saved = false;
     }
     while (iatu_count) {
@@ -199,7 +212,7 @@ void hakiospcie_wifi_stop(void) {
         for (unsigned i = 0; i < 256; i++) { wr(parf + 0x2000 + 4 * i, sid_table_old[i]); }
         wr(parf + 0x2c00, sid_cfg_old);
         sid_saved = false;
-        hakiospcie_tl("wifi-lemonade: BDF/SID table restored after endpoint reset\n");
+        hakiospcie_tl("wifi-pcie: BDF/SID table restored after endpoint reset\n");
     }
     while (dbi_count) {
         unsigned i = --dbi_count;
@@ -242,18 +255,22 @@ void hakiospcie_wifi_stop(void) {
         wr(pins + 64 * 0x1000 + 4, radio_io); wr(pins + 64 * 0x1000, radio_cfg);
         wr(pins + 95 * 0x1000 + 4, clkreq_io); wr(pins + 95 * 0x1000, clkreq_cfg);
         radio_started = false;
-        hakiospcie_tl("wifi-lemonade: WLAN_EN/CLKREQ restored; endpoint held off\n");
+        hakiospcie_tl("wifi-pcie: WLAN_EN/CLKREQ restored; endpoint held off\n");
     }
-    hakiospcie_tl("wifi-lemonade: GCC votes restored; RPMh supply votes retained until reboot; %s\n",
+    hakiospcie_tl("wifi-pcie: GCC votes restored; RPMh supply votes retained until reboot; %s\n",
         bus_master_was_enabled ? "endpoint DMA stopped before unmap" : "DMA never enabled");
 }
 static bool platform_is_lemonade(void) {
     DTEntry entry;
     const void *value;
     unsigned size;
-    return SecureDTLookupEntry(NULL, "/arm-io", &entry) == kSuccess &&
-        SecureDTGetProperty(entry, "device_type", &value, &size) == kSuccess &&
-        size == sizeof("lemonade") && !memcmp(value, "lemonade", size);
+    if (SecureDTLookupEntry(NULL, "/arm-io", &entry) != kSuccess ||
+        SecureDTGetProperty(entry, "device_type", &value, &size) != kSuccess) {
+        return false;
+    }
+    /* The OnePlus 9 says "lemonade"; this tree runs on mars (Mi 11 Pro), the same SM8350. */
+    return (size == sizeof("lemonade") && !memcmp(value, "lemonade", size)) ||
+        (size == sizeof("mars") && !memcmp(value, "mars", size));
 }
 
 static bool inspect(void) {
@@ -272,25 +289,25 @@ static bool inspect(void) {
     pins = ml_io_map_unmappable(0xf100000, 0x100000, VM_WIMG_IO);
     if (!gcc || !pins) { return false; }
     for (unsigned i = 0; i < sizeof(clocks) / sizeof(clocks[0]); i++) {
-        hakiospcie_tl("wifi-lemonade: GCC %s %#x = %#x\n", clocks[i].name,
+        hakiospcie_tl("wifi-pcie: GCC %s %#x = %#x\n", clocks[i].name,
             clocks[i].offset, rd(gcc, clocks[i].offset));
     }
     for (unsigned i = 0; i < sizeof(gpio) / sizeof(gpio[0]); i++) {
-        hakiospcie_tl("wifi-lemonade: GPIO%u cfg %#x io %#x irq %#x\n", gpio[i],
+        hakiospcie_tl("wifi-pcie: GPIO%u cfg %#x io %#x irq %#x\n", gpio[i],
             rd(pins, gpio[i] * 0x1000), rd(pins, gpio[i] * 0x1000 + 4),
             rd(pins, gpio[i] * 0x1000 + 8));
     }
     /* A read of an unpowered interconnect can abort the CPU. */
     if (!(rd(gcc, 0x6b004) & (1u << 31)) || (rd(gcc, 0x6b000) & 1) ||
         ((rd(gcc, 0x6b024) | rd(gcc, 0x6b01c) | rd(gcc, 0x6b014)) & (1u << 31))) {
-        hakiospcie_tl("wifi-lemonade: PCIe power/clocks not ready; PARF/DBI/endpoint not accessed\n");
+        hakiospcie_tl("wifi-pcie: PCIe power/clocks not ready; PARF/DBI/endpoint not accessed\n");
         return true;
     }
     parf = ml_io_map_unmappable(0x1c00000, 0x3000, VM_WIMG_IO);
     if (!parf) { return false; }
-    hakiospcie_tl("wifi-lemonade: PARF sys %#x pm %#x phy %#x ltssm %#x device_type %#x\n",
+    hakiospcie_tl("wifi-pcie: PARF sys %#x pm %#x phy %#x ltssm %#x device_type %#x\n",
         rd(parf, 0), rd(parf, 0x20), rd(parf, 0x40), rd(parf, 0x1b0), rd(parf, 0x1000));
-    hakiospcie_tl("wifi-lemonade: inspection leaves DBI/endpoint untouched\n");
+    hakiospcie_tl("wifi-pcie: inspection leaves DBI/endpoint untouched\n");
     return true;
 }
 /* SM8350 QMP PCIe v3: board DT revision 21101, not the generic 10100 table.
@@ -398,7 +415,7 @@ static bool route_endpoint(void) {
         if (rd(parf, 0x2000 + 4 * i) != (i == hash ? 0x01000100u : 0)) { return false; }
     }
     if (rd(parf, 0x2c00) & 1) { return false; }
-    hakiospcie_tl("wifi-lemonade: stage 14 BDF 0x100 -> SID 0x1c01 hash %#x table verified; bus master disabled\n", hash);
+    hakiospcie_tl("wifi-pcie: stage 14 BDF 0x100 -> SID 0x1c01 hash %#x table verified; bus master disabled\n", hash);
     return true;
 }
 
@@ -448,7 +465,7 @@ static void dma_restore(void) {
         if (!dma_tlb_sync()) {
             dma_space.retain_pages = true;
             lck_mtx_unlock(&hakios_smmu_lock);
-            hakiospcie_tl("wifi-lemonade: DMA cleanup failed; tables retained with endpoint reset\n");
+            hakiospcie_tl("wifi-pcie: DMA cleanup failed; tables retained with endpoint reset\n");
             return;
         }
         if (rd(dma_space.cb, 0x58) & WIFI_FSR_FAULT) { wr(dma_space.cb + 0x58, rd(dma_space.cb, 0x58) & WIFI_FSR_FAULT); }
@@ -466,7 +483,7 @@ static void dma_restore(void) {
         if (!cbar_ok && dma_space.cbar == 0 && cbar_after == 0x1f300 &&
             !(rd(dma_space.cb, 0) & 1) && !(dma_space.smr & (1u << 31))) {
             cbar_ok = true;
-            hakiospcie_tl("wifi-lemonade: inactive CBAR stage-1 type retained until reboot; stream invalid and context disabled\n");
+            hakiospcie_tl("wifi-pcie: inactive CBAR stage-1 type retained until reboot; stream invalid and context disabled\n");
         }
         bool restored = cbar_ok && rd(dma_space.mmio, 0x800 + 4 * dma_space.match) == dma_space.smr &&
             rd(dma_space.mmio, 0xc00 + 4 * dma_space.match) == dma_space.s2cr &&
@@ -474,12 +491,12 @@ static void dma_restore(void) {
         for (unsigned i = 0; i < 9; i++) {
             uint32_t actual = rd(dma_space.cb, dma_cb_offsets[i]);
             if (actual != dma_space.cb_old[i]) {
-                hakiospcie_tl("wifi-lemonade: restore CB offset %#x expected %#x actual %#x\n", dma_cb_offsets[i], dma_space.cb_old[i], actual);
+                hakiospcie_tl("wifi-pcie: restore CB offset %#x expected %#x actual %#x\n", dma_cb_offsets[i], dma_space.cb_old[i], actual);
                 restored = false;
             }
         }
         if (!restored) {
-            hakiospcie_tl("wifi-lemonade: restore globals SMR %#x/%#x S2CR %#x/%#x CBAR %#x/%#x CBA2R %#x/%#x (actual/old)\n",
+            hakiospcie_tl("wifi-pcie: restore globals SMR %#x/%#x S2CR %#x/%#x CBAR %#x/%#x CBA2R %#x/%#x (actual/old)\n",
                 rd(dma_space.mmio, 0x800 + 4 * dma_space.match), dma_space.smr,
                 rd(dma_space.mmio, 0xc00 + 4 * dma_space.match), dma_space.s2cr,
                 rd(dma_space.mmio, 0x1000 + 4 * dma_space.context), dma_space.cbar,
@@ -487,7 +504,7 @@ static void dma_restore(void) {
         }
         dma_space.owned = false;
         lck_mtx_unlock(&hakios_smmu_lock);
-        hakiospcie_tl("wifi-lemonade: DMA context/stream release %s; translation registers restored after endpoint reset\n", restored ? "verified" : "failed");
+        hakiospcie_tl("wifi-pcie: DMA context/stream release %s; translation registers restored after endpoint reset\n", restored ? "verified" : "failed");
         if (!restored) { dma_space.retain_pages = true; return; }
     }
     if (dma_space.control) { ml_io_unmap(dma_space.control, PAGE_SIZE); dma_space.control = 0; }
@@ -571,7 +588,7 @@ static bool dma_allocate(unsigned requested, bool coherent, vm_offset_t *memory,
     uint64_t unused = 0;
     if (!ok || dma_walk(iova - 4096, &unused) || dma_walk(iova + size, &unused)) { return false; }
     *memory = coherent ? uncached : cached; *address = iova;
-    hakiospcie_tl("wifi-lemonade: owned DMA allocation %u requested %u mapped %u pages %u guards verified\n",
+    hakiospcie_tl("wifi-pcie: owned DMA allocation %u requested %u mapped %u pages %u guards verified\n",
         allocation, requested, size, size / 4096);
     return true;
 }
@@ -623,7 +640,7 @@ static bool dma_prepare(bool extended) {
         }
         uint64_t unused = 0;
         if (dma_walk(WIFI_MHI_IOVA - 4096, &unused) || dma_walk(WIFI_MHI_IOVA + WIFI_MHI_SIZE, &unused)) { return false; }
-        hakiospcie_tl("wifi-lemonade: MHI DMA arena verified 2048 pages with outer guards; control uses uncached alias\n");
+        hakiospcie_tl("wifi-pcie: MHI DMA arena verified 2048 pages with outer guards; control uses uncached alias\n");
     }
     dma_flush(dma_space.tables, WIFI_TABLE_SIZE);
     dma_flush(dma_space.data, WIFI_DMA_SIZE);
@@ -648,7 +665,7 @@ static bool dma_prepare(bool extended) {
     dma_space.cbar = rd(dma_space.mmio, 0x1000 + 4 * context); dma_space.cba2r = rd(dma_space.mmio, 0x1800 + 4 * context);
     for (unsigned i = 0; i < 9; i++) { dma_space.cb_old[i] = rd(dma_space.cb, dma_cb_offsets[i]); }
     dma_space.owned = true; /* journal is complete before the first write */
-    hakiospcie_tl("wifi-lemonade: claiming SMMU match %u context %u for SID 0x1c01 only\n", match, context);
+    hakiospcie_tl("wifi-pcie: claiming SMMU match %u context %u for SID 0x1c01 only\n", match, context);
     wr(dma_space.cb, 0);
     wr(dma_space.mmio + 0x1800 + 4 * context, 1);
     wr(dma_space.mmio + 0x1000 + 4 * context, (1u << 16) | (3u << 8) | (15u << 12));
@@ -669,7 +686,7 @@ static bool dma_prepare(bool extended) {
             rd(dma_space.cb, 0x24) == (uint32_t)(root >> 32);
     }
     lck_mtx_unlock(&hakios_smmu_lock);
-    hakiospcie_tl("wifi-lemonade: SMMU readback SMR %#x S2CR %#x CBAR %#x CBA2R %#x SCTLR %#x TCR %#x TCR2 %#x TTBR %#x:%#x expected %#llx\n",
+    hakiospcie_tl("wifi-pcie: SMMU readback SMR %#x S2CR %#x CBAR %#x CBA2R %#x SCTLR %#x TCR %#x TCR2 %#x TTBR %#x:%#x expected %#llx\n",
         rd(dma_space.mmio, 0x800 + 4 * match), rd(dma_space.mmio, 0xc00 + 4 * match),
         rd(dma_space.mmio, 0x1000 + 4 * context), rd(dma_space.mmio, 0x1800 + 4 * context),
         rd(dma_space.cb, 0), rd(dma_space.cb, 0x30), rd(dma_space.cb, 0x10),
@@ -679,7 +696,7 @@ static bool dma_prepare(bool extended) {
     for (unsigned offset = 0; offset < WIFI_DMA_SIZE; offset += 4096) {
         uint64_t translated = 0;
         if (!dma_walk(WIFI_DMA_IOVA + offset, &translated) || translated != kvtophys(dma_space.data + offset)) {
-            hakiospcie_tl("wifi-lemonade: table page %u failed\n", offset / 4096);
+            hakiospcie_tl("wifi-pcie: table page %u failed\n", offset / 4096);
             return false;
         }
         verified++;
@@ -694,13 +711,13 @@ static bool dma_prepare(bool extended) {
         }
         if (!dma_translate(WIFI_DMA_IOVA - 4096, &before) || !dma_translate(WIFI_DMA_IOVA + WIFI_DMA_SIZE, &after) ||
             !(before & 1) || !(after & 1)) { return false; }
-        hakiospcie_tl("wifi-lemonade: optional ATOS hardware translation checks passed\n");
+        hakiospcie_tl("wifi-pcie: optional ATOS hardware translation checks passed\n");
     } else {
-        hakiospcie_tl("wifi-lemonade: ATOS unsupported (IDR0.ATOSNS=1); table walk is software validation only\n");
+        hakiospcie_tl("wifi-pcie: ATOS unsupported (IDR0.ATOSNS=1); table walk is software validation only\n");
     }
-    hakiospcie_tl("wifi-lemonade: SMMU pre-DMA raw FSR %#x global %#x\n", rd(dma_space.cb, 0x58), rd(dma_space.mmio, 0x48));
+    hakiospcie_tl("wifi-pcie: SMMU pre-DMA raw FSR %#x global %#x\n", rd(dma_space.cb, 0x58), rd(dma_space.mmio, 0x48));
     if ((rd(dma_space.cb, 0x58) & WIFI_FSR_FAULT) || rd(dma_space.mmio, 0x48)) { return false; }
-    hakiospcie_tl("wifi-lemonade: stage 15 SMMU configured; table walk verified %u pages and unmapped guards; bus master disabled\n", verified);
+    hakiospcie_tl("wifi-pcie: stage 15 SMMU configured; table walk verified %u pages and unmapped guards; bus master disabled\n", verified);
     return true;
 }
 static bool bhi_request(uint64_t address, unsigned size) {
@@ -719,7 +736,7 @@ static bool dma_fault_probe(void) {
     /* No firmware is supplied: ask PBL to read an unmapped guard page, then
      * require a translation fault from this exact SID before any real image. */
     uint64_t guard = WIFI_DMA_IOVA + WIFI_DMA_SIZE;
-    hakiospcie_tl("wifi-lemonade: stage 16 requesting PBL read of unmapped guard %#llx, 4096 bytes; no firmware supplied\n", guard);
+    hakiospcie_tl("wifi-pcie: stage 16 requesting PBL read of unmapped guard %#llx, 4096 bytes; no firmware supplied\n", guard);
     if (!bhi_request(guard, 4096)) { return false; }
     for (unsigned i = 0; i < 2000; i++) {
         if ((rd(dma_space.cb, 0x58) & WIFI_FSR_FAULT) || rd(dma_space.mmio, 0x48)) { break; }
@@ -728,10 +745,10 @@ static bool dma_fault_probe(void) {
     uint32_t fsr = rd(dma_space.cb, 0x58), global = rd(dma_space.mmio, 0x48);
     uint64_t far = rd64(dma_space.cb + 0x60);
     uint32_t sid = rd(dma_space.mmio, 0x1400 + 4 * dma_space.context) & 0xffff;
-    hakiospcie_tl("wifi-lemonade: DMA guard result FSR %#x FAR %#llx SID %#x global %#x BHI %#x EE %u\n",
+    hakiospcie_tl("wifi-pcie: DMA guard result FSR %#x FAR %#llx SID %#x global %#x BHI %#x EE %u\n",
         fsr, far, sid, global, rd(bar, 0x12c), rd(bar, 0x128));
     if (!(fsr & 2) || (far & ~4095ull) != guard || sid != 0x1c01 || global) { return false; }
-    hakiospcie_tl("wifi-lemonade: stage 16 endpoint DMA guard blocked by owned SMMU context; SID 0x1c01 confirmed\n");
+    hakiospcie_tl("wifi-pcie: stage 16 endpoint DMA guard blocked by owned SMMU context; SID 0x1c01 confirmed\n");
     return true;
 }
 static uint32_t wifi_crc32(const uint8_t *data, unsigned count) {
@@ -750,13 +767,13 @@ static bool firmware_probe(void) {
      * this exact kernel. Here also verify the bytes extracted from APFS. */
     if (!firmware || size != 5178848 || memcmp(firmware, "\177ELF", 4) ||
         wifi_crc32(firmware, WIFI_DMA_SIZE) != 0xaf54a935u) {
-        hakiospcie_tl("wifi-lemonade: original-device firmware missing or BHI prefix checksum mismatch\n");
+        hakiospcie_tl("wifi-pcie: original-device firmware missing or BHI prefix checksum mismatch\n");
         return false;
     }
     memcpy((void *)dma_space.data, firmware, WIFI_DMA_SIZE);
     if (wifi_crc32((const uint8_t *)dma_space.data, WIFI_DMA_SIZE) != 0xaf54a935u) { return false; }
     dma_flush(dma_space.data, WIFI_DMA_SIZE);
-    hakiospcie_tl("wifi-lemonade: stage 17 transferring verified original-device BHI prefix, 524288 bytes\n");
+    hakiospcie_tl("wifi-pcie: stage 17 transferring verified original-device BHI prefix, 524288 bytes\n");
     if (!bhi_request(WIFI_DMA_IOVA, WIFI_DMA_SIZE)) { return false; }
     uint32_t status = 0, ee = 0, fsr = 0, global = 0;
     bool ready = false;
@@ -767,10 +784,10 @@ static bool firmware_probe(void) {
         if ((status >> 30) == 2 && ee == 1) { ready = true; break; }
         pause_us(10000);
     }
-    hakiospcie_tl("wifi-lemonade: BHI result status %#x EE %u MHI %#x FSR %#x global %#x error %#x\n",
+    hakiospcie_tl("wifi-pcie: BHI result status %#x EE %u MHI %#x FSR %#x global %#x error %#x\n",
         status, ee, rd(bar, 0x48), fsr, global, rd(bar, 0x130));
     if (!ready) { return false; }
-    hakiospcie_tl("wifi-lemonade: stage 17 BHI transfer complete; execution environment SBL; no SMMU fault\n");
+    hakiospcie_tl("wifi-pcie: stage 17 BHI transfer complete; execution environment SBL; no SMMU fault\n");
     return true;
 }
 /* Polling first: PCI MSI targets an owned mailbox, without a CPU IRQ handler.
@@ -788,7 +805,7 @@ static void mhi_write_address(unsigned offset, uint64_t value) {
 static bool mhi_dma_ok(void) {
     uint32_t fsr = rd(dma_space.cb, 0x58), global = rd(dma_space.mmio, 0x48);
     if (!(fsr & WIFI_FSR_FAULT) && !global) { return true; }
-    hakiospcie_tl("wifi-lemonade: MHI DMA fault FSR %#x FAR %#llx global %#x\n", fsr, rd64(dma_space.cb + 0x60), global);
+    hakiospcie_tl("wifi-pcie: MHI DMA fault FSR %#x FAR %#llx global %#x\n", fsr, rd64(dma_space.cb + 0x60), global);
     return false;
 }
 #define MHI_IPCR_MTU 32768u
@@ -851,11 +868,11 @@ static bool ipcr_receive(const uint8_t *data, unsigned size) {
         if (header.source_port == 0xfffe) { header.source_port = QRTR_CONTROL_PORT; }
         if (header.dest_port == 0xfffe) { header.dest_port = QRTR_CONTROL_PORT; }
         offset = 16 + data[3];
-    } else { hakiospcie_tl("wifi-lemonade: IPCR packet has unsupported QRTR version/length\n"); return false; }
+    } else { hakiospcie_tl("wifi-pcie: IPCR packet has unsupported QRTR version/length\n"); return false; }
     if (offset > size || !header.size || header.size > size - offset) { return false; }
     ipcr.rx_packets++;
     if (ipcr.rx_packets <= 20) {
-        hakiospcie_tl("wifi-lemonade: QRTR packet type %u payload %u bytes\n", header.type, header.size);
+        hakiospcie_tl("wifi-pcie: QRTR packet type %u payload %u bytes\n", header.type, header.size);
     }
     if (header.confirm) {
         struct hakiospcie_qrtr_control resume = {7, {header.dest_node, header.dest_port, 0, 0}};
@@ -873,7 +890,7 @@ static bool ipcr_receive(const uint8_t *data, unsigned size) {
             }
         } else if (control.command == 4 && header.size >= sizeof(control)) {
             ipcr.services++;
-            hakiospcie_tl("wifi-lemonade: QRTR service %#x version %u instance %u announced\n",
+            hakiospcie_tl("wifi-pcie: QRTR service %#x version %u instance %u announced\n",
                 control.words[0], control.words[1] & 255, control.words[1] >> 8);
             if (control.words[0] == 0x45 && (control.words[1] & 255) == 1) {
                 ipcr.service_node = control.words[2]; ipcr.service_port = control.words[3];
@@ -890,7 +907,7 @@ static bool ipcr_receive(const uint8_t *data, unsigned size) {
         unsigned transaction = qmi[1] | (qmi[2] << 8), message = qmi[3] | (qmi[4] << 8);
         unsigned payload = qmi[5] | (qmi[6] << 8);
         if (payload != header.size - 7) { return false; }
-        hakiospcie_tl("wifi-lemonade: QMI packet type %u transaction %u message %#x payload %u bytes\n", qmi[0], transaction, message, payload);
+        hakiospcie_tl("wifi-pcie: QMI packet type %u transaction %u message %#x payload %u bytes\n", qmi[0], transaction, message, payload);
         if (qmi[0] == 2 && transaction == ipcr.transaction && message == ipcr.message) {
             unsigned at = 7;
             while (at + 3 <= header.size) {
@@ -899,10 +916,10 @@ static bool ipcr_receive(const uint8_t *data, unsigned size) {
                 if (type == 2 && length == 4) {
                     unsigned result = qmi[at] | (qmi[at + 1] << 8), error = qmi[at + 2] | (qmi[at + 3] << 8);
                     ipcr.response_seen = true; ipcr.response_result = result; ipcr.response_error = error;
-                    hakiospcie_tl("wifi-lemonade: WLFW response message %#x result %u error %u\n", message, result, error);
+                    hakiospcie_tl("wifi-pcie: WLFW response message %#x result %u error %u\n", message, result, error);
                     if (message == 0x24) {
                         ipcr.capability_seen = true; ipcr.capability_ok = result == 0 && error == 0;
-                        hakiospcie_tl("wifi-lemonade: WLFW capability response result %u error %u\n", result, error);
+                        hakiospcie_tl("wifi-pcie: WLFW capability response result %u error %u\n", result, error);
                     }
                 }
                 at += length;
@@ -923,7 +940,7 @@ static bool ipcr_receive(const uint8_t *data, unsigned size) {
                         unsigned configs = qmi[pos + 8]; pos += 9;
                         if (configs > 2 || configs * 13 > end - pos) { return false; }
                         ipcr.memory[i].configs = configs; pos += configs * 13;
-                        hakiospcie_tl("wifi-lemonade: WLFW memory request %u type %u bytes %u configs %u\n",
+                        hakiospcie_tl("wifi-pcie: WLFW memory request %u type %u bytes %u configs %u\n",
                             i, ipcr.memory[i].type, ipcr.memory[i].size, configs);
                     }
                     if (pos != end) { return false; }
@@ -934,7 +951,7 @@ static bool ipcr_receive(const uint8_t *data, unsigned size) {
             if (at != header.size) { return false; }
         } else if (qmi[0] == 4 && message == 0x37) {
             ipcr.memory_ready = true;
-            hakiospcie_tl("wifi-lemonade: WLFW firmware memory ready indication\n");
+            hakiospcie_tl("wifi-pcie: WLFW firmware memory ready indication\n");
         }
     }
     return true;
@@ -949,7 +966,7 @@ static bool ipcr_transfer_event(unsigned channel, unsigned code, uint64_t pointe
         return true;
     }
     if ((code != 2 && code != 4) || !hakiospcie_mhi_pointer_valid(pointer, base, 32)) {
-        hakiospcie_tl("wifi-lemonade: IPCR transfer rejected channel %u code %u length %u\n", channel, code, length);
+        hakiospcie_tl("wifi-pcie: IPCR transfer rejected channel %u code %u length %u\n", channel, code, length);
         return false;
     }
     unsigned index = (unsigned)((pointer - base) / 16);
@@ -987,12 +1004,12 @@ static bool mhi_events(void) {
             vm_offset_t context = dma_space.control + 0x800 + n * 44;
             uint64_t pointer = ((uint64_t)rd(context, 32) << 32) | rd(context, 28);
             if (!hakiospcie_mhi_pointer_valid(pointer, base, mhi_ring_count[n])) {
-                hakiospcie_tl("wifi-lemonade: MHI event ring %u invalid read pointer %#llx\n", n, pointer);
+                hakiospcie_tl("wifi-pcie: MHI event ring %u invalid read pointer %#llx\n", n, pointer);
                 for (unsigned word = 0; word < 11; word++) {
-                    hakiospcie_tl("wifi-lemonade: MHI context %u word %u = %#x\n", n, word, rd(context, 4 * word));
+                    hakiospcie_tl("wifi-pcie: MHI context %u word %u = %#x\n", n, word, rd(context, 4 * word));
                 }
                 vm_offset_t event_base = dma_space.control + mhi_ring_offset[n];
-                hakiospcie_tl("wifi-lemonade: MHI first event words %#x %#x %#x %#x next %#x %#x %#x %#x\n",
+                hakiospcie_tl("wifi-pcie: MHI first event words %#x %#x %#x %#x next %#x %#x %#x %#x\n",
                     rd(event_base, 0), rd(event_base, 4), rd(event_base, 8), rd(event_base, 12),
                     rd(event_base, 16), rd(event_base, 20), rd(event_base, 24), rd(event_base, 28));
                 return false;
@@ -1003,7 +1020,7 @@ static bool mhi_events(void) {
             uint32_t word0 = event->word0, word1 = event->word1;
             unsigned type = (word1 >> 16) & 255, value = word0 >> 24;
             if (mhi.events < 32) {
-                hakiospcie_tl("wifi-lemonade: MHI event ring %u type %#x value %u channel %u\n", n, type, value, word1 >> 24);
+                hakiospcie_tl("wifi-pcie: MHI event ring %u type %#x value %u channel %u\n", n, type, value, word1 >> 24);
             }
             mhi.events++;
             if (type == 0x20) {
@@ -1015,14 +1032,14 @@ static bool mhi_events(void) {
                 if (value == 3) { return false; } /* crash-dump environment */
             } else if (type == 0x21) {
                 if (!ipcr.pending_command || event->pointer != ipcr.pending_command || value != 1) {
-                    hakiospcie_tl("wifi-lemonade: IPCR command completion mismatch code %u\n", value);
+                    hakiospcie_tl("wifi-pcie: IPCR command completion mismatch code %u\n", value);
                     return false;
                 }
                 ipcr.command_code = value;
             } else if (type == 0x22) {
                 if (!ipcr_transfer_event(word1 >> 24, value, event->pointer, word0 & 0xffff)) { return false; }
             } else if (type != 0x50) {
-                hakiospcie_tl("wifi-lemonade: unsupported MHI event type %#x\n", type);
+                hakiospcie_tl("wifi-pcie: unsupported MHI event type %#x\n", type);
                 return false;
             }
             mhi.consumed[n] = hakiospcie_mhi_next(mhi.consumed[n], mhi_ring_count[n]);
@@ -1047,7 +1064,7 @@ static bool mhi_msi_prepare(void) {
         uint32_t cap = rd(config, next);
         if ((cap & 255) != 5) { next = (cap >> 8) & 255; continue; }
         uint32_t control = cap >> 16;
-        hakiospcie_tl("wifi-lemonade: PCI MSI capability %#x control %#x\n", next, control);
+        hakiospcie_tl("wifi-pcie: PCI MSI capability %#x control %#x\n", next, control);
         if ((control & 1) || ((control >> 1) & 7) < 2) { return false; }
         msi_offset = next; msi_old_control = control;
         msi_data_offset = next + ((control & 0x80) ? 12 : 8);
@@ -1065,7 +1082,7 @@ static bool mhi_msi_prepare(void) {
         bool ok = ((rd(config, next) >> 16) & 0x71) == 0x21 &&
             rd(config, next + 4) == WIFI_MHI_IOVA + 0x1800 &&
             (!(control & 0x80) || !rd(config, next + 8));
-        hakiospcie_tl("wifi-lemonade: PCI MSI owned-mailbox configuration %s; four vectors, CPU IRQ disabled\n", ok ? "verified" : "failed");
+        hakiospcie_tl("wifi-pcie: PCI MSI owned-mailbox configuration %s; four vectors, CPU IRQ disabled\n", ok ? "verified" : "failed");
         return ok;
     }
     return false;
@@ -1078,7 +1095,7 @@ static bool mhi_ready(void) {
     mhi.channel_db = rd(bar, 0x18); mhi.event_db = rd(bar, 0x20);
     if (mhi.channel_db < 0x100 || mhi.channel_db > 0x1ff000 || (mhi.channel_db & 7) ||
         mhi.event_db < 0x100 || mhi.event_db > 0x1ff000 || (mhi.event_db & 7)) { return false; }
-    hakiospcie_tl("wifi-lemonade: MHI control alias physical %#llx cached physical %#llx next %#llx\n",
+    hakiospcie_tl("wifi-pcie: MHI control alias physical %#llx cached physical %#llx next %#llx\n",
         kvtophys(dma_space.control), kvtophys(dma_space.extra), kvtophys(dma_space.extra + 0x3000));
     volatile struct hakiospcie_mhi_context *channels = (void *)dma_space.control;
     volatile struct hakiospcie_mhi_context *events = (void *)(dma_space.control + 0x800);
@@ -1100,12 +1117,12 @@ static bool mhi_ready(void) {
     __asm__ volatile("dsb sy" ::: "memory");
     for (unsigned n = 0; n < 3; n++) {
         vm_offset_t context = dma_space.control + 0x800 + n * 44;
-        hakiospcie_tl("wifi-lemonade: MHI context %u before publish cfg/type/index %#x/%#x/%#x base %#x:%#x len %#x:%#x rp %#x:%#x wp %#x:%#x\n",
+        hakiospcie_tl("wifi-pcie: MHI context %u before publish cfg/type/index %#x/%#x/%#x base %#x:%#x len %#x:%#x rp %#x:%#x wp %#x:%#x\n",
             n, rd(context, 0), rd(context, 4), rd(context, 8), rd(context, 16), rd(context, 12),
             rd(context, 24), rd(context, 20), rd(context, 32), rd(context, 28), rd(context, 40), rd(context, 36));
         if (rd(context, 12) != WIFI_MHI_IOVA + mhi_ring_offset[n] || rd(context, 16) != 0 ||
             rd(context, 28) != WIFI_MHI_IOVA + mhi_ring_offset[n] || rd(context, 32) != 0) {
-            hakiospcie_tl("wifi-lemonade: MHI context readback before publish failed\n");
+            hakiospcie_tl("wifi-pcie: MHI context readback before publish failed\n");
             return false;
         }
     }
@@ -1123,7 +1140,7 @@ static bool mhi_ready(void) {
     if (rd(bar, 0x58) != WIFI_MHI_IOVA || rd(bar, 0x60) != WIFI_MHI_IOVA + 0x800 ||
         ((rd(bar, 0x10) >> 16) & 0xffff) != 3) { return false; }
     for (unsigned i = 0; i < 3; i++) { mhi_write_address(mhi.event_db + i * 8, events[i].write); }
-    hakiospcie_tl("wifi-lemonade: MHI contexts published NER 3 CHDB %#x ERDB %#x CFG %#x VER %#x; requesting M0\n", mhi.channel_db, mhi.event_db, rd(bar, 0x10), rd(bar, 8));
+    hakiospcie_tl("wifi-pcie: MHI contexts published NER 3 CHDB %#x ERDB %#x CFG %#x VER %#x; requesting M0\n", mhi.channel_db, mhi.event_db, rd(bar, 0x10), rd(bar, 8));
     wr(bar + 0x38, 2u << 8);
     mhi_write_address(mhi.channel_db + 127 * 8, 1); /* keep firmware awake */
     bool ready = false;
@@ -1134,12 +1151,12 @@ static bool mhi_ready(void) {
         if (((status >> 8) & 255) == 2 && mhi.m0_seen) { ready = true; break; }
         pause_us(1000);
     }
-    hakiospcie_tl("wifi-lemonade: MHI ready result status %#x EE %u events %u M0events %u EEevents %u FSR %#x global %#x\n",
+    hakiospcie_tl("wifi-pcie: MHI ready result status %#x EE %u events %u M0events %u EEevents %u FSR %#x global %#x\n",
         rd(bar, 0x48), rd(bar, 0x128), mhi.events, mhi.m0_events, mhi.ee_events,
         rd(dma_space.cb, 0x58), rd(dma_space.mmio, 0x48));
-    hakiospcie_tl("wifi-lemonade: MHI MSI mailbox %#x\n", rd(dma_space.control, 0x1800));
+    hakiospcie_tl("wifi-pcie: MHI MSI mailbox %#x\n", rd(dma_space.control, 0x1800));
     if (!ready || !mhi_dma_ok()) { return false; }
-    hakiospcie_tl("wifi-lemonade: stage 18 MHI M0 confirmed by device-written event; polling transport ready\n");
+    hakiospcie_tl("wifi-pcie: stage 18 MHI M0 confirmed by device-written event; polling transport ready\n");
     return true;
 }
 static bool mhi_full_firmware(void) {
@@ -1160,7 +1177,7 @@ static bool mhi_full_firmware(void) {
         count++;
     }
     __asm__ volatile("dsb sy" ::: "memory");
-    hakiospcie_tl("wifi-lemonade: stage 19 BHIE original firmware %u bytes, %u vectors, offset %#x\n", (unsigned)size, count, bhie);
+    hakiospcie_tl("wifi-pcie: stage 19 BHIE original firmware %u bytes, %u vectors, offset %#x\n", (unsigned)size, count, bhie);
     mhi_write_address(bhie + 0x2c, WIFI_MHI_IOVA + 0x1000);
     wr(bar + bhie + 0x34, count * sizeof(*vectors));
     wr(bar + bhie + 0x3c, (rd(bar, bhie + 0x3c) & 0xc0000000u) | 2);
@@ -1172,11 +1189,11 @@ static bool mhi_full_firmware(void) {
         if ((status >> 30) == 2 && (ee == 2 || ee == 4) && mhi.mission_seen) { complete = true; break; }
         pause_us(1000);
     }
-    hakiospcie_tl("wifi-lemonade: BHIE result status %#x EE %u MHI %#x events %u mission_event %u FSR %#x global %#x\n",
+    hakiospcie_tl("wifi-pcie: BHIE result status %#x EE %u MHI %#x events %u mission_event %u FSR %#x global %#x\n",
         rd(bar, bhie + 0x44), rd(bar, 0x128), rd(bar, 0x48), mhi.events, mhi.mission_seen,
         rd(dma_space.cb, 0x58), rd(dma_space.mmio, 0x48));
     if (!complete || !mhi_dma_ok()) { return false; }
-    hakiospcie_tl("wifi-lemonade: stage 19 full firmware running; mission environment confirmed by event; no SMMU fault\n");
+    hakiospcie_tl("wifi-pcie: stage 19 full firmware running; mission environment confirmed by event; no SMMU fault\n");
     return true;
 }
 static bool ipcr_start_command(unsigned channel) {
@@ -1194,7 +1211,7 @@ static bool ipcr_start_command(unsigned channel) {
         if (!mhi_events()) { return false; }
         pause_us(1000);
     }
-    hakiospcie_tl("wifi-lemonade: IPCR channel %u START completion %u\n", channel, ipcr.command_code);
+    hakiospcie_tl("wifi-pcie: IPCR channel %u START completion %u\n", channel, ipcr.command_code);
     ipcr.pending_command = 0;
     return ipcr.command_code == 1;
 }
@@ -1242,11 +1259,11 @@ static bool ipcr_probe(unsigned step) {
         if (ipcr.service_port && ipcr.tx_completed && ipcr.rx_packets) { ready = true; break; }
         pause_us(1000);
     }
-    hakiospcie_tl("wifi-lemonade: IPCR result tx %u completed %u rx %u hellos %u services %u WLFW %u instance %u FSR %#x global %#x\n",
+    hakiospcie_tl("wifi-pcie: IPCR result tx %u completed %u rx %u hellos %u services %u WLFW %u instance %u FSR %#x global %#x\n",
         ipcr.tx_packets, ipcr.tx_completed, ipcr.rx_packets, ipcr.hellos, ipcr.services,
         ipcr.service_port != 0, ipcr.service_instance, rd(dma_space.cb, 0x58), rd(dma_space.mmio, 0x48));
     if (!ready || !mhi_dma_ok()) { return false; }
-    hakiospcie_tl("wifi-lemonade: stage 20 IPCR channels 20/21 active; QRTR bidirectional and WLFW service found\n");
+    hakiospcie_tl("wifi-pcie: stage 20 IPCR channels 20/21 active; QRTR bidirectional and WLFW service found\n");
     if (step == 20 || step >= 22) { return true; }
     /* WLFW requires the client registration and host capabilities before a
      * target capability query. Subscribe to the PCIe memory handshake. */
@@ -1287,11 +1304,11 @@ static bool ipcr_probe(unsigned step) {
         if (!ipcr.memory_ready) { return false; }
     }
     if (!ipcr_qmi_request(0x24, NULL, 0)) { return false; }
-    hakiospcie_tl("wifi-lemonade: QMI result response %u success %u tx_completed %u rx %u FSR %#x global %#x\n",
+    hakiospcie_tl("wifi-pcie: QMI result response %u success %u tx_completed %u rx %u FSR %#x global %#x\n",
         ipcr.capability_seen, ipcr.capability_ok, ipcr.tx_completed, ipcr.rx_packets,
         rd(dma_space.cb, 0x58), rd(dma_space.mmio, 0x48));
     if (!ipcr.capability_seen || !ipcr.capability_ok || !mhi_dma_ok()) { return false; }
-    hakiospcie_tl("wifi-lemonade: stage 21 WLFW capability request/response successful over QMI; no SMMU fault\n");
+    hakiospcie_tl("wifi-pcie: stage 21 WLFW capability request/response successful over QMI; no SMMU fault\n");
     return true;
 }
 
@@ -1310,7 +1327,7 @@ const uint8_t *hakiospcie_wifi_driver_file(const char *name, uint64_t *size) {
     if (strcmp(file, "board.bin") && strcmp(file, "regdb.bin") && strcmp(file, "m3.bin")) { return NULL; }
     const uint8_t *data = hakios_image_file("fw", file, size, NULL);
     if (!data || !*size || *size > 1024 * 1024) { return NULL; }
-    hakiospcie_tl("wifi-lemonade: ath11k original firmware file %s bytes %u\n", file, (unsigned)*size);
+    hakiospcie_tl("wifi-pcie: ath11k original firmware file %s bytes %u\n", file, (unsigned)*size);
     return data;
 }
 void *hakiospcie_wifi_driver_bar(void) { return hakiospcie_wifi_driver_mode() ? (void *)bar : NULL; }
@@ -1355,7 +1372,7 @@ static int driver_send(const void *packet, unsigned length) {
     return error;
 }
 static void driver_wait(void) {
-    lx_os_lock(); lx_os_sleep(&driver_runtime.wanted, 1000000); lx_os_unlock();
+    lx_os_lock(); lx_os_sleep(&driver_runtime.wanted, 1000000); hakiospcie_lx_os_unlock();
 }
 static void driver_worker(void *unused) {
     (void)unused;
@@ -1383,7 +1400,7 @@ static void driver_worker(void *unused) {
 static void driver_quiesce(void) {
     if (driver_runtime.called) { hakios_lx_stop(); driver_runtime.called = false; }
     driver_runtime.wanted = false;
-    lx_os_wakeup(&driver_runtime.wanted);
+    hakiospcie_lx_os_wakeup(&driver_runtime.wanted);
     for (unsigned n = 0; driver_runtime.running && n < 2000; n++) { driver_wait(); }
     lck_mtx_lock(&hakiospcie_mhi_lock);
     driver_runtime.enabled = false;
@@ -1392,7 +1409,7 @@ static void driver_quiesce(void) {
         /* An unjoined worker must not lose its mappings. The caller still
          * resets the endpoint; RAM is reclaimed by the next kernel boot. */
         dma_space.retain_pages = true;
-        hakiospcie_tl("wifi-lemonade: driver worker stop timed out; DMA pages retained\n");
+        hakiospcie_tl("wifi-pcie: driver worker stop timed out; DMA pages retained\n");
         return;
     }
     if (driver_runtime.attached) { hakios_qrtr_detach(); driver_runtime.attached = false; }
@@ -1406,20 +1423,20 @@ static void driver_quiesce(void) {
 static bool driver_probe(void) {
     if (!ipcr.announcement_length || !hakios_qrtr_attach(driver_send)) { return false; }
     driver_runtime.attached = driver_runtime.enabled = driver_runtime.wanted = driver_runtime.running = true;
-    if (lx_os_thread("lemonade-mhi", driver_worker, NULL)) {
+    if (hakiospcie_lx_os_thread("lemonade-mhi", driver_worker, NULL)) {
         driver_runtime.running = false; return false;
     }
     if (wifi_mode == 24) {
         uint8_t address[6];
-        if (!lx_os_radio_address(address)) { return false; }
-        lx_os_net_attach(address);
+        if (!hakiospcie_lx_os_radio_address(address)) { return false; }
+        hakiospcie_lx_os_net_attach(address);
     }
     driver_runtime.called = true;
     int result = hakios_lx_start();
     bool ok = result == 0 && !driver_runtime.failed && mhi_dma_ok();
-    hakiospcie_tl("wifi-lemonade: ath11k driver result %d transport_failed %u FSR %#x global %#x\n",
+    hakiospcie_tl("wifi-pcie: ath11k driver result %d transport_failed %u FSR %#x global %#x\n",
         result, driver_runtime.failed, rd(dma_space.cb, 0x58), rd(dma_space.mmio, 0x48));
-    if (ok) { hakiospcie_tl("wifi-lemonade: stage 22 QCA6490 major-1 ath11k startup completed\n"); }
+    if (ok) { hakiospcie_tl("wifi-pcie: stage 22 QCA6490 major-1 ath11k startup completed\n"); }
     return ok;
 }
 static bool mhi_probe(unsigned step) {
@@ -1434,16 +1451,16 @@ static bool mhi_probe(unsigned step) {
 static bool power_root(unsigned step) {
     /* Do not reset a root complex inherited in use. */
     if (!(rd(gcc, 0x6b024) & (1u << 31))) {
-        hakiospcie_tl("wifi-lemonade: root already clocked; refusing reset/power experiment\n");
+        hakiospcie_tl("wifi-pcie: root already clocked; refusing reset/power experiment\n");
         return false;
     }
     if (!hakiospcie_radio_supply_on("ldob6", 1200) || !hakiospcie_radio_supply_on("ldob5", 880)) { return false; }
-    hakiospcie_tl("wifi-lemonade: stage 2 rails complete\n");
+    hakiospcie_tl("wifi-pcie: stage 2 rails complete\n");
     if (step == 2) { return true; }
     change_gcc(0x52128, 1, 0); /* PCIe0's votable power domain */
     if (!wait_mask(gcc, 0x6b004, 1u << 31, 1u << 31)) { return false; }
     change_gcc(0x6b004, 1u << 11, 1u << 11); /* retain flip-flops */
-    hakiospcie_tl("wifi-lemonade: stage 3 power-domain complete\n");
+    hakiospcie_tl("wifi-pcie: stage 3 power-domain complete\n");
     if (step == 3) { return true; }
     change_gcc(0x6b054, 3, 0); /* gcc_parent_map_4: external PHY PIPE */
     /* AUX = XO / 1, no M/N mode; preserve other RCG fields. */
@@ -1456,7 +1473,7 @@ static bool power_root(unsigned step) {
     change_gcc(0x52008, 0x2f, 0x2f); /* cfg, master, slave, aux, q2a; no PIPE */
     if (!wait_mask(gcc, 0x6b024, 1u << 31, 0) || !wait_mask(gcc, 0x6b014, 1u << 31, 0) ||
         !wait_mask(gcc, 0x6b028, 1u << 31, 0) || !wait_mask(gcc, 0x6b038, 1u << 31, 0)) { return false; }
-    hakiospcie_tl("wifi-lemonade: stage 4 clocks complete M/S/CFG %#x/%#x/%#x\n",
+    hakiospcie_tl("wifi-pcie: stage 4 clocks complete M/S/CFG %#x/%#x/%#x\n",
         rd(gcc, 0x6b01c), rd(gcc, 0x6b014), rd(gcc, 0x6b024));
     if (step == 4) { return true; }
     perst_cfg = rd(pins, 94 * 0x1000); perst_io = rd(pins, 94 * 0x1000 + 4);
@@ -1466,12 +1483,12 @@ static bool power_root(unsigned step) {
     pause_us(1000); /* hold the endpoint in reset throughout these probes */
     change_gcc(0x6b000, 1, 1); pause_us(1000); change_gcc(0x6b000, 1, 0);
     change_gcc(0x6c01c, 1, 1); pause_us(1000); change_gcc(0x6c01c, 1, 0);
-    hakiospcie_tl("wifi-lemonade: stage 5 resets complete\n");
+    hakiospcie_tl("wifi-pcie: stage 5 resets complete\n");
     if (step == 5) { return true; }
     parf = ml_io_map_unmappable(0x1c00000, 0x3000, VM_WIMG_IO);
     dbi = ml_io_map_unmappable(0x60000000, 0x2000, VM_WIMG_IO);
     if (!parf || !dbi) { return false; }
-    hakiospcie_tl("wifi-lemonade: stage 6 reading PARF first %#x\n", rd(parf, 0));
+    hakiospcie_tl("wifi-pcie: stage 6 reading PARF first %#x\n", rd(parf, 0));
     /* pci-msm.c initializes PARF routing BEFORE any DesignWare DBI access. */
     change_parf(0x1000, 4); /* root complex mode */
     change_parf(0x40, rd(parf, 0x40) & ~1u); /* PCIe clocks/reset path */
@@ -1480,11 +1497,11 @@ static bool power_root(unsigned step) {
     change_parf(0x174, rd(parf, 0x174) | (1u << 4));
     change_parf(0x358, 0x4000000);
     change_parf(0x1a8, rd(parf, 0x1a8) | (1u << 31));
-    hakiospcie_tl("wifi-lemonade: stage 6 controller routing complete; DBI not yet read\n");
+    hakiospcie_tl("wifi-pcie: stage 6 controller routing complete; DBI not yet read\n");
     if (step == 6) { return true; }
     phy = ml_io_map_unmappable(0x1c06000, 0x2000, VM_WIMG_IO);
     if (!phy) { return false; }
-    hakiospcie_tl("wifi-lemonade: stage 7 programming board PHY sequence\n");
+    hakiospcie_tl("wifi-pcie: stage 7 programming board PHY sequence\n");
     phy_started = true;
     for (unsigned i = 0; i < sizeof(hakiospcie_pcie_phy) / sizeof(hakiospcie_pcie_phy[0]); i++) {
         wr(phy + hakiospcie_pcie_phy[i].offset, hakiospcie_pcie_phy[i].value);
@@ -1492,16 +1509,16 @@ static bool power_root(unsigned step) {
     pause_us(1000);
     change_gcc(0x52008, 1u << 4, 1u << 4);
     if (!wait_mask(phy, 0x214, 1u << 6, 0)) { return false; }
-    hakiospcie_tl("wifi-lemonade: stage 7 PHY ready status %#x PIPE %#x; PERST held low\n", rd(phy, 0x214), rd(gcc, 0x6b030));
+    hakiospcie_tl("wifi-pcie: stage 7 PHY ready status %#x PIPE %#x; PERST held low\n", rd(phy, 0x214), rd(gcc, 0x6b030));
     if (step == 7) { return true; }
     uint32_t id = rd(dbi, 0);
-    hakiospcie_tl("wifi-lemonade: powered root id %#x command %#x link %#x PARF %#x\n",
+    hakiospcie_tl("wifi-pcie: powered root id %#x command %#x link %#x PARF %#x\n",
         id, rd(dbi, 4), rd(dbi, 0x80), rd(parf, 0));
     if (id != 0x010c17cb) { return false; }
     if (step == 8) { return true; }
     /* CNSS QCA6490: keep BT unchanged; refuse to disturb an enabled radio. */
     if ((rd(pins, 64 * 0x1000 + 4) | rd(pins, 65 * 0x1000 + 4)) & 1) {
-        hakiospcie_tl("wifi-lemonade: radio already enabled; refusing shared power experiment\n");
+        hakiospcie_tl("wifi-pcie: radio already enabled; refusing shared power experiment\n");
         return false;
     }
     /* Board supply phandles -> RPMh resource names, from its regulator nodes. */
@@ -1517,7 +1534,7 @@ static bool power_root(unsigned step) {
     wr(pins + 64 * 0x1000, (radio_cfg & ~0x3ffu) | 0x303); /* GPIO, pull-up, 10 mA output */
     pause_us(1000);
     if (!(rd(pins, 64 * 0x1000 + 4) & 1)) { return false; }
-    hakiospcie_tl("wifi-lemonade: stage 9 radio rails and WLAN_EN ready; PERST held low\n");
+    hakiospcie_tl("wifi-pcie: stage 9 radio rails and WLAN_EN ready; PERST held low\n");
     if (step == 9) { return true; }
     /* Gen1 bring-up first. Status bits use W1C: modify only the low control half. */
     change_dbi(0xa0, (rd(dbi, 0xa0) & ~0xfu) | 1, true);
@@ -1532,10 +1549,10 @@ static bool power_root(unsigned step) {
         if ((rd(dbi, 0xf28) & (1u << 10)) && (rd(dbi, 0x80) & (1u << 29))) { linked = true; break; }
         pause_us(5000);
     }
-    hakiospcie_tl("wifi-lemonade: link %s ELBI %#x status %#x LTSSM %#x\n",
+    hakiospcie_tl("wifi-pcie: link %s ELBI %#x status %#x LTSSM %#x\n",
         linked ? "up" : "timeout", rd(dbi, 0xf28), rd(dbi, 0x80), rd(parf, 0x1b0));
     if (!linked) { return false; }
-    hakiospcie_tl("wifi-lemonade: stage 10 PCIe link ready; DMA disabled\n");
+    hakiospcie_tl("wifi-pcie: stage 10 PCIe link ready; DMA disabled\n");
     if (step == 10) { return true; }
     config = ml_io_map_unmappable(0x60100000, 0x1000, VM_WIMG_IO);
     if (!config || (rd(dbi, 0x1004) & (1u << 31))) { return false; }
@@ -1550,7 +1567,7 @@ static bool power_root(unsigned step) {
     if (!wait_mask(dbi, 0x1004, 1u << 31, 1u << 31)) { return false; }
     pause_us(1000);
     uint32_t endpoint = rd(config, 0), command = rd(config, 4), revision = rd(config, 8);
-    hakiospcie_tl("wifi-lemonade: endpoint id %#x command %#x class/revision %#x\n", endpoint, command, revision);
+    hakiospcie_tl("wifi-pcie: endpoint id %#x command %#x class/revision %#x\n", endpoint, command, revision);
     if (endpoint != 0x110317cb || (command & 4)) { return false; }
     if (step == 11) { return true; }
     if (rd(dbi, 0x1204) & (1u << 31)) { return false; }
@@ -1558,7 +1575,7 @@ static bool power_root(unsigned step) {
     if (!bar) { return false; }
     bar0_old = rd(config, 0x10); bar1_old = rd(config, 0x14); endpoint_command_old = command & 0xffff;
     if ((bar0_old & 7) != 4) { /* Known board BAR0 is 64-bit memory. */
-        hakiospcie_tl("wifi-lemonade: unexpected BAR type %#x; mapping refused\n", bar0_old & 15);
+        hakiospcie_tl("wifi-pcie: unexpected BAR type %#x; mapping refused\n", bar0_old & 15);
         return false;
     }
     bar_saved = true;
@@ -1576,21 +1593,21 @@ static bool power_root(unsigned step) {
     if (rd(config, 4) & 4) { return false; }
     uint32_t hw = rd(bar, 0x224), length = rd(bar, 0), version = rd(bar, 8);
     uint32_t bhi = rd(bar, 0x28), bhie = rd(bar, 0x2c), status = rd(bar, 0x48);
-    hakiospcie_tl("wifi-lemonade: BAR TCSR version %#x (major %u minor %#x) MHI len %#x version %#x status %#x BHI %#x BHIE %#x\n",
+    hakiospcie_tl("wifi-pcie: BAR TCSR version %#x (major %u minor %#x) MHI len %#x version %#x status %#x BHI %#x BHIE %#x\n",
         hw, (hw >> 8) & 15, hw & 255, length, version, status, bhi, bhie);
     if (hw == 0 || hw == ~0u || !length || length == ~0u || !bhi || bhi > 0x1fff80 || (bhi & 3)) { return false; }
     /* Read only non-identifying boot state, never BHI serial/key-hash registers. */
     uint32_t ee = rd(bar, bhi + 0x28), boot_status = rd(bar, bhi + 0x2c);
-    hakiospcie_tl("wifi-lemonade: BHI execution environment %u status %#x; no firmware transfer\n", ee, boot_status);
+    hakiospcie_tl("wifi-pcie: BHI execution environment %u status %#x; no firmware transfer\n", ee, boot_status);
     if (ee > 6) { return false; }
-    hakiospcie_tl("wifi-lemonade: stage 12 BAR/MHI registers readable; endpoint bus master disabled\n");
+    hakiospcie_tl("wifi-pcie: stage 12 BAR/MHI registers readable; endpoint bus master disabled\n");
     if (step == 12) { return true; }
     vm_offset_t smmu = ml_io_map_unmappable(0x15000000, 0x2000, VM_WIMG_IO);
     if (!smmu) { return false; }
     uint32_t scr0 = rd(smmu, 0), idr0 = rd(smmu, 0x20), idr1 = rd(smmu, 0x24);
     unsigned matches = idr0 & 255, valid = 0, covering = 0;
     if (scr0 == ~0u || !matches || matches > 255) { return false; }
-    hakiospcie_tl("wifi-lemonade: Apps SMMU control %#x idr0 %#x idr1 %#x\n", scr0, idr0, idr1);
+    hakiospcie_tl("wifi-pcie: Apps SMMU control %#x idr0 %#x idr1 %#x\n", scr0, idr0, idr1);
     for (unsigned i = 0; i < matches; i++) {
         uint32_t smr = rd(smmu, 0x800 + 4 * i), s2cr = rd(smmu, 0xc00 + 4 * i);
         bool wide = (scr0 & (1u << 3)) != 0;
@@ -1599,10 +1616,10 @@ static bool power_root(unsigned step) {
         uint32_t stream = smr & (wide ? 0xffff : 0x7fff), mask = (smr >> 16) & (wide ? 0xffff : 0x7fff);
         if (((stream ^ 0x1c01) & ~mask) == 0) {
             covering++;
-            hakiospcie_tl("wifi-lemonade: SMMU match %u stream %#x mask %#x s2cr %#x\n", i, stream, mask, s2cr);
+            hakiospcie_tl("wifi-pcie: SMMU match %u stream %#x mask %#x s2cr %#x\n", i, stream, mask, s2cr);
         }
     }
-    hakiospcie_tl("wifi-lemonade: stage 13 SMMU survey complete; %u/%u matches used, %u cover endpoint; SMMU writes=0\n", valid, matches, covering);
+    hakiospcie_tl("wifi-pcie: stage 13 SMMU survey complete; %u/%u matches used, %u cover endpoint; SMMU writes=0\n", valid, matches, covering);
     if (step == 13) { return true; }
     if (covering || !route_endpoint()) { return false; }
     if (step == 14) { return true; }
@@ -1616,18 +1633,18 @@ void hakiospcie_wifi_init(void) {
     unsigned mode = 0;
     if (!PE_parse_boot_argn("hakiospcie_wifi", &mode, sizeof(mode)) || !mode) { return; }
     if (!platform_is_lemonade()) {
-        hakiospcie_tl("wifi-lemonade: refused on another platform\n");
+        hakiospcie_tl("wifi-pcie: refused on another platform\n");
         return;
     }
     if (mode < 1 || mode > 24) {
-        hakiospcie_tl("wifi-lemonade: mode %u unsupported; no hardware access\n", mode);
+        hakiospcie_tl("wifi-pcie: mode %u unsupported; no hardware access\n", mode);
         return;
     }
     if (mode >= 17) {
         unsigned guard_verified = 0;
         PE_parse_boot_argn("hakiospcie_dma_verified", &guard_verified, sizeof(guard_verified));
         if (guard_verified != 1) {
-            hakiospcie_tl("wifi-lemonade: firmware probe requires verified endpoint guard evidence\n");
+            hakiospcie_tl("wifi-pcie: firmware probe requires verified endpoint guard evidence\n");
             return;
         }
     }
@@ -1641,23 +1658,158 @@ void hakiospcie_wifi_init(void) {
          * station lifecycle in the explicit integrated runtime may coexist
          * with graphics and input; it still requires the DMA guard above. */
         if ((touch || gpu || cpu) && !(mode == 24 && runtime == 1)) {
-            hakiospcie_tl("wifi-lemonade: power probe refused alongside touch/GPU/CPU-policy work\n");
+            hakiospcie_tl("wifi-pcie: power probe refused alongside touch/GPU/CPU-policy work\n");
             return;
         }
         if (mode == 24 && runtime == 1)
-            hakiospcie_tl("wifi-lemonade: integrated station runtime enabled\n");
+            hakiospcie_tl("wifi-pcie: integrated station runtime enabled\n");
     }
-    hakiospcie_tl("wifi-lemonade: begin PCIe/CNSS survey mode %u\n", mode);
+    hakiospcie_tl("wifi-pcie: begin PCIe/CNSS survey mode %u\n", mode);
     wifi_mode = mode;
     bool ok = inspect();
-    hakiospcie_tl("wifi-lemonade: inspection %s; hardware writes=0; network unavailable\n", ok ? "complete" : "failed");
+    hakiospcie_tl("wifi-pcie: inspection %s; hardware writes=0; network unavailable\n", ok ? "complete" : "failed");
     if (ok && mode >= 2) {
         ok = power_root(mode);
-        hakiospcie_tl("wifi-lemonade: stage %u %s; networking not yet verified\n", mode, ok ? "passed" : "failed");
+        hakiospcie_tl("wifi-pcie: stage %u %s; networking not yet verified\n", mode, ok ? "passed" : "failed");
         if (ok && mode == 24) {
-            hakiospcie_tl("wifi-lemonade: station offered to iOS; runtime kept until normal stop\n");
+            hakiospcie_tl("wifi-pcie: station offered to iOS; runtime kept until normal stop\n");
         } else {
             hakiospcie_wifi_stop();
         }
     }
+}
+
+
+/* ---- what this first step stands in for ---------------------------------------------------------------
+ * The OnePlus 9 port carries its own QRTR router inside its Wi-Fi driver, and the Linux shim its ath11k
+ * object links against. This tree's QRTR is the ops interface the modem offers (sys/hakios.qrtr.h) and the
+ * ath11k object is not linked in yet, so these say what they are instead of failing silently.
+ */
+
+static lck_grp_t *pcie_group;
+static lck_mtx_t *pcie_lock;
+
+static void
+pcie_lock_once(void)
+{
+	if (pcie_lock == NULL) {
+		pcie_group = lck_grp_alloc_init("wifi-pcie", LCK_GRP_ATTR_NULL);
+		pcie_lock = lck_mtx_alloc_init(pcie_group, LCK_ATTR_NULL);
+	}
+}
+
+void
+lx_os_lock(void)
+{
+	pcie_lock_once();
+	lck_mtx_lock(pcie_lock);
+}
+
+void
+hakiospcie_lx_os_unlock(void)
+{
+	if (pcie_lock != NULL) {
+		lck_mtx_unlock(pcie_lock);
+	}
+}
+
+int
+lx_os_sleep(const void *address, unsigned long long nanoseconds)
+{
+	uint64_t interval, deadline;
+
+	if (pcie_lock == NULL) {
+		return 0;
+	}
+	nanoseconds_to_absolutetime(nanoseconds, &interval);
+	clock_absolutetime_interval_to_deadline(interval, &deadline);
+	return lck_mtx_sleep_deadline(pcie_lock, LCK_SLEEP_DEFAULT, (event_t)address, THREAD_UNINT, deadline);
+}
+
+void
+hakiospcie_tl(const char *format, ...)
+{
+	va_list list;
+
+	va_start(list, format);
+	printf("wifi-pcie: ");
+	vprintf(format, list);
+	va_end(list);
+}
+
+bool
+hakios_qrtr_attach(int (*send)(const void *, unsigned))
+{
+	(void)send;
+	hakiospcie_tl("the QRTR router over MHI is not written yet; QMI will not answer\n");
+	return true;
+}
+
+void
+hakios_qrtr_deliver(const void *packet, unsigned length)
+{
+	(void)packet; (void)length;
+}
+
+void
+hakios_qrtr_poll(void)
+{
+}
+
+void
+hakios_qrtr_detach(void)
+{
+}
+
+int
+hakiospcie_lx_os_thread(const char *name, void (*function)(void *), void *argument)
+{
+	thread_t thread;
+
+	if (kernel_thread_start((thread_continue_t)function, argument, &thread) != KERN_SUCCESS) {
+		return EAGAIN;
+	}
+	thread_set_thread_name(thread, name);
+	thread_deallocate(thread);
+	return 0;
+}
+
+void
+hakiospcie_lx_os_wakeup(const void *address)
+{
+	wakeup((event_t)address);
+}
+
+bool
+hakiospcie_lx_os_radio_address(unsigned char *address)
+{
+	static unsigned char local[6];
+	static bool ready;
+
+	if (!ready) {
+		read_random(local, sizeof(local));
+		local[0] = (local[0] & 0xfe) | 2;
+		ready = true;
+	}
+	memcpy(address, local, sizeof(local));
+	return true;
+}
+
+void
+hakiospcie_lx_os_net_attach(const unsigned char *address)
+{
+	(void)address;
+	hakiospcie_tl("the frames are not handed to en0 yet\n");
+}
+
+__attribute__((weak)) int
+hakios_lx_start(void)
+{
+	hakiospcie_tl("the ath11k object is not in this kernel (tools/mk-ath11k.sh, then build again)\n");
+	return ENXIO;
+}
+
+__attribute__((weak)) void
+hakios_lx_stop(void)
+{
 }
