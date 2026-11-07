@@ -776,15 +776,23 @@ extern const uint8_t *hakios_image_file(const char *, const char *, uint64_t *, 
 static bool firmware_probe(void) {
     uint64_t size = 0;
     const uint8_t *firmware = hakios_image_file("fw", "amss.bin", &size, NULL);
-    /* The host verifies the full SHA-256 and requires a passed guard test on
-     * this exact kernel. Here also verify the bytes extracted from APFS. */
-    if (!firmware || size != 5178848 || memcmp(firmware, "\177ELF", 4) ||
-        wifi_crc32(firmware, WIFI_DMA_SIZE) != 0xaf54a935u) {
+    /*
+     * The size and the checksum are this phone's own image, not the OnePlus 9's: the driver
+     * arrived with the lemonade firmware's fingerprint (5,178,848 bytes, CRC 0xaf54a935) and
+     * mars ships a different build of the same QCA6490 firmware.  This image was extracted
+     * from the phone's own NON-HLOS.bin (image/amss.bin, sha256
+     * 7c2b2a98265da095...); the check is still an identity check, it just names the right file.
+     */
+    if (!firmware || size != 5236304 || memcmp(firmware, "\177ELF", 4) ||
+        wifi_crc32(firmware, WIFI_DMA_SIZE) != 0xb163aa48u) {
         hakiospcie_tl("wifi-pcie: original-device firmware missing or BHI prefix checksum mismatch\n");
         return false;
     }
     memcpy((void *)dma_space.data, firmware, WIFI_DMA_SIZE);
-    if (wifi_crc32((const uint8_t *)dma_space.data, WIFI_DMA_SIZE) != 0xaf54a935u) { return false; }
+    if (wifi_crc32((const uint8_t *)dma_space.data, WIFI_DMA_SIZE) != 0xb163aa48u) {
+        hakiospcie_tl("wifi-pcie: the copy in the DMA buffer is not the image we were given\n");
+        return false;
+    }
     dma_flush(dma_space.data, WIFI_DMA_SIZE);
     hakiospcie_tl("wifi-pcie: stage 17 transferring verified original-device BHI prefix, 524288 bytes\n");
     if (!bhi_request(WIFI_DMA_IOVA, WIFI_DMA_SIZE)) { return false; }
@@ -1175,12 +1183,13 @@ static bool mhi_ready(void) {
 static bool mhi_full_firmware(void) {
     uint64_t size = 0;
     const uint8_t *image = hakios_image_file("fw", "amss.bin", &size, NULL);
-    if (!image || size != 5178848 || wifi_crc32(image, size) != 0x7b19c475u) { return false; }
+    /* mars's own build of the same QCA6490 firmware (see firmware_probe above). */
+    if (!image || size != 5236304 || wifi_crc32(image, size) != 0xb4376a2au) { return false; }
     unsigned bhie = rd(bar, 0x2c);
     if (bhie < 0x100 || bhie > 0x1fff00 || bhie & 3) { return false; }
     vm_offset_t copy = dma_space.extra + 0x20000;
     memcpy((void *)copy, image, size);
-    if (wifi_crc32((const uint8_t *)copy, size) != 0x7b19c475u) { return false; }
+    if (wifi_crc32((const uint8_t *)copy, size) != 0xb4376a2au) { return false; }
     dma_flush(copy, size);
     volatile struct hakiospcie_bhie_vector *vectors = (void *)(dma_space.control + 0x1000);
     unsigned count = 0;

@@ -442,6 +442,17 @@ if [ -f ../fw-wifi/wpss.mdt ]; then
 	# SHARE=1: leave it out, for an image that is going to somebody else -- it is a passphrase
 	if [ -z "$SHARE" ] && [ -f ../fw-wifi/network ]; then install -m 0600 ../fw-wifi/network root/fw/network; fi
 fi
+# ... and the QCA6490's firmware for the PCIe driver (drivers/wifi/hakios.wifi_pcie.c), taken from
+# the phone's own modem partition (NON-HLOS.bin, image/amss.bin) and dropped into ../fw-wifi:
+# hakiospcie_wifi=17 sends it to the chip over BHI.  The board data and the regulatory database go
+# beside it; nothing here is in the repository.
+if [ -f ../fw-wifi/amss.bin ]; then
+	mkdir -p root/fw
+	install -m 0644 ../fw-wifi/amss.bin root/fw/amss.bin
+	for f in m3.bin bdwlan.elf regdb.bin regdb_xiaomi.bin; do
+		[ -f "../fw-wifi/$f" ] && install -m 0644 "../fw-wifi/$f" "root/fw/$f"
+	done
+fi
 # ... and the vibration motor's waveforms, the phone's /vendor/firmware/aw8697_haptic.bin, from ../fw-haptic
 # (drivers/haptic/hakios.haptic.c, haptic=3; 3.6 KB, the vendor's and not in the repository either)
 if [ -f ../fw-haptic/aw8697_haptic.bin ]; then
