@@ -77,6 +77,12 @@ Boot arguments that matter on this phone:
 | `quiet=1` | suppress periodic counters so the tail of the kernel log stays readable |
 | `touch_watch=1` | start the touch watchdog: a line every 5 s with the stage it is in, and the periodic counters |
 | `touch_trace=1` | print every raw touch event with the time it was read |
+| `gpu_recover=1` | reset and restart the 3D core when a submission stops making progress (on by default) |
+| `gpu_flush=0` | write the fence with a plain memory write instead of waiting for a cache flush |
+| `glbin=1` | let freedreno use binning (GMEM) again; the default is `FD_MESA_DEBUG=sysmem` |
+| `glquiet=1` | no five-second GPU report, so the end of the log is left to other messages |
+| `procexit=1` | one line for every process that exits with an error, and for the signals that kill it |
+| `battery=1` / `pmic=1` / `thermal=1` / `buttons=1` | the peripheral drivers; the battery has no source of charge yet (see Known issues) |
 
 ## Touch: what this phone actually has
 
@@ -103,14 +109,26 @@ per transfer leaves the queue standing still.
   home-button model: no home indicator, and a swipe up from the bottom opens Control Center. The
   touch pipeline itself was never at fault -- the panel reports one finger from the bottom edge up
   the screen, and the driver posts it sample by sample.
-- **10-18 fps.** The compositor is CPU-bound: the GPU and the framebuffer driver are not the limit
-  (about 1.7 ms of GL and 5.8 ms of present per frame). Process-level CPU accounting is not working
-  yet, so the biggest consumer is still unknown.
+- **freedreno's binning path hangs the 3D core.** With GMEM rendering on, a draw never retires and
+  the core stops (the CP sits in `CP_WAIT_FOR_IDLE`, the fence is never written); the driver then
+  resets it, which shows up as 1-2 fps. The default is therefore sysmem (`FD_MESA_DEBUG=sysmem`,
+  `glbin=1` asks for the old path back), which gives 60 fps.
+- **CoreAnimation draws at half the rate it is told**, so the framebuffer driver reports 120 Hz by
+  default (`fb_ca_hz`, `xnu/files/iokit/Kernel/MiniIOMobileFramebuffer.cpp`).
+- **The battery cannot be read yet.** The kernel takes its charge from a page the loader fills, and
+  the loader needs UEFI charger protocols this boot chain does not have; every sample fails
+  (`battery: SOC=-1% ... (0 reads, 13 failed)`).
+- **The buttons are seen by the driver but do nothing yet.** Presses and releases (with their
+  duration) are logged, and userland turns them into HID consumer events, but neither the lock nor
+  the volume keys have an effect on the system.
+- **A few pages of Settings exit at once**: wallpaper, Emergency SOS, software update. Wallpaper is
+  killed by RunningBoard (`reason namespace 15`) while the poster extension never starts; the SOS
+  page draws coloured boxes. Both are tracked in the project's problem list.
 - **A run usually ends with the loader wedged in fastboot** (`fastboot devices` shows
-  `????????????`); a 15 s power-button hold recovers it. The loader's cold-reset path is being made
-  reliable.
-- **Logs are read off the screen.** After the kernel returns, the loader prints the last 64 KB of
-  the kernel log and waits 300 s, then cold-resets. USB is not available in that window.
+  `????????????`); a 15 s power-button hold recovers it.
+- **Logs are read off the screen.** After the kernel returns, the loader prints the interesting
+  lines of the last 1 MB and waits 120 s, then cold-resets. `usb_after=1` makes it try to take the
+  controller back for 60 s first, so the log can be fetched over the cable (unverified).
 
 ## Where the numbers come from
 

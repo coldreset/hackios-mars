@@ -1016,6 +1016,7 @@ static int wdt_armed;
  */
 static const struct kernel_live *running_live;
 static int run_park;   /* "oem run park": stay in the loader instead of resetting */
+static int usb_after;   /* boot-arg usb_after=1: take the controller back after the kernel returns */
 /*
  * Set for the whole of run_on_other_cpu(), whether the kernel has a live block or not.
  * running_live is NULL for a kernel without one, so it cannot say that a kernel is running.
@@ -3056,6 +3057,7 @@ run_kernel(int have_checkpoint, uint64_t checkpoint)
 			kernel_mpidr = (uint64_t)(c[8] - '0') << PLAT->core_shift;
 		}
 		more_cores |= (starts_with(c, "cpus=") || starts_with(c, "cpumask=")) && (c == pi.cmdline || c[-1] == ' ');
+		usb_after |= starts_with(c, "usb_after=1") && (c == pi.cmdline || c[-1] == ' ');
 		battery_requested |= starts_with(c, "battery=1") && (c == pi.cmdline || c[-1] == ' ') &&
 		    (c[9] == 0 || c[9] == ' ');
 		torch_requested |= starts_with(c, "torch=") && (c == pi.cmdline || c[-1] == ' ') && c[6] >= '1' && c[6] <= '9';
@@ -4060,6 +4062,23 @@ fb_command(char *cmd)
 					print("usb: the kernel is back; parking, no reset\n");
 					compose_logs(NULL, 0);
 				} else {
+					/*
+					 * usb_after=1: take the controller back for a while so the log can be fetched over
+					 * the cable (xl log, fastboot get_staged) instead of photographed. Nothing is written.
+					 */
+					if (usb_after) {
+						print("usb: the kernel is back; taking the controller again\n");
+						USB = NULL;
+						if (usb_start()) {
+							for (unsigned n = 0; n < 6000; n++) {     /* 60 s, unless a command ends it */
+								usb_poll_command();
+								wdt_pet();
+								BS->stall(10000);
+							}
+						} else {
+							print("usb: the controller did not come back; the screen has the log\n");
+						}
+					}
 					screen_quiet = 0;   /* the kernel is gone: the screen is ours again */
 					print("usb: the kernel is back; cold resetting the machine\n");
 					{
