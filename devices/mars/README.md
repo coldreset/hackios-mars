@@ -130,6 +130,23 @@ per transfer leaves the queue standing still.
   lines of the last 1 MB and waits 120 s, then cold-resets. `usb_after=1` makes it try to take the
   controller back for 60 s first, so the log can be fetched over the cable (unverified).
 
+## Wi-Fi and Bluetooth
+
+Both halves of the WCN6750 are built into the kernel with `configs/net.config`
+(`CONFIG_HAKIOS_WIFI=y`, `CONFIG_HAKIOS_BT=y`, `CONFIG_HAKIOS_QMI=y`): ath11k from Linux
+(`tools/mk-ath11k.sh`, 509 KB of object from 18 files, no stubs) on the LinuxKPI layer in
+`wifi/lx`, and the Bluetooth file, which so far only reads its three pins (`bt=1`).
+
+What they lack is the firmware, which is not in the tree and cannot be read off the phone as the
+`shell` user (`/vendor/firmware` is denied by SELinux). The files the drivers ask for:
+
+- Wi-Fi: `wpss.mdt` with its `wpss.b00`..`wpss.b07` segments (the DSP image), `bd_m20gl.elf`,
+  `board-2.bin`, `board.bin`, `regdb_xiaomi.bin` -- into `fw-wifi/` beside the repository.
+- Bluetooth: the `msbtfw*.mbn` rampatch and `msnv*.bin` NVM files of the same chip.
+
+None of these may be committed (they are the vendor's). With them in place, `wifi=1` starts the
+DSP, and `bt=1`/`bt=2` walk the Bluetooth half one step at a time.
+
 ## Where the numbers come from
 
 - SoC layer: the phone's own device tree (`soc.args`, `soc/configs/lahaina.config`).
