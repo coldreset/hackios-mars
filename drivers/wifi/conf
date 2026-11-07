@@ -13,3 +13,10 @@ driver WIFI
 	help    Wi-Fi of the WCN6750 (wifi=1, wifi_step=N): the DSP that runs the radio's firmware, Linux's ath11k
 	help    (its object, made by tools/mk-ath11k.sh, is linked in only with this), a station, and the Apple80211
 	help    surface Darwin's wifid talks to. Needs fw-wifi/ from the phone
+
+driver WIFI_PCIE
+	file    bsd/dev/hakios.wifi_pcie.c
+	file    bsd/dev/hakios.radio_pcie.c
+	file    bsd/dev/hakios.lx_pcie.c
+	requires QMI
+	help    Wi-Fi of the QCA6490 on PCIe (wifipcie=1): the links the OnePlus 9 port of the same SoC has

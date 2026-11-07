@@ -1017,6 +1017,7 @@ static int wdt_armed;
 static const struct kernel_live *running_live;
 static int run_park;   /* "oem run park": stay in the loader instead of resetting */
 static int usb_after;   /* boot-arg usb_after=1: take the controller back after the kernel returns */
+static char kmdline[1024];  /* the kernel's command line, for what the log screen looks for */
 /*
  * Set for the whole of run_on_other_cpu(), whether the kernel has a live block or not.
  * running_live is NULL for a kernel without one, so it cannot say that a kernel is running.
@@ -1456,6 +1457,143 @@ ufs_dump_super(efi_block_io *bio)
 		ufs_dump(what, header, header_size);
 		ufs_dump(tables, header + header_size, tables_size);
 	}
+}
+
+/*
+ * The partition a name says, so that its bytes can be read: the firmware of the modem, the
+ * Bluetooth and the Wi-Fi chips lives in partitions of their own ("modem", "bluetooth", "dsp"),
+ * and a fastboot ROM does not always carry them -- what is on the phone is what matches it.
+ */
+static efi_block_io *
+ufs_partition(const char *want)
+{
+	static const efi_guid part_guid = EFI_PARTITION_INFO_GUID;
+	static const efi_guid blk_guid = EFI_BLOCK_IO_GUID;
+	efi_handle *handles;
+	efi_block_io *found = NULL;
+	uint64_t count;
+
+	if (EFI_ERROR(BS->locate_handle_buffer(ByProtocol, &part_guid, NULL, &count, &handles))) {
+		return NULL;
+	}
+	for (uint64_t i = 0; i < count; i++) {
+		efi_partition_info *info;
+		efi_block_io *bio;
+		char name[40];
+
+		if (EFI_ERROR(BS->handle_protocol(handles[i], &part_guid, (void **)&info)) || info->type != 2 ||
+		    EFI_ERROR(BS->handle_protocol(handles[i], &blk_guid, (void **)&bio))) {
+			continue;
+		}
+		ufs_name(info, name, sizeof(name));
+		if (str_eq(name, want)) {
+			found = bio;
+			break;
+		}
+	}
+	BS->free_pool(handles);
+	return found;
+}
+
+/* What the GPT says, as text, for "oem ufslist" and the host's get_staged. */
+static uint64_t
+out_num(uint64_t n, uint64_t at, int base)
+{
+	char text[24];
+	unsigned t = 0;
+
+	do {
+		unsigned d = (unsigned)(n % (uint64_t)base);
+
+		text[t++] = (char)(d < 10 ? '0' + d : 'a' + d - 10);
+		n /= (uint64_t)base;
+	} while (n != 0 && t < sizeof(text));
+	while (t > 0 && at + 1 < sizeof(out_buf)) {
+		out_buf[at++] = text[--t];
+	}
+	return at;
+}
+
+static uint64_t
+out_str(const char *s, uint64_t at)
+{
+	while (*s != 0 && at + 1 < sizeof(out_buf)) {
+		out_buf[at++] = *s++;
+	}
+	return at;
+}
+
+static void
+ufs_list(void)
+{
+	static const efi_guid part_guid = EFI_PARTITION_INFO_GUID;
+	static const efi_guid blk_guid = EFI_BLOCK_IO_GUID;
+	efi_handle *handles;
+	uint64_t count = 0, n = 0, parts = 0, units = 0;
+	efi_status st;
+
+	/* the firmware binds its block devices lazily: give every controller a chance first */
+	{
+		efi_handle *all;
+		uint64_t total = 0;
+
+		if (!EFI_ERROR(BS->locate_handle_buffer(0 /* all handles */, NULL, NULL, &total, &all))) {
+			for (uint64_t i = 0; i < total; i++) {
+				((efi_status (EFIAPI *)(efi_handle, void *, void *, int))BS->connect_controller)(all[i], NULL, NULL, 1);
+			}
+			BS->free_pool(all);
+		}
+	}
+	st = BS->locate_handle_buffer(ByProtocol, &blk_guid, NULL, &count, &handles);
+	n = out_str("block io: status ", n);
+	n = out_num((uint64_t)st, n, 10);
+	n = out_str(" handles ", n);
+	n = out_num(count, n, 10);
+	n = out_str("\n", n);
+	if (!EFI_ERROR(st)) {
+		for (uint64_t i = 0; i < count; i++) {
+			efi_block_io *bio;
+
+			if (EFI_ERROR(BS->handle_protocol(handles[i], &blk_guid, (void **)&bio))) {
+				continue;
+			}
+			units++;
+		}
+		BS->free_pool(handles);
+	}
+	count = 0;
+	st = BS->locate_handle_buffer(ByProtocol, &part_guid, NULL, &count, &handles);
+	n = out_str("partitions: status ", n);
+	n = out_num((uint64_t)st, n, 10);
+	n = out_str(" handles ", n);
+	n = out_num(count, n, 10);
+	n = out_str(" units ", n);
+	n = out_num(units, n, 10);
+	n = out_str("\n", n);
+	if (!EFI_ERROR(st)) {
+		for (uint64_t i = 0; i < count && n + 80 < sizeof(out_buf); i++) {
+			efi_partition_info *info;
+			efi_block_io *bio;
+			char name[40];
+
+			if (EFI_ERROR(BS->handle_protocol(handles[i], &part_guid, (void **)&info)) || info->type != 2 ||
+			    EFI_ERROR(BS->handle_protocol(handles[i], &blk_guid, (void **)&bio))) {
+				continue;
+			}
+			ufs_name(info, name, sizeof(name));
+			parts++;
+			n = out_str(name, n);
+			n = out_str(" ", n);
+			n = out_num((bio->media->last_block + 1) * bio->media->block_size >> 10, n, 10);
+			n = out_str(" KB\n", n);
+		}
+		BS->free_pool(handles);
+	}
+	n = out_str("listed ", n);
+	n = out_num(parts, n, 10);
+	n = out_str("\n", n);
+	staged_data = out_buf;
+	staged_len = staged_total = n;
 }
 
 static void
@@ -3058,6 +3196,15 @@ run_kernel(int have_checkpoint, uint64_t checkpoint)
 		}
 		more_cores |= (starts_with(c, "cpus=") || starts_with(c, "cpumask=")) && (c == pi.cmdline || c[-1] == ' ');
 		usb_after |= starts_with(c, "usb_after=1") && (c == pi.cmdline || c[-1] == ' ');
+		{
+			unsigned n = 0;
+
+			while (pi.cmdline[n] != 0 && n + 1 < sizeof(kmdline)) {
+				kmdline[n] = pi.cmdline[n];
+				n++;
+			}
+			kmdline[n] = 0;
+		}
 		battery_requested |= starts_with(c, "battery=1") && (c == pi.cmdline || c[-1] == ' ') &&
 		    (c[9] == 0 || c[9] == ' ');
 		torch_requested |= starts_with(c, "torch=") && (c == pi.cmdline || c[-1] == ' ') && c[6] >= '1' && c[6] <= '9';
@@ -4089,15 +4236,61 @@ fb_command(char *cmd)
 						 */
 						static const char *const wanted[] = {
 							"hakios-gl", "hakios: the server", "hakios: no GPU", "hakios: gl=",
+							"language:", "hakios: running",
 							"HakiosGPU", "frames in", "frame time", "from one frame to the next",
 							"cpu 5s", "focaltech: gesture", "touch screen ready", "adreno: gpu:",
 							"THE 3D CORE", "exited with", "is sent signal", "hakios: running", "census: ", "no program",
 							"battery: ", "buttons: ",
 						};
+						/*
+						 * logwords=a,b,c in the kernel's command line replaces the list: the
+						 * run's own question decides what the screen shows.
+						 */
+						static char logwords[400];
+						static const char *from_boot[32];
+						unsigned nwords = 0;
+						const char *const *words = wanted;
+
+						{
+							const char *w = kmdline;
+
+							while (*w != 0) {
+								if ((w == kmdline || w[-1] == ' ') && starts_with(w, "logwords=")) {
+									const char *v = w + 9;
+									unsigned n = 0;
+
+									while (*v != 0 && *v != ' ' && n + 1 < sizeof(logwords)) {
+										logwords[n++] = *v == '+' ? ' ' : *v;   /* '+' is a space: the command line has no room for one */
+										v++;
+									}
+									logwords[n] = 0;
+									if (n != 0) {
+										from_boot[nwords++] = logwords;
+										for (unsigned k = 1; k < n && nwords < 32; k++) {
+											if (logwords[k] == ',') {
+												logwords[k] = 0;
+												from_boot[nwords++] = logwords + k + 1;
+											}
+										}
+										words = (const char *const *)from_boot;
+									}
+									break;
+								}
+								while (*w != 0 && *w != ' ') {
+									w++;
+								}
+								while (*w == ' ') {
+									w++;
+								}
+							}
+						}
 						static uint32_t at_line[4096];
 						const char *klog = (const char *)loader_ctx[CTX_LOG_PA];
 						uint64_t klog_len = loader_ctx[CTX_LOG_LEN];
-						uint64_t start = klog_len > (1u << 20) ? klog_len - (1u << 20) : 0;
+						/* The head has to reach the boot lines: a busy run writes megabytes, and a
+						 * one-megabyte window would begin long after them. Eight megabytes cover a
+						 * whole boot and leave the buffer's own limits alone. */
+						uint64_t start = klog_len > (8u << 20) ? klog_len - (8u << 20) : 0;
 						uint64_t at = start, lines = 0, head, tail, i, w;
 
 						print("\n== THE KERNEL LOG: INTERESTING LINES, FIRST AND LAST ==\n");
@@ -4111,14 +4304,15 @@ fb_command(char *cmd)
 									if (n < sizeof(line) - 1) {
 										line[n++] = klog[end];
 									}
-									for (w = 0; w < sizeof(wanted) / sizeof(wanted[0]) && !keep; w++) {
+									for (w = 0; w < (nwords != 0 ? nwords : sizeof(wanted) / sizeof(wanted[0])) && !keep; w++) {
+										const char *word = nwords != 0 ? words[w] : wanted[w];
 										uint64_t len = 0, j, k;
 
-										while (wanted[w][len] != 0) {
+										while (word[len] != 0) {
 											len++;
 										}
 										for (j = 0; j + len <= n; j++) {
-											for (k = 0; k < len && line[j + k] == wanted[w][k]; k++) {
+											for (k = 0; k < len && line[j + k] == word[k]; k++) {
 											}
 											if (k == len) {
 												keep = 1;
@@ -4248,6 +4442,72 @@ fb_command(char *cmd)
 				staged_len = 32767;
 			}
 			fb_reply("OKAY", "");
+		} else if (starts_with(cmd, "oem ufslist")) {
+			ufs_list();
+			if (staged_len > 32767) {
+				staged_len = 32767;
+			}
+			fb_reply("OKAY", "");
+		} else if (starts_with(cmd, "oem ufsdump")) {
+			/*
+			 * "oem ufsdump <partition> <offset in KB> <length in KB>": that much of the partition
+			 * into the staged buffer, for the host to take with get_staged in 32767-byte pieces.
+			 * Read only: nothing is written to the partition.
+			 */
+			char name[40];
+			const char *arg = cmd + 11;
+			uint64_t off_kb = 0, len_kb = 0;
+			unsigned n = 0;
+
+			while (*arg == ' ') {
+				arg++;
+			}
+			while (*arg && *arg != ' ' && n < sizeof(name) - 1) {
+				name[n++] = *arg++;
+			}
+			name[n] = 0;
+			while (*arg == ' ') {
+				arg++;
+			}
+			while (*arg >= '0' && *arg <= '9') {
+				off_kb = off_kb * 10 + (uint64_t)(*arg++ - '0');
+			}
+			while (*arg == ' ') {
+				arg++;
+			}
+			while (*arg >= '0' && *arg <= '9') {
+				len_kb = len_kb * 10 + (uint64_t)(*arg++ - '0');
+			}
+			efi_block_io *bio = n == 0 ? NULL : ufs_partition(name);
+
+			if (bio == NULL) {
+				fb_reply("FAIL", "no such partition");
+			} else {
+				uint64_t bs = bio->media->block_size;
+				uint64_t blocks = len_kb * 1024 / bs;
+				uint64_t lba = off_kb * 1024 / bs;
+				uint64_t end = bio->media->last_block + 1;
+
+				if (bs == 0 || lba >= end) {
+					fb_reply("FAIL", "offset past the partition");
+				} else {
+					if (blocks > sizeof(out_buf) / bs) {
+						blocks = sizeof(out_buf) / bs;
+					}
+					if (lba + blocks > end) {
+						blocks = end - lba;
+					}
+					if (blocks == 0 ||
+					    EFI_ERROR(bio->read_blocks(bio, bio->media->media_id, lba, blocks, out_buf))) {
+						fb_reply("FAIL", "read failed");
+					} else {
+						staged_data = out_buf;
+						staged_len = blocks * bs;
+						staged_total = staged_len;
+						fb_reply("OKAY", "");
+					}
+				}
+			}
 		} else if (starts_with(cmd, "reboot") || starts_with(cmd, "oem reboot")) {
 			fb_reply("OKAY", "");
 			BS->stall(200000);

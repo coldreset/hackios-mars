@@ -901,6 +901,77 @@ empty_tree(const char *path, int depth)
 	close(fd);
 }
 
+/*
+ * The language the system starts in. Darwin keeps it in the mobile user's own preferences, and
+ * every process reads it from there when it starts: SpringBoard builds its interface from
+ * AppleLanguages, and so does every application it launches. Without the file they all come up in
+ * English, whatever the fonts and the .loctable tables in the image say.
+ *
+ * It is written here, before launchd, so that no process is ever started with the default. On a
+ * kept data volume the file is left alone if it is already there: what the user picked in Settings
+ * is what counts, not what this image was built with.
+ */
+static void
+set_language(void)
+{
+	static const char *const dirs[] = { "/private/var/mobile", "/private/var/mobile/Library",
+		                            "/private/var/mobile/Library/Preferences", "/Library/Preferences",
+		                            "/private/var/root/Library/Preferences" };
+	static const char *const paths[] = { "/private/var/mobile/Library/Preferences/.GlobalPreferences.plist",
+		                             "/Library/Preferences/.GlobalPreferences.plist",
+		                             "/private/var/root/Library/Preferences/.GlobalPreferences.plist" };
+	/* AppleLanguages is the one SpringBoard reads; NSLanguages is what older readers of the same
+	 * domain look at, and AppleLocale carries the region. All three are written. */
+	static const char *const plist =
+	    "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n"
+	    "<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n"
+	    "<plist version=\"1.0\">\n"
+	    "<dict>\n"
+	    "\t<key>AppleLanguages</key>\n"
+	    "\t<array>\n"
+	    "\t\t<string>zh-Hans</string>\n"
+	    "\t\t<string>en</string>\n"
+	    "\t</array>\n"
+	    "\t<key>NSLanguages</key>\n"
+	    "\t<array>\n"
+	    "\t\t<string>zh-Hans</string>\n"
+	    "\t\t<string>en</string>\n"
+	    "\t</array>\n"
+	    "\t<key>AppleLocale</key>\n"
+	    "\t<string>zh_CN</string>\n"
+	    "</dict>\n"
+	    "</plist>\n";
+	const char *wanted = boot_arg("language");
+	struct stat st;
+
+	if (wanted != NULL && strcmp(wanted, "en") == 0) {
+		printf("  language: left as it is (language=en)\n");
+		return;
+	}
+	for (unsigned i = 0; i < sizeof(dirs) / sizeof(dirs[0]); i++) {
+		mkdir(dirs[i], 0755);
+	}
+	for (unsigned i = 0; i < sizeof(paths) / sizeof(paths[0]); i++) {
+		int fd;
+
+		if (stat(paths[i], &st) == 0 && st.st_size > 0) {
+			printf("  language: %s is already there (%lld bytes), left alone\n", paths[i], (long long)st.st_size);
+			continue;
+		}
+		fd = open(paths[i], O_WRONLY | O_CREAT | O_TRUNC, 0644);
+		if (fd < 0) {
+			printf("  language: %s: %s\n", paths[i], strerror(errno));
+			continue;
+		}
+		if (write(fd, plist, strlen(plist)) != (ssize_t)strlen(plist)) {
+			printf("  language: %s: %s\n", paths[i], strerror(errno));
+		}
+		close(fd);
+		chown(paths[i], 501, 501);
+		printf("  language: zh-Hans (AppleLocale zh_CN) written to %s\n", paths[i]);
+	}
+}
+
 static void
 mount_writable(void)
 {
@@ -1068,6 +1139,8 @@ mount_writable(void)
 		    users ? ", users resolvable" : "");
 		check(grafted, "graft the package manager's prefix onto the data volume");
 	}
+
+	set_language();
 }
 
 /*
