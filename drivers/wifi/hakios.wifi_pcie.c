@@ -864,12 +864,19 @@ static bool ipcr_transfer_event(unsigned channel, unsigned code, uint64_t pointe
 static void mhi_context_address(vm_offset_t context, unsigned offset, uint64_t address) {
     wr(context + offset, address); wr(context + offset + 4, address >> 32);
 }
-static bool ipcr_send(const void *packet, unsigned length) {
+static bool ipcr_send_parts(const void *head, unsigned head_length, const void *body,
+    unsigned body_length, unsigned length) {
     unsigned next = hakiospcie_mhi_next(ipcr.tx_write, 32);
-    if (!ipcr.channels || !length || length > MHI_IPCR_MTU || next == ipcr.tx_read) { return false; }
+    if (!ipcr.channels || !length || length > MHI_IPCR_MTU || length < head_length + body_length ||
+        next == ipcr.tx_read) { return false; }
     unsigned index = ipcr.tx_write;
     vm_offset_t buffer = dma_space.extra + MHI_IPCR_TX + index * MHI_IPCR_MTU;
-    memcpy((void *)buffer, packet, length); dma_flush(buffer, length);
+    memcpy((void *)buffer, head, head_length);
+    if (body_length) { memcpy((void *)(buffer + head_length), body, body_length); }
+    if (length > head_length + body_length) {
+        memset((void *)(buffer + head_length + body_length), 0, length - head_length - body_length);
+    }
+    dma_flush(buffer, length);
     volatile struct hakiospcie_mhi_element *tre = (void *)(dma_space.control + 0x3600 + index * 16);
     tre->pointer = WIFI_MHI_IOVA + MHI_IPCR_TX + index * MHI_IPCR_MTU;
     tre->word0 = length; tre->word1 = (2u << 16) | (1u << 9);
@@ -880,13 +887,17 @@ static bool ipcr_send(const void *packet, unsigned length) {
     mhi_write_address(mhi.channel_db + 20 * 8, write);
     return true;
 }
+
+static bool ipcr_send(const void *packet, unsigned length) {
+    return ipcr_send_parts(packet, length, NULL, 0, length);
+}
 static bool ipcr_qrtr_send(uint32_t type, uint32_t source_port, uint32_t node, uint32_t port,
     const void *payload, unsigned size) {
-    uint8_t packet[256] = {0};
-    if (!size || size > sizeof(packet) - sizeof(struct hakiospcie_qrtr_header)) { return false; }
     struct hakiospcie_qrtr_header header = {1, type, 1, source_port, 0, size, node, port};
-    memcpy(packet, &header, sizeof(header)); memcpy(packet + sizeof(header), payload, size);
-    return ipcr_send(packet, sizeof(header) + ((size + 3) & ~3u));
+    unsigned length = sizeof(header) + ((size + 3) & ~3u);
+    if (!size || length > MHI_IPCR_MTU) { return false; }
+    /* the firmware download sends thousands of bytes at once: no stack copy, no 256 byte cap */
+    return ipcr_send_parts(&header, sizeof(header), payload, size, length);
 }
 /*
  * The memory request has to be understood here, not further down: once ath11k is running
@@ -1435,12 +1446,15 @@ const uint8_t *hakiospcie_wifi_driver_file(const char *name, uint64_t *size) {
     if (strncmp(name, "QCA6490/hw1.0/", 14)) { hakiospcie_tl("wifi-pcie:   not under QCA6490/hw1.0/: %s\n", name); return NULL; }
     const char *file = name + 14;
     /* firmware-2.bin is ath11k's own container (magic "QCOM-ATH11K-FW"): the AMSS and M3 images in one file. */
-    if (strcmp(file, "board.bin") && strcmp(file, "regdb.bin") && strcmp(file, "m3.bin") &&
-        strcmp(file, "bdwlan.bin") && strcmp(file, "amss.bin") && strcmp(file, "firmware-2.bin")) {
+    if (strcmp(file, "board.bin") && strcmp(file, "board-2.bin") && strcmp(file, "regdb.bin") &&
+        strcmp(file, "m3.bin") && strcmp(file, "bdwlan.bin") && strcmp(file, "amss.bin") &&
+        strcmp(file, "firmware-2.bin")) {
         hakiospcie_tl("wifi-pcie:   %s is not one of the files we hand out\n", file);
         return NULL;
     }
-    const uint8_t *data = hakios_image_file("fw", file, size, NULL);
+    /* ath11k asks for the board data under its own name; the card's BDF is the same bytes. */
+    const char *stored = (!strcmp(file, "board-2.bin") || !strcmp(file, "board.bin")) ? "bdwlan.bin" : file;
+    const uint8_t *data = hakios_image_file("fw", stored, size, NULL);
     if (!data || !*size || *size > 8u * 1024 * 1024) {
         hakiospcie_tl("wifi-pcie:   fw/%s: %s (%llu bytes)\n", file, data ? "too big or empty" : "not in the image",
             (unsigned long long)(size ? *size : 0));
