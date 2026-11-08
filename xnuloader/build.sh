@@ -5,6 +5,11 @@ cd "$(dirname "$0")"
 # the iPhone's identity for XNU, from the device tree of the builder's own IPSW (not in the repository)
 [ -f identity.h ] || ./mkidentity.sh
 
+# the boot screen's pictures and glyphs are generated, not kept in the repository
+[ -f logo.h ] || python3 ../tools/mk-logo.py
+[ -f font.h ] || python3 ../tools/mk-font.py
+[ -f cjk.h ] || python3 ../tools/mk-cjk.py
+
 clang --target=aarch64-unknown-windows -ffreestanding -fno-builtin -fno-stack-protector -fshort-wchar \
   -mgeneral-regs-only -O1 -Wall -Wextra -Wno-unused-parameter -c loader.c -o loader.obj
 # /base: UEFI loads an image at its preferred address when that is free. The PE default (0x140000000)

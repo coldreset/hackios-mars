@@ -168,6 +168,12 @@ str_eq(const char *a, const char *b)
  * the screen is left to the kernel (and to "oem screenshot").
  */
 static int screen_quiet;
+static int splash_progress = 130;   /* how far round the ring the last draw went */
+static char splash_state[80];       /* the status line, kept so a repaint can draw it again */
+static void splash_draw(int progress);
+static void splash_status(const char *line);
+static void splash_redraw(void);
+static efi_text_output *real_con_out;   /* the console, parked while the boot screen owns the display */
 /*
  * And while the kernel runs, whatever started the loader: under HakiOS's U-Boot (the menu of an installed HakiOS) there
  * is no USB command loop, the text console is U-Boot's, drawn into the framebuffer the kernel shows Darwin in, and every
@@ -4222,7 +4228,28 @@ fb_command(char *cmd)
 				 */
 				if (run_park) {
 					print("usb: the kernel is back; parking, no reset\n");
-					compose_logs(NULL, 0);
+					/*
+					 * Stage the kernel's own log, not the little live ring: the whole
+					 * buffer is here, and "oem log <offset>" can then hand it out in
+					 * pieces of 32767 instead of the first 32 KB only.
+					 */
+					{
+						const char *kp = (const char *)loader_ctx[CTX_LOG_PA];
+						uint64_t klen = loader_ctx[CTX_LOG_LEN];
+						uint64_t cap = 8u << 20;
+
+						if (klen > cap) {
+							kp += klen - cap;
+							klen = cap;
+						}
+						if (kp != NULL) {
+							compose_logs(kp, klen);
+							log_has_kernel = 1;
+							print("log: %d bytes staged for the host\n", klen);
+						} else {
+							compose_logs(NULL, 0);
+						}
+					}
 				} else {
 					/*
 					 * usb_after=1: take the controller back for a while so the log can be fetched over
@@ -4255,6 +4282,9 @@ fb_command(char *cmd)
 						}
 					}
 					screen_quiet = 0;   /* the kernel is gone: the screen is ours again */
+					if (ST->con_out == NULL && real_con_out != NULL) {
+						ST->con_out = real_con_out;
+					}
 					print("usb: the kernel is back; cold resetting the machine\n");
 					{
 						/*
@@ -4433,7 +4463,7 @@ fb_command(char *cmd)
 				}
 				offset = offset * 16 + digit;
 			}
-			if (busy && running_live != NULL) {
+			if (busy && running_live != NULL && !log_has_kernel) {
 				compose_live_log(running_live, running_slide);
 			} else if (!log_has_kernel) {
 				compose_logs(NULL, 0);
@@ -4595,6 +4625,9 @@ usb_command_loop(void)
 		if (!usb_connected) {
 			usb_wait(0xff); /* returns on the next cable state change */
 			continue;
+		}
+		if (screen_quiet) {
+			splash_redraw();   /* put the boot screen back over whatever was printed */
 		}
 		n = usb_rx(usb_rx_buf, 511);
 		if (n <= 0) {
@@ -4853,6 +4886,343 @@ print_banner(void)
 	print("\n");
 }
 
+/* ------------------------------------------------------------------------ */
+/* The boot screen                                                          */
+/*
+ * The firmware's text console cannot be placed where we want it, and it
+ * scrolls, so the boot screen is drawn straight into the frame buffer with a
+ * glyph set of our own.  Nothing here runs once the kernel has the screen.
+ */
+#include "logo.h"
+#include "font.h"
+#include "cjk.h"
+
+#define SPLASH_BG       0xff0c0c0eu
+#define SPLASH_WHITE    0xffededefu
+#define SPLASH_GREY     0xff9a9aa0u
+#define SPLASH_DIM      0xff4a4a52u
+#define SPLASH_ORANGE   0xfff39230u
+#define SPLASH_FAINT    0xff66666eu
+
+static const int splash_sin[91] = {
+	0, 175, 349, 523, 698, 872, 1045, 1219, 1392, 1564, 1736, 1908, 2079, 2250, 2419, 2588,
+	2756, 2924, 3090, 3256, 3420, 3584, 3746, 3907, 4067, 4226, 4384, 4540, 4695, 4848, 5000, 5150,
+	5299, 5446, 5592, 5736, 5878, 6018, 6157, 6293, 6428, 6561, 6691, 6820, 6947, 7071, 7193, 7314,
+	7431, 7547, 7660, 7771, 7880, 7987, 8090, 8192, 8290, 8387, 8480, 8572, 8660, 8746, 8829, 8910,
+	8988, 9063, 9135, 9205, 9272, 9336, 9397, 9455, 9511, 9564, 9614, 9662, 9706, 9748, 9787, 9823,
+	9856, 9886, 9913, 9937, 9957, 9976, 9990, 10002, 10011, 10017, 10020
+};
+
+static uint32_t *
+splash_row(int y)
+{
+	return (uint32_t *)((uint8_t *)(uintptr_t)SCREEN.base + (uint64_t)y * SCREEN.stride);
+}
+
+static void
+splash_pixel(int x, int y, uint32_t colour)
+{
+	if (x < 0 || y < 0 || x >= (int)SCREEN.width || y >= (int)SCREEN.height) {
+		return;
+	}
+	splash_row(y)[x] = colour;
+}
+
+static void
+splash_block(int x, int y, int w, int h, uint32_t colour)
+{
+	for (int row = 0; row < h; row++) {
+		for (int column = 0; column < w; column++) {
+			splash_pixel(x + column, y + row, colour);
+		}
+	}
+}
+
+static void
+splash_fill(uint32_t colour)
+{
+	splash_block(0, 0, (int)SCREEN.width, (int)SCREEN.height, colour);
+}
+
+static void
+splash_disc(int cx, int cy, int radius, uint32_t colour)
+{
+	int r2 = radius * radius;
+	for (int y = cy - radius; y <= cy + radius; y++) {
+		int dy = y - cy;
+		for (int x = cx - radius; x <= cx + radius; x++) {
+			int dx = x - cx;
+			if (dx * dx + dy * dy <= r2) {
+				splash_pixel(x, y, colour);
+			}
+		}
+	}
+}
+
+/* degrees clockwise from the top, drawn as a trail of discs */
+static void
+splash_arc(int cx, int cy, int radius, int thickness, int degrees, uint32_t colour)
+{
+	if (degrees <= 0) {
+		return;
+	}
+	if (degrees > 360) {
+		degrees = 360;
+	}
+	int steps = degrees * 2;
+	for (int i = 0; i <= steps; i++) {
+		int deg = (degrees * i) / steps;
+		int quadrant = deg / 90;
+		int rest = deg % 90;
+		int s = splash_sin[rest], c = splash_sin[90 - rest];
+		int dx, dy;
+		switch (quadrant) {
+		case 0: dx = s; dy = -c; break;
+		case 1: dx = c; dy = s; break;
+		case 2: dx = -s; dy = c; break;
+		default: dx = -c; dy = -s; break;
+		}
+		splash_disc(cx + (radius * dx) / 10000, cy + (radius * dy) / 10000, thickness / 2, colour);
+	}
+}
+
+static void
+splash_logo(int cx, int cy, int scale)
+{
+	int size = LOGO_SIZE * scale;
+	int x0 = cx - size / 2, y0 = cy - size / 2;
+	for (int y = 0; y < size; y++) {
+		int sy = y / scale;
+		for (int x = 0; x < size; x++) {
+			unsigned char ink = logo_index[sy * LOGO_SIZE + (x / scale)];
+			if (ink == 0) {
+				continue;      /* transparent: let the ring behind it show */
+			}
+			splash_pixel(x0 + x, y0 + y, logo_palette[ink]);
+		}
+	}
+}
+
+static int
+splash_text_width_tracked(const char *text, int scale, int tracking)
+{
+	int n = 0;
+	while (text[n] != 0) {
+		n++;
+	}
+	if (n == 0) {
+		return 0;
+	}
+	return n * FONT_WIDTH * scale + (n - 1) * tracking;
+}
+
+/*
+ * tracking is the gap in pixels between letters: headings breathe, and a fixed
+ * width font set solid looks cramped at three times its natural size.
+ */
+static void
+splash_text_tracked(int x, int y, const char *text, int scale, int tracking, uint32_t colour)
+{
+	for (int i = 0; text[i] != 0; i++) {
+		unsigned char c = (unsigned char)text[i];
+		if (c < FONT_FIRST || c > FONT_LAST) {
+			continue;
+		}
+		const unsigned char *glyph = font_bits[c - FONT_FIRST];
+		int gx = x + i * (FONT_WIDTH * scale + tracking);
+		for (int row = 0; row < FONT_HEIGHT; row++) {
+			unsigned char bits = glyph[row];
+			if (bits == 0) {
+				continue;
+			}
+			for (int column = 0; column < FONT_WIDTH; column++) {
+				if (bits & (1 << (7 - column))) {
+					splash_block(gx + column * scale, y + row * scale, scale, scale, colour);
+				}
+			}
+		}
+	}
+}
+
+static void
+splash_text(int x, int y, const char *text, int scale, uint32_t colour)
+{
+	splash_text_tracked(x, y, text, scale, 0, colour);
+}
+
+static void
+splash_center_tracked(int y, const char *text, int scale, int tracking, uint32_t colour)
+{
+	splash_text_tracked(((int)SCREEN.width - splash_text_width_tracked(text, scale, tracking)) / 2, y,
+	    text, scale, tracking, colour);
+}
+
+static void
+splash_center(int y, const char *text, int scale, uint32_t colour)
+{
+	splash_center_tracked(y, text, scale, 0, colour);
+}
+
+static int
+splash_cjk_index(const char *text)
+{
+	for (int i = 0; i < CJK_COUNT; i++) {
+		if (cjk_char[i][0] == text[0] && cjk_char[i][1] == text[1] && cjk_char[i][2] == text[2]) {
+			return i;
+		}
+	}
+	return -1;
+}
+
+static void
+splash_utf8_text(int x, int y, const char *text, int scale, int tracking, uint32_t colour)
+{
+	int pen = x;
+	while (*text != 0) {
+		unsigned char c = (unsigned char)*text;
+		if (c >= 0xE0) {
+			int i = splash_cjk_index(text);
+			if (i >= 0) {
+				const unsigned char *g = cjk_bits[i];
+				for (int row = 0; row < 16; row++) {
+					unsigned int bits = ((unsigned int)g[row * 2] << 8) | g[row * 2 + 1];
+					for (int column = 0; column < 16; column++) {
+						if (bits & (1u << (15 - column))) {
+							splash_block(pen + column * scale, y + row * scale, scale, scale, colour);
+						}
+					}
+				}
+			}
+			pen += 16 * scale + tracking;
+			text += 3;
+			continue;
+		}
+		if (c >= FONT_FIRST && c <= FONT_LAST) {
+			const unsigned char *glyph = font_bits[c - FONT_FIRST];
+			for (int row = 0; row < FONT_HEIGHT; row++) {
+				unsigned char bits = glyph[row];
+				if (bits == 0) {
+					continue;
+				}
+				for (int column = 0; column < FONT_WIDTH; column++) {
+					if (bits & (1 << (7 - column))) {
+						splash_block(pen + column * scale, y + row * scale, scale, scale, colour);
+					}
+				}
+			}
+		}
+		pen += FONT_WIDTH * scale + tracking;
+		text += 1;
+	}
+}
+
+static int
+splash_utf8_width(const char *text, int scale, int tracking)
+{
+	int width = 0, count = 0;
+	while (*text != 0) {
+		unsigned char c = (unsigned char)*text;
+		width += (c >= 0xE0 ? 16 : 8) * scale;
+		text += (c >= 0xE0 ? 3 : 1);
+		count++;
+	}
+	return width + (count > 1 ? (count - 1) * tracking : 0);
+}
+
+static void
+splash_utf8_center(int y, const char *text, int scale, int tracking, uint32_t colour)
+{
+	splash_utf8_text(((int)SCREEN.width - splash_utf8_width(text, scale, tracking)) / 2, y, text, scale,
+	    tracking, colour);
+}
+
+/*
+ * progress is how much of the ring is lit, in degrees.
+ */
+static int splash_choice;
+
+static void
+splash_menu(int top, const char *const *items, int count)
+{
+	int widest = 0;
+	for (int i = 0; i < count; i++) {
+		int w = splash_utf8_width(items[i], 3, 3);
+		if (w > widest) {
+			widest = w;
+		}
+	}
+	int left = ((int)SCREEN.width - widest) / 2 - 24;
+
+	for (int i = 0; i < count; i++) {
+		int y = top + i * (FONT_HEIGHT * 3 + 34);
+		if (i == splash_choice) {
+			splash_text(left - 58, y, ">", 3, SPLASH_ORANGE);
+			splash_utf8_text(left, y, items[i], 3, 3, SPLASH_WHITE);
+			splash_block(left - 58, y + FONT_HEIGHT * 3 + 16, widest + 76, 3, SPLASH_ORANGE);
+		} else {
+			splash_utf8_text(left, y, items[i], 3, 3, SPLASH_GREY);
+		}
+	}
+}
+
+static void
+splash_draw(int progress)
+{
+	static const char *const items[] = { "启动 HackiOS", "诊断", "重启到安卓" };
+
+	if (SCREEN.base == 0 || SCREEN.width < 200 || SCREEN.height < 200) {
+		return;
+	}
+	splash_fill(SPLASH_BG);
+
+	int cx = (int)SCREEN.width / 2;
+	int cy = (int)(SCREEN.height * 31 / 100);
+	int radius = (int)(LOGO_SIZE * 675 / 1000);   /* the ring frames the mark, whatever its size */
+	splash_progress = progress;
+
+	splash_arc(cx, cy, radius, 6, 360, 0xff33333au);
+	splash_arc(cx, cy, radius, 6, progress, SPLASH_ORANGE);
+	splash_logo(cx, cy, 1);            /* the artwork is baked at the size it is shown */
+
+	splash_center_tracked((int)(SCREEN.height * 44 / 100), "Xiaomi 11 Pro", 3, 2, SPLASH_WHITE);
+	splash_center_tracked((int)(SCREEN.height * 47 / 100), "SM8350  |  XNU 8796.121.2  |  DARWIN 22.5", 2, 1,
+	    SPLASH_GREY);
+	splash_block(cx - 250, (int)(SCREEN.height * 58 / 100), 500, 2, 0xff33333au);
+	splash_menu((int)(SCREEN.height * 62 / 100), items, 3);
+	splash_utf8_center((int)(SCREEN.height * 80 / 100), "音量键 选择      电源键 确认", 2, 1, SPLASH_GREY);
+	splash_center_tracked((int)(SCREEN.height * 89 / 100), "github.com/coldreset/hackios-mars", 2, 1, SPLASH_FAINT);
+	screen_quiet = 1;
+	if (ST->con_out != NULL) {
+		real_con_out = ST->con_out;   /* parked: the display is the boot screen's */
+		ST->con_out = NULL;
+	}
+}
+
+static void
+splash_redraw(void)
+{
+	if (ST->con_out == NULL && real_con_out != NULL) {
+		ST->con_out = real_con_out;   /* splash_draw parks it again */
+	}
+	splash_draw(splash_progress);
+	if (splash_state[0] != 0) {
+		splash_status(splash_state);
+	}
+}
+
+static void
+splash_status(const char *line)
+{
+	if (line != splash_state) {
+		int i = 0;
+		while (line[i] != 0 && i < (int)sizeof(splash_state) - 1) {
+			splash_state[i] = line[i];
+			i++;
+		}
+		splash_state[i] = 0;
+	}
+	splash_utf8_center((int)(SCREEN.height * 50 / 100), line, 2, 1, SPLASH_ORANGE);
+}
 efi_status EFIAPI
 efi_main(efi_handle image, efi_system_table *st)
 {
@@ -4862,6 +5232,9 @@ efi_main(efi_handle image, efi_system_table *st)
 	ST = st;
 	BS = st->bs;
 	IMAGE = image;
+	/* The screen belongs to the boot screen from here.  The console is only
+	 * switched back on where the loader dumps a kernel log. */
+	screen_quiet = 1;
 
 	BS->set_watchdog_timer(0, 0, 0, NULL);
 	/* no payload in memory (nobody put one there): the volume this loader came from may have one, as a UEFI boot loader's does */
@@ -4898,6 +5271,8 @@ efi_main(efi_handle image, efi_system_table *st)
 		print("display %d x %d at %x\n", (uint64_t)SCREEN.width, (uint64_t)SCREEN.height, SCREEN.base);
 	}
 	print("platform %s\n", PLAT->name);
+	splash_draw(130);
+	splash_status("等待主机连接");
 
 	install_exception_hook();
 	wdt_arm();

@@ -77,6 +77,8 @@ static unsigned wifi_mem_align;
 static unsigned wifi_mem_build;
 /* wifi_mem_shift: undo the eight bit shift in the sizes of a memory reply */
 static unsigned wifi_mem_shift;
+/* wifi_mem_type: the type field to write into each segment of a memory reply */
+static unsigned wifi_mem_type;
 struct hakiospcie_packet { struct hakiospcie_packet *next; unsigned length; uint8_t data[]; };
 static struct {
     volatile bool enabled, wanted, running, failed;
@@ -1792,6 +1794,7 @@ void hakiospcie_wifi_init(void) {
     PE_parse_boot_argn("wifi_mem_align", &wifi_mem_align, sizeof(wifi_mem_align));
     PE_parse_boot_argn("wifi_mem_build", &wifi_mem_build, sizeof(wifi_mem_build));
     PE_parse_boot_argn("wifi_mem_shift", &wifi_mem_shift, sizeof(wifi_mem_shift));
+    PE_parse_boot_argn("wifi_mem_type", &wifi_mem_type, sizeof(wifi_mem_type));
     hakiospcie_tl("wifi-pcie: begin PCIe/CNSS survey mode %u\n", mode);
     wifi_mode = mode;
     bool ok = inspect();
@@ -1941,9 +1944,15 @@ qrtr_send(struct hakios_qrtr_port *port, uint32_t node, uint32_t to_port, const 
 			memcpy(&size, editable + at + 9, sizeof(size));
 			uint32_t fixed = size >> 8;
 			if ((size & 0xff) || fixed < 1024 || fixed > 8u * 1024 * 1024) { continue; }
-			memcpy(editable + at + 9, &fixed, sizeof(fixed));
+				memcpy(editable + at + 9, &fixed, sizeof(fixed));
 			hakiospcie_tl("QMI probe: segment at %#llx says %u bytes, corrected to %u\n",
 			    address, size, fixed);
+			if (wifi_mem_type) {
+				uint32_t wanted = wifi_mem_type;
+				memcpy(editable + at + 13, &wanted, sizeof(wanted));
+				hakiospcie_tl("QMI probe: its type is now %u, not the zero that was there\n",
+				    wifi_mem_type);
+			}
 			if (wifi_mem_align) {
 				uint64_t mask = (uint64_t)wifi_mem_align - 1;
 				uint64_t rounded = address & ~mask;
@@ -1954,29 +1963,48 @@ qrtr_send(struct hakios_qrtr_port *port, uint32_t node, uint32_t to_port, const 
 				}
 			}
 		}
+		for (unsigned at = 0; at < length; at += 8) {
+			char line[80];
+			int used = 0;
+			used += snprintf(line + used, sizeof(line) - used, "QMI probe: final +%u:", at);
+			for (unsigned b = at; b < length && b < at + 8; b++) {
+				used += snprintf(line + used, sizeof(line) - used, " %02x", ((const uint8_t *)data)[b]);
+			}
+			hakiospcie_tl("%s\n", line);
+		}
 	} else if (wifi_mem_build && length >= 7 && ((const uint8_t *)data)[3] == 0x36 && ((const uint8_t *)data)[4] == 0) {
 		/* The two regions are inside the 44 MB window dma_prepare() mapped, far
 		 * from the rings at its start, and page aligned. Sizes are the ones the
 		 * radio asked for. */
-		uint8_t built[45];
+		uint8_t built[47];
 		uint64_t first = 0xa3000000ull, second = 0xa3200000ull;
 		uint32_t first_size = 65530, second_size = 262202, zero = 0;
-		bzero(built, sizeof(built));
+		unsigned found = 0;
+		for (unsigned at = 7; at + 8 <= length && found < 2; at++) {
+			uint64_t value = 0;
+			memcpy(&value, (const uint8_t *)data + at, sizeof(value));
+			if (value < WIFI_DATA_IOVA || value >= WIFI_DATA_LIMIT || (value & 4095)) { continue; }
+			if (found == 0) { first = value; } else { second = value; }
+			found++;
+		}
 		memcpy(built, data, 5);
-		built[5] = 0x26; built[6] = 0x00;
-		built[7] = 0x01; built[8] = 0x23; built[9] = 0x00;
+		built[5] = 0x28; built[6] = 0x00;
+		built[7] = 0x01; built[8] = 0x25; built[9] = 0x00;
 		built[10] = 0x02;
 		memcpy(built + 11, &first, 8);
-		memcpy(built + 19, &first_size, 4);
-		memcpy(built + 23, &zero, 4);
-		built[27] = 0x00;
-		memcpy(built + 28, &second, 8);
-		memcpy(built + 36, &second_size, 4);
-		memcpy(built + 40, &zero, 4);
-		built[44] = 0x00;
-		hakiospcie_tl("QMI probe: composing the reply ourselves: %#llx/%u and %#llx/%u\n",
+		built[19] = 0x00;
+		memcpy(built + 20, &first_size, 4);
+		memcpy(built + 24, &zero, 4);
+		built[28] = 0x00;
+		memcpy(built + 29, &second, 8);
+		built[37] = 0x00;
+		memcpy(built + 38, &second_size, 4);
+		memcpy(built + 42, &zero, 4);
+		built[46] = 0x00;
+		hakiospcie_tl("QMI probe: composing a 47 byte reply, eighteen bytes a segment: %#llx/%u and %#llx/%u\n",
 		    first, first_size, second, second_size);
-		data = built; length = sizeof(built);
+		data = built;
+		length = sizeof(built);
 	} else if (wifi_mem_align && length >= 12 && ((const uint8_t *)data)[3] == 0x36 && ((const uint8_t *)data)[4] == 0) {
 		uint8_t *editable = (uint8_t *)data;
 		uint64_t mask = (uint64_t)wifi_mem_align - 1;

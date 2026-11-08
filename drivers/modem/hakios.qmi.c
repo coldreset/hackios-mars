@@ -708,18 +708,18 @@ qmi_receive(void *context, uint32_t node, uint32_t port, const void *data, size_
 	message = (uint16_t)(header[3] | header[4] << 8);
 	if (message == 0x35) {
 		unsigned i;
-		char line[3 * 16 + 1];
+		char line[3 * 8 + 1];
 		os_log("QMI in 0x35 body, %zu bytes:\n", length);
-		for (i = 7; i < length && i < 71; i += 16) {
+		for (i = 0; i < length; i += 8) {
 			unsigned j, n = 0;
-			for (j = 0; j < 16 && i + j < length; j++) {
+			for (j = 0; j < 8 && i + j < length; j++) {
 				static const char hex[] = "0123456789abcdef";
 				line[n++] = hex[header[i + j] >> 4];
 				line[n++] = hex[header[i + j] & 0xf];
 				line[n++] = ' ';
 			}
 			line[n] = '\0';
-			os_log("QMI in 0x35 +%u: %s\n", i - 7, line);
+			os_log("QMI in 0x35 +%u: %s\n", i, line);
 		}
 	}
 	os_log("QMI in  %#x id %u type %u %zu bytes: %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x\n",
@@ -974,11 +974,11 @@ qmi_send_request(struct qmi_handle *qmi, struct sockaddr_qrtr *sq, struct qmi_tx
 	    ((const uint8_t *)buffer)[9], ((const uint8_t *)buffer)[10], ((const uint8_t *)buffer)[11]);
 	if (msg_id == 0x36) {
 		unsigned i;
-		char line[3 * 16 + 1];
+		char line[3 * 8 + 1];
 		os_log("QMI out 0x36 body, %zu bytes:\n", (size_t)length);
-		for (i = 0; i < (size_t)length && i < 64; i += 16) {
+		for (i = 0; i < (size_t)length; i += 8) {
 			unsigned j, n = 0;
-			for (j = 0; j < 16 && i + j < (size_t)length; j++) {
+			for (j = 0; j < 8 && i + j < (size_t)length; j++) {
 				static const char hex[] = "0123456789abcdef";
 				line[n++] = hex[((const uint8_t *)buffer)[i + j] >> 4];
 				line[n++] = hex[((const uint8_t *)buffer)[i + j] & 0xf];
