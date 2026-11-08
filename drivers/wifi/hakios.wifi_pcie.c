@@ -1442,7 +1442,18 @@ static void driver_quiesce(void) {
     }
     driver_runtime.last = NULL; driver_runtime.queued = 0;
 }
+/* Whether the ath11k object was linked in: its lx_start() is the strong one; this weak one is only the fallback. */
+bool
+hakios_lx_built_in(void)
+{
+	extern int lx_start(void);
+	return lx_start != NULL;
+}
+
 static bool driver_probe(void) {
+    /* A line that names this build, so a screenshot cannot be of an older kernel. */
+    hakiospcie_tl("wifi-pcie: stage 22 of the kernel built %s %s (ath11k %s)\n", __DATE__, __TIME__,
+        hakios_lx_built_in() ? "linked in" : "NOT linked in");
     if (!ipcr.announcement_length || !hakios_qrtr_attach(driver_send)) { return false; }
     driver_runtime.attached = driver_runtime.enabled = driver_runtime.wanted = driver_runtime.running = true;
     if (hakiospcie_lx_os_thread("lemonade-mhi", driver_worker, NULL)) {
@@ -1766,18 +1777,126 @@ hakiospcie_tl(const char *format, ...)
 	va_end(list);
 }
 
+
+
+/*
+ * The QMI helpers (sys/hakios.qmi.h) talk to the firmware through these four calls: a port of our own node of the
+ * IPC router, datagrams to and from it, and the question "where is that service". The router's packets travel over
+ * the IPCR channels stage 20 brought up (hakiospcie_qrtr_header in front of the payload), which is what this is.
+ */
+struct qrtr_port {
+	hakios_qrtr_receive_t receive;
+	hakios_qrtr_server_t server;
+	void *context;
+	uint32_t id;                    /* our port number on this node */
+	struct qrtr_port *next;
+};
+
+static struct qrtr_port *qrtr_ports;
+static uint32_t qrtr_next_port = 0x4100;
+static int (*qrtr_send_raw)(const void *, unsigned);
+
+static struct hakios_qrtr_port *
+qrtr_open(hakios_qrtr_receive_t receive, hakios_qrtr_server_t server, void *context)
+{
+	struct qrtr_port *port = kalloc_type(struct qrtr_port, Z_WAITOK | Z_ZERO);
+
+	if (port == NULL) {
+		return NULL;
+	}
+	port->receive = receive;
+	port->server = server;
+	port->context = context;
+	port->id = qrtr_next_port++;
+	port->next = qrtr_ports;
+	qrtr_ports = port;
+	return (struct hakios_qrtr_port *)port;
+}
+
+static int
+qrtr_send(struct hakios_qrtr_port *port, uint32_t node, uint32_t to_port, const void *data, size_t length)
+{
+	struct qrtr_port *mine = (struct qrtr_port *)port;
+
+	if (mine == NULL || qrtr_send_raw == NULL || length == 0 || length > 8000) {
+		return -EINVAL;
+	}
+	return ipcr_qrtr_send(1, mine->id, node, to_port, data, (unsigned)length) ? 0 : -EIO;
+}
+
+static int
+qrtr_lookup(struct hakios_qrtr_port *port, uint32_t service, uint32_t version, uint32_t instance)
+{
+	struct qrtr_port *mine = (struct qrtr_port *)port;
+
+	if (mine == NULL) {
+		return -EINVAL;
+	}
+	/* QRTR_NEW_LOOKUP: the control node's answer arrives as a control packet (see ipcr_receive). */
+	struct hakiospcie_qrtr_control control = {0};
+
+	control.command = 5;
+	control.words[0] = service;
+	control.words[1] = (instance << 8) | (version & 255);
+	mine->id = mine->id;
+	return ipcr_qrtr_send(2, QRTR_CONTROL_PORT, 0xffffffffu, QRTR_CONTROL_PORT, &control, sizeof(control)) ? 0 : -EIO;
+}
+
+static void
+qrtr_close(struct hakios_qrtr_port *port)
+{
+	struct qrtr_port *mine = (struct qrtr_port *)port, **at = &qrtr_ports;
+
+	while (*at != NULL && *at != mine) {
+		at = &(*at)->next;
+	}
+	if (*at == mine) {
+		*at = mine->next;
+	}
+	kfree_type(struct qrtr_port, mine);
+}
+
+static const struct hakios_qrtr_ops qrtr_ops = {
+	.open = qrtr_open,
+	.send = qrtr_send,
+	.lookup = qrtr_lookup,
+	.close = qrtr_close,
+};
+
 bool
 hakios_qrtr_attach(int (*send)(const void *, unsigned))
 {
-	(void)send;
-	hakiospcie_tl("the QRTR router over MHI is not written yet; QMI will not answer\n");
+	qrtr_send_raw = send;
+	hakios_qmi_set_transport(&qrtr_ops);
+	hakiospcie_tl("wifi-pcie: the QRTR router is up (one node of our own, ports 0x%x and up)\n", qrtr_next_port);
 	return true;
 }
 
+/* One whole QRTR packet, as it came off the IPCR channel. */
 void
 hakios_qrtr_deliver(const void *packet, unsigned length)
 {
-	(void)packet; (void)length;
+	struct hakiospcie_qrtr_header header = {0};
+	const uint8_t *data = (const uint8_t *)packet;
+	unsigned offset;
+
+	if (length < sizeof(header) || data[0] != 1) {
+		return;
+	}
+	memcpy(&header, data, sizeof(header));
+	offset = sizeof(header);
+	if (offset > length || header.size > length - offset) {
+		return;
+	}
+	if (header.dest_port == QRTR_CONTROL_PORT) {
+		return;                 /* the router's own small talk, dealt with in ipcr_receive */
+	}
+	for (struct qrtr_port *port = qrtr_ports; port != NULL; port = port->next) {
+		if (port->id == header.dest_port && port->receive != NULL) {
+			port->receive(port->context, header.source_node, header.source_port, data + offset, header.size);
+			return;
+		}
+	}
 }
 
 void
@@ -1788,6 +1907,11 @@ hakios_qrtr_poll(void)
 void
 hakios_qrtr_detach(void)
 {
+	while (qrtr_ports != NULL) {
+		qrtr_close((struct hakios_qrtr_port *)qrtr_ports);
+	}
+	qrtr_send_raw = NULL;
+	hakios_qmi_set_transport(NULL);
 }
 
 int
@@ -1831,14 +1955,24 @@ hakiospcie_lx_os_net_attach(const unsigned char *address)
 	hakiospcie_tl("the frames are not handed to en0 yet\n");
 }
 
-__attribute__((weak)) int
+/*
+ * The object built by tools/mk-ath11k.sh has these: lx_start() brings the radio up (it is the entry point the
+ * Linux driver's probe ends in), lx_stop() puts it down. This is what the stages call.
+ */
+extern int lx_start(void);
+extern void lx_stop(void);
+
+int
 hakios_lx_start(void)
 {
-	hakiospcie_tl("the ath11k object is not in this kernel (tools/mk-ath11k.sh, then build again)\n");
-	return ENXIO;
+	int result = lx_start();
+
+	hakiospcie_tl("wifi-pcie: the ath11k object returned %d\n", result);
+	return result;
 }
 
-__attribute__((weak)) void
+void
 hakios_lx_stop(void)
 {
+	lx_stop();
 }

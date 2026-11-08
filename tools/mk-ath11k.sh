@@ -143,6 +143,12 @@ if [ "$ATH_SOURCE" = src-pcie ]; then DFLAGS="$DFLAGS -DHAKIOS_PCIE=1"; fi
 DFLAGS="$DFLAGS -DLX_HAKIOS_LX_H=\"$XNU_SRC/bsd/sys/hakios.lx.h\" -DLX_HAKIOS_QMI_H=\"$XNU_SRC/bsd/sys/hakios.qmi.h\""
 mkdir -p obj out
 rm -f obj/*.err
+# The two source copies have the same file names: an object made from one is older than nothing in the other, so the
+# cache below would keep it. Start again when the copy being built has changed.
+if [ "$(cat obj/.source 2>/dev/null)" != "$ATH_SOURCE" ]; then
+	rm -f obj/*.o obj/*.d
+	echo "$ATH_SOURCE" > obj/.source
+fi
 compile() {		# compile SOURCE OBJECT [FLAGS]: only when the object is older than anything it was made of
 	local src=$1 obj=$2
 	shift 2

@@ -76,7 +76,18 @@ void	 lx_os_net_input(const unsigned char *frame, unsigned long length);	/* an E
  * function given for a vector is called there after it has fired, with the vector masked until
  * lx_os_irq_enable(). Nothing of the driver runs in an interrupt.
  */
-int	 lx_os_irq_msi(unsigned long long *address, unsigned *data);	/* where and what: 1, or 0 (no interrupts) */
+int	 lx_os_irq_msi(unsigned long long *address, unsigned *data);
+
+/*
+ * The radio on PCIe (HAKIOS_PCIE): instead of an AHB mapping the driver is handed the base of the
+ * copy-engine registers, and every register of the driver's goes through the two hooks below —
+ * the kernel's driver of the endpoint knows how to reach them (a window in BAR0), the shim does not.
+ * lx_os_radio_platform() is 1 while that driver is the one driving this radio.
+ */
+unsigned lx_os_radio_platform(void);			/* 1: the QCA6490 on PCIe; 0: the radio on AHB */
+void	*lx_os_pcie_bar(void);				/* the copy-engine registers, or NULL */
+unsigned lx_os_pcie_read(unsigned offset);	/* one register, through the window */
+void	 lx_os_pcie_write(unsigned offset, unsigned value);	/* where and what: 1, or 0 (no interrupts) */
 int	 lx_os_irq_attach(unsigned vector, void (*function)(void *), void *argument);	/* masked to begin with; 0 or an errno */
 void	 lx_os_irq_enable(unsigned vector);
 void	 lx_os_irq_disable(unsigned vector);			/* returns when its function is not running */

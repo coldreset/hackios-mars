@@ -555,48 +555,11 @@ lx_os_station_lost(int error)
 /* ---- the driver ---------------------------------------------------------------------------------------- */
 
 /* The object has its own; this is the one of a kernel built without it. */
-__attribute__((weak)) int
-lx_start(void)
-{
-	hakios_wifi_say("lx: THE DRIVER IS NOT BUILT IN: its object was not there when this kernel was built (tools/mk-ath11k.sh, then "
-	    "build the kernel again)\n");
-	return ENXIO;
-}
-
-__attribute__((weak)) void
-lx_stop(void)
-{
-}
-
-__attribute__((weak)) int
-lx_prepare(void)
-{
-	return 0;
-}
-
-__attribute__((weak)) int
-lx_transmit(__unused const unsigned char *frame, __unused unsigned long length)
-{
-	return ENXIO;
-}
-
-int
-redwood_lx_start(void)
-{
-	return lx_start();
-}
-
-void
-redwood_lx_stop(void)
-{
-	lx_stop();
-}
-
-int
-redwood_lx_prepare(void)
-{
-	return lx_prepare();
-}
+/*
+ * lx_start(), lx_stop(), lx_prepare(), lx_transmit(), lx_station_join() and the rest of the driver are the
+ * ath11k object's (tools/mk-ath11k.sh), not this file's: this file is only the platform the object runs on.
+ * A kernel built without it does not link, which is the honest answer.
+ */
 
 /* ---- what this tree's own driver answers, while the PCIe one cannot yet ----------------------------------- */
 /*

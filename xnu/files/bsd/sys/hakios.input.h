@@ -95,6 +95,7 @@ void hakios_wlfw_stop(uint32_t step);                                  /* ... an
 void hakios_wifi_quiesce(void);        /* on the way back to the loader: the Wi-Fi DSP, if it still runs, shut down */
 /* ath11k's object and the kernel's side of it (drivers/wifi/hakios.lx.c), and what that asks of the phone's radio */
 int hakios_lx_start(void);             /* the driver brought up on the radio as far as it is built: 0 or an errno */
+bool hakios_lx_built_in(void);         /* whether the ath11k object was linked into this kernel */             /* the driver brought up on the radio as far as it is built: 0 or an errno */
 void hakios_lx_stop(void);             /* ... and down again, if it stayed up (a network joined) */
 int hakios_lx_prepare(void);           /* before all that: the memory the radio will be shown, taken; 0 or an errno */
 void hakios_lx_net_early(void);        /* ... and en0 made on the radio now, if the kernel was given its address */
