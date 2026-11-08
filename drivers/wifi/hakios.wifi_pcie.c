@@ -1972,6 +1972,45 @@ qrtr_send(struct hakios_qrtr_port *port, uint32_t node, uint32_t to_port, const 
 			}
 			hakiospcie_tl("%s\n", line);
 		}
+	} else if (ipcr.memory_count && length >= 7 && ((const uint8_t *)data)[3] == 0x36 &&
+	    ((const uint8_t *)data)[4] == 0) {
+		/*
+		 * Answer from our own reading of the request, not from ath11k's decode of it:
+		 * the radio wants each segment handed back with the type and size it asked for
+		 * (Linux echoes type verbatim, qmi.c:1900), and ath11k's decoder reads those
+		 * fields one byte off. addr, size, type, restore: seventeen bytes a segment.
+		 */
+		static uint8_t answered[11 + 17 * 16];
+		unsigned count = ipcr.memory_count > 16 ? 16 : ipcr.memory_count;
+		unsigned at = 11;
+
+		answered[0] = 0x00; answered[1] = 0x00; answered[2] = 0x36;
+		answered[7] = 0x01;
+		answered[10] = (uint8_t)count;
+		for (unsigned i = 0; i < count; i++) {
+			uint64_t addr = 0xa3000000ull + (uint64_t)i * 0x2000000ull;
+			uint32_t size = ipcr.memory[i].size;
+			uint32_t type = ipcr.memory[i].type;
+
+			memcpy(answered + at, &addr, 8);
+			memcpy(answered + at + 8, &size, 4);
+			memcpy(answered + at + 12, &type, 4);
+			answered[at + 16] = 0x00;
+			hakiospcie_tl("QMI probe: echoing type %u, %u bytes at %#llx\n", type, size, addr);
+			at += 17;
+		}
+		{
+			unsigned body = at - 7;
+			unsigned tlv = body - 3;
+
+			answered[3] = (uint8_t)((body >> 8) & 0xff);
+			answered[4] = (uint8_t)(body & 0xff);
+			answered[8] = (uint8_t)((tlv >> 8) & 0xff);
+			answered[9] = (uint8_t)(tlv & 0xff);
+		}
+		data = answered;
+		length = at;
+		hakiospcie_tl("QMI probe: answering from the request itself: %u bytes, %u segments\n", at, count);
 	} else if (wifi_mem_build && length >= 7 && ((const uint8_t *)data)[3] == 0x36 && ((const uint8_t *)data)[4] == 0) {
 		/* The two regions are inside the 44 MB window dma_prepare() mapped, far
 		 * from the rings at its start, and page aligned. Sizes are the ones the
