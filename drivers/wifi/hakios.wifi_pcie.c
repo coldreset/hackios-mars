@@ -69,6 +69,12 @@ static LCK_GRP_DECLARE(hakiospcie_wifi_group, "lemonade-wifi");
 static LCK_MTX_DECLARE(hakiospcie_mhi_lock, &hakiospcie_wifi_group);
 static LCK_MTX_DECLARE(hakiospcie_window_lock, &hakiospcie_wifi_group);
 static unsigned wifi_mode;
+/* wifi_mem_empty: answer a memory request with an empty reply */
+static unsigned wifi_mem_empty;
+/* wifi_mem_align: round the addresses in a memory reply down to this boundary */
+static unsigned wifi_mem_align;
+/* wifi_mem_build: answer with a reply we compose, inside the window we mapped */
+static unsigned wifi_mem_build;
 struct hakiospcie_packet { struct hakiospcie_packet *next; unsigned length; uint8_t data[]; };
 static struct {
     volatile bool enabled, wanted, running, failed;
@@ -570,6 +576,8 @@ static bool dma_allocate(unsigned requested, bool coherent, vm_offset_t *memory,
     dma_space.allocations[allocation].size = size;
     dma_space.allocations[allocation].iova = iova;
     dma_space.next_iova = iova + size + PAGE_SIZE;
+    hakiospcie_tl("QMI probe: DMA allocation %u: %u bytes asked, %u mapped, at %#llx\n",
+        allocation, requested, size, iova);
     dma_flush(cached, size);
     if (coherent) {
         uncached = ml_io_map_unmappable(kvtophys(cached), size, VM_WIMG_WCOMB);
@@ -1413,6 +1421,14 @@ static bool driver_receive(const uint8_t *data, unsigned length) {
     return true;
 }
 static int driver_send(const void *packet, unsigned length) {
+    uint8_t empty[7];
+    const uint8_t *bytes = packet;
+    if (wifi_mem_empty && length >= 7 && bytes[0] == 0 && bytes[3] == 0x36 && bytes[4] == 0) {
+        memcpy(empty, bytes, 5);
+        empty[5] = 0; empty[6] = 0;
+        hakiospcie_tl("QMI probe: answering the memory request with an empty reply, not %u bytes\n", length);
+        packet = empty; length = sizeof(empty);
+    }
     lck_mtx_lock(&hakiospcie_mhi_lock);
     int error = !driver_runtime.enabled || driver_runtime.failed ? ENXIO : ipcr_send(packet, length) ? 0 : ENOBUFS;
     lck_mtx_unlock(&hakiospcie_mhi_lock);
@@ -1770,6 +1786,9 @@ void hakiospcie_wifi_init(void) {
         if (mode == 24 && runtime == 1)
             hakiospcie_tl("wifi-pcie: integrated station runtime enabled\n");
     }
+    PE_parse_boot_argn("wifi_mem_empty", &wifi_mem_empty, sizeof(wifi_mem_empty));
+    PE_parse_boot_argn("wifi_mem_align", &wifi_mem_align, sizeof(wifi_mem_align));
+    PE_parse_boot_argn("wifi_mem_build", &wifi_mem_build, sizeof(wifi_mem_build));
     hakiospcie_tl("wifi-pcie: begin PCIe/CNSS survey mode %u\n", mode);
     wifi_mode = mode;
     bool ok = inspect();
@@ -1894,6 +1913,62 @@ qrtr_send(struct hakios_qrtr_port *port, uint32_t node, uint32_t to_port, const 
 
 	if (mine == NULL || qrtr_send_raw == NULL || length == 0 || length > 8000) {
 		return -EINVAL;
+	}
+	/* wifi_mem_empty: hand the radio an empty respond-mem, the way Linux'
+	 * delayed path does, to see whether it is the payload that silences it. */
+	if (wifi_mem_empty && length >= 7 && ((const uint8_t *)data)[0] == 0 &&
+	    ((const uint8_t *)data)[3] == 0x36 && ((const uint8_t *)data)[4] == 0) {
+		uint8_t empty[7];
+		memcpy(empty, data, 5);
+		empty[5] = 0; empty[6] = 0;
+		hakiospcie_tl("QMI probe: answering the memory request with an empty reply, not %u bytes\n", (unsigned)length);
+		data = empty; length = sizeof(empty);
+	} else if (wifi_mem_build && length >= 7 && ((const uint8_t *)data)[3] == 0x36 && ((const uint8_t *)data)[4] == 0) {
+		/* The two regions are inside the 44 MB window dma_prepare() mapped, far
+		 * from the rings at its start, and page aligned. Sizes are the ones the
+		 * radio asked for. */
+		uint8_t built[45];
+		uint64_t first = 0xa3000000ull, second = 0xa3200000ull;
+		uint32_t first_size = 65530, second_size = 262202, zero = 0;
+		bzero(built, sizeof(built));
+		memcpy(built, data, 5);
+		built[5] = 0x26; built[6] = 0x00;
+		built[7] = 0x01; built[8] = 0x23; built[9] = 0x00;
+		built[10] = 0x02;
+		memcpy(built + 11, &first, 8);
+		memcpy(built + 19, &first_size, 4);
+		memcpy(built + 23, &zero, 4);
+		built[27] = 0x00;
+		memcpy(built + 28, &second, 8);
+		memcpy(built + 36, &second_size, 4);
+		memcpy(built + 40, &zero, 4);
+		built[44] = 0x00;
+		hakiospcie_tl("QMI probe: composing the reply ourselves: %#llx/%u and %#llx/%u\n",
+		    first, first_size, second, second_size);
+		data = built; length = sizeof(built);
+	} else if (wifi_mem_align && length >= 12 && ((const uint8_t *)data)[3] == 0x36 && ((const uint8_t *)data)[4] == 0) {
+		uint8_t *editable = (uint8_t *)data;
+		uint64_t mask = (uint64_t)wifi_mem_align - 1;
+		for (unsigned at = 7; at + 8 <= length; at++) {
+			uint64_t value = 0;
+			memcpy(&value, editable + at, sizeof(value));
+			if (value < WIFI_DATA_IOVA || value >= WIFI_DATA_LIMIT || (value & mask) == 0) { continue; }
+			uint64_t fixed = value & ~mask;
+			memcpy(editable + at, &fixed, sizeof(fixed));
+			hakiospcie_tl("QMI probe: segment address %#llx aligned down to %#llx\n",
+			    value, fixed);
+		}
+	} else if (length >= 12 && ((const uint8_t *)data)[3] == 0x36 && ((const uint8_t *)data)[4] == 0) {
+		const uint8_t *body = (const uint8_t *)data + 7;
+		unsigned reported = body[0];
+		hakiospcie_tl("QMI probe: the reply carries %u segments\n", reported);
+		for (unsigned i = 0; i < reported && i < 4; i++) {
+			uint64_t addr = 0; uint32_t size = 0, type = 0;
+			memcpy(&addr, body + 1 + i * 17, sizeof(addr));
+			memcpy(&size, body + 9 + i * 17, sizeof(size));
+			memcpy(&type, body + 13 + i * 17, sizeof(type));
+			hakiospcie_tl("QMI probe: segment %u: %#llx for %u bytes, type %u\n", i, addr, size, type);
+		}
 	}
 	return ipcr_qrtr_send(1, mine->id, node, to_port, data, (unsigned)length) ? 0 : -EIO;
 }
