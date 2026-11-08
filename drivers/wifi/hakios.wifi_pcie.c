@@ -35,6 +35,7 @@ void hakios_qrtr_deliver(const void *packet, unsigned length);
 void hakios_qrtr_poll(void);
 void hakios_qrtr_detach(void);
 int  hakiospcie_lx_os_thread(const char *name, void (*function)(void *), void *argument);
+
 void hakiospcie_lx_os_wakeup(const void *address);
 void hakiospcie_lx_os_unlock(void);
 bool hakiospcie_lx_os_radio_address(unsigned char *address);
@@ -1343,13 +1344,19 @@ void *hakiospcie_wifi_driver_memory(unsigned long size, unsigned long long *iova
     *iova = address; return (void *)memory;
 }
 const uint8_t *hakiospcie_wifi_driver_file(const char *name, uint64_t *size) {
-    static const char prefix[] = "ath11k/QCA6490/hw1.0/";
-    if (!hakiospcie_wifi_driver_mode() || strncmp(name, prefix, sizeof(prefix) - 1)) { return NULL; }
-    const char *file = name + sizeof(prefix) - 1;
-    if (strcmp(file, "board.bin") && strcmp(file, "regdb.bin") && strcmp(file, "m3.bin")) { return NULL; }
+    /* The driver asks both ways: "ath11k/QCA6490/hw1.0/board.bin" and "QCA6490/hw1.0/firmware-2.bin". */
+    static const char prefix[] = "ath11k/";
+    if (!hakiospcie_wifi_driver_mode()) { return NULL; }
+    if (!strncmp(name, prefix, sizeof(prefix) - 1)) { name += sizeof(prefix) - 1; }
+    if (strncmp(name, "QCA6490/hw1.0/", 14)) { return NULL; }
+    const char *file = name + 14;
+    /* firmware-2.bin is the vendor tree's name for the board data: ours is the bdwlan file. */
+    if (!strcmp(file, "firmware-2.bin")) { file = "bdwlan.bin"; }
+    if (strcmp(file, "board.bin") && strcmp(file, "regdb.bin") && strcmp(file, "m3.bin") &&
+        strcmp(file, "bdwlan.bin") && strcmp(file, "amss.bin")) { return NULL; }
     const uint8_t *data = hakios_image_file("fw", file, size, NULL);
     if (!data || !*size || *size > 1024 * 1024) { return NULL; }
-    hakiospcie_tl("wifi-pcie: ath11k original firmware file %s bytes %u\n", file, (unsigned)*size);
+    hakiospcie_tl("wifi-pcie: ath11k asks for %s and gets %s, %u bytes\n", name, file, (unsigned)*size);
     return data;
 }
 void *hakiospcie_wifi_driver_bar(void) { return hakiospcie_wifi_driver_mode() ? (void *)bar : NULL; }
@@ -1450,6 +1457,16 @@ hakios_lx_built_in(void)
 	return lx_start != NULL;
 }
 
+static volatile int driver_start_result = -1;
+
+static void
+driver_start_thread(void *unused)
+{
+	(void)unused;
+	driver_start_result = hakios_lx_start();
+	wakeup((event_t)&driver_start_result);
+}
+
 static bool driver_probe(void) {
     /* A line that names this build, so a screenshot cannot be of an older kernel. */
     hakiospcie_tl("wifi-pcie: stage 22 of the kernel built %s %s (ath11k %s)\n", __DATE__, __TIME__,
@@ -1465,7 +1482,20 @@ static bool driver_probe(void) {
         hakiospcie_lx_os_net_attach(address);
     }
     driver_runtime.called = true;
-    int result = hakios_lx_start();
+    /* ath11k waits for the firmware inside lx_start(); on this machine that wait can be endless, and the boot thread
+       must not go with it. Ninety seconds is more than the driver's own sixty-second deadline. */
+    driver_start_result = -1;
+    if (hakiospcie_lx_os_thread("ath11k-start", driver_start_thread, NULL)) {
+        return false;
+    }
+    for (unsigned i = 0; i < 900 && driver_start_result < 0; i++) {
+        lx_os_sleep(&driver_start_result, 100 * 1000 * 1000);
+    }
+    int result = driver_start_result;
+    if (result < 0) {
+        hakiospcie_tl("wifi-pcie: ath11k has not come back from its start after 90 s; the stage stops here\n");
+        return false;
+    }
     bool ok = result == 0 && !driver_runtime.failed && mhi_dma_ok();
     hakiospcie_tl("wifi-pcie: ath11k driver result %d transport_failed %u FSR %#x global %#x\n",
         result, driver_runtime.failed, rd(dma_space.cb, 0x58), rd(dma_space.mmio, 0x48));
@@ -1784,11 +1814,16 @@ hakiospcie_tl(const char *format, ...)
  * IPC router, datagrams to and from it, and the question "where is that service". The router's packets travel over
  * the IPCR channels stage 20 brought up (hakiospcie_qrtr_header in front of the payload), which is what this is.
  */
+struct qrtr_lookup {
+	uint32_t service, version, instance;
+	struct qrtr_lookup *next;
+};
 struct qrtr_port {
 	hakios_qrtr_receive_t receive;
 	hakios_qrtr_server_t server;
 	void *context;
 	uint32_t id;                    /* our port number on this node */
+	struct qrtr_lookup *lookups;    /* what this port asked to be told about */
 	struct qrtr_port *next;
 };
 
@@ -1816,6 +1851,7 @@ qrtr_open(hakios_qrtr_receive_t receive, hakios_qrtr_server_t server, void *cont
 static int
 qrtr_send(struct hakios_qrtr_port *port, uint32_t node, uint32_t to_port, const void *data, size_t length)
 {
+	hakiospcie_tl("wifi-pcie: QMI send %u bytes to node %u port %#x\n", (unsigned)length, node, to_port);
 	struct qrtr_port *mine = (struct qrtr_port *)port;
 
 	if (mine == NULL || qrtr_send_raw == NULL || length == 0 || length > 8000) {
@@ -1828,18 +1864,36 @@ static int
 qrtr_lookup(struct hakios_qrtr_port *port, uint32_t service, uint32_t version, uint32_t instance)
 {
 	struct qrtr_port *mine = (struct qrtr_port *)port;
+	struct qrtr_lookup *ask;
+	/* QRTR_TYPE_NEW_LOOKUP is 8, its body (service, version, instance); the router answers with NEW_SERVER. */
+	struct hakiospcie_qrtr_control control = {0};
 
 	if (mine == NULL) {
 		return -EINVAL;
 	}
-	/* QRTR_NEW_LOOKUP: the control node's answer arrives as a control packet (see ipcr_receive). */
-	struct hakiospcie_qrtr_control control = {0};
-
-	control.command = 5;
+	for (ask = mine->lookups; ask != NULL; ask = ask->next) {
+		if (ask->service == service && ask->version == version && ask->instance == instance) {
+			break;
+		}
+	}
+	if (ask == NULL) {
+		ask = kalloc_type(struct qrtr_lookup, Z_WAITOK | Z_ZERO);
+		if (ask == NULL) {
+			return -ENOMEM;
+		}
+		ask->service = service; ask->version = version; ask->instance = instance;
+		ask->next = mine->lookups; mine->lookups = ask;
+	}
+	control.command = 8;
 	control.words[0] = service;
-	control.words[1] = (instance << 8) | (version & 255);
-	mine->id = mine->id;
-	return ipcr_qrtr_send(2, QRTR_CONTROL_PORT, 0xffffffffu, QRTR_CONTROL_PORT, &control, sizeof(control)) ? 0 : -EIO;
+	control.words[1] = version;
+	control.words[2] = instance;
+	if (!ipcr_qrtr_send(8, mine->id, 0xffffffffu, QRTR_CONTROL_PORT, &control, sizeof(control))) {
+		return -EIO;
+	}
+	hakiospcie_tl("wifi-pcie: asked the router where service %#x version %u instance %u is\n",
+	    service, version, instance);
+	return 0;
 }
 
 static void
@@ -1847,6 +1901,15 @@ qrtr_close(struct hakios_qrtr_port *port)
 {
 	struct qrtr_port *mine = (struct qrtr_port *)port, **at = &qrtr_ports;
 
+	if (mine == NULL) {
+		return;
+	}
+	while (mine->lookups != NULL) {
+		struct qrtr_lookup *ask = mine->lookups;
+
+		mine->lookups = ask->next;
+		kfree_type(struct qrtr_lookup, ask);
+	}
 	while (*at != NULL && *at != mine) {
 		at = &(*at)->next;
 	}
@@ -1888,8 +1951,39 @@ hakios_qrtr_deliver(const void *packet, unsigned length)
 	if (offset > length || header.size > length - offset) {
 		return;
 	}
-	if (header.dest_port == QRTR_CONTROL_PORT) {
-		return;                 /* the router's own small talk, dealt with in ipcr_receive */
+	if (header.dest_port != QRTR_CONTROL_PORT) {
+		hakiospcie_tl("wifi-pcie: QMI receive %u bytes for port %#x from node %u port %#x\n",
+		    header.size, header.dest_port, header.source_node, header.source_port);
+	}
+	if (header.dest_port == QRTR_CONTROL_PORT && header.size >= 8) {
+		/* NEW_SERVER (4) and DEL_SERVER (5): (service, instance << 8 | version, node, port). */
+		struct hakiospcie_qrtr_control control = {0};
+
+		memcpy(&control, data + offset, header.size < sizeof(control) ? header.size : sizeof(control));
+		if (control.command == 4 || control.command == 5) {
+			uint32_t service = control.words[0];
+			uint32_t version = control.words[1] & 255;
+			uint32_t instance = control.words[1] >> 8;
+
+			hakiospcie_tl("wifi-pcie: the router says service %#x version %u instance %u is %s (node %u port %#x)\n",
+			    service, version, instance, control.command == 4 ? "there" : "gone",
+			    control.words[2], control.words[3]);
+			for (struct qrtr_port *port = qrtr_ports; port != NULL; port = port->next) {
+				if (port->server == NULL) {
+					continue;
+				}
+				for (struct qrtr_lookup *ask = port->lookups; ask != NULL; ask = ask->next) {
+					if (ask->service != service ||
+					    (ask->version != 0xffffffffu && ask->version != version) ||
+					    (ask->instance != 0xffffffffu && ask->instance != instance)) {
+						continue;
+					}
+					port->server(port->context, control.command == 4, service, version, instance,
+					    control.words[2], control.words[3]);
+				}
+			}
+		}
+		return;
 	}
 	for (struct qrtr_port *port = qrtr_ports; port != NULL; port = port->next) {
 		if (port->id == header.dest_port && port->receive != NULL) {
