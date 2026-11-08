@@ -17,5 +17,6 @@ driver WIFI
 driver WIFI_PCIE
 	file    bsd/dev/hakios.wifi_pcie.c
 	file    bsd/dev/hakios.radio_pcie.c
+	file    bsd/dev/hakios.lx_pcie.c
 	requires QMI
 	help    Wi-Fi of the QCA6490 on PCIe (wifipcie=1): the links the OnePlus 9 port of the same SoC has

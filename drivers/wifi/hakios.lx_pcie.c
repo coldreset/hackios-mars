@@ -5,7 +5,7 @@
  * layer that gives it the kernel interfaces it expects, and tied into one object that the
  * kernel links when it is there (tools/mk-ath11k.sh and wifi/lx in the repository; the kernel
  * is built with that object when xnu-build.sh finds it). The object shows one name, lx_start(),
- * and asks for the calls of sys/redwood_lx.h, which are here: memory, time, threads, one lock
+ * and asks for the calls of sys/hakios.lx.h, which are here: memory, time, threads, one lock
  * to sleep under, the kernel's options. What it asks of the radio itself -- its firmware's
  * files, its view of memory, the processor its firmware runs on -- is redwood_wifi.c's to
  * answer, which knows the phone.
@@ -27,6 +27,9 @@
 #include <sys/random.h>
 #include <sys/hakios.input.h>
 #include <sys/hakios.lx.h>
+#include <sys/hakios.sta.h>
+#include <sys/hakios.input.h>
+#include <sys/redwood_net.h>
 #include <sys/redwood_net.h>
 #include <sys/systm.h>
 #include <vm/memory_types.h>
@@ -71,7 +74,7 @@ lx_os_radio_memory(unsigned long size, unsigned long long *address)
 	size = round_page(size);
 	if (kmem_alloc_contig(kernel_map, &cached, size, 0, 0, 0, KMA_KOBJECT | KMA_ZERO | KMA_DATA, VM_KERN_MEMORY_IOKIT) !=
 	    KERN_SUCCESS) {
-		say("lx: no %lu bytes of memory in one piece\n", size);
+		hakios_wifi_say("lx: no %lu bytes of memory in one piece\n", size);
 		return NULL;
 	}
 	physical = kvtophys(cached);
@@ -106,7 +109,7 @@ lx_os_map_registers(unsigned long long physical, unsigned long size)
 void
 lx_os_print(const char *text)
 {
-	say("%s", text);
+	hakios_wifi_say("%s", text);
 }
 
 void
@@ -173,30 +176,19 @@ lx_os_thread(const char *name, void (*function)(void *), void *argument)
 	return 0;
 }
 
-void
-lx_os_lock(void)
-{
-	lck_mtx_lock(&lx_lock);
-}
+/*
+ * The lock, the sleep and the wakeup are the driver's (bsd/dev/hakios.wifi_pcie.c has them, and its unlock is
+ * named hakiospcie_lx_os_unlock); this file is only the same call names ath11k expects.
+ */
+extern void hakiospcie_lx_os_unlock(void);
 
 void
 lx_os_unlock(void)
 {
-	lck_mtx_unlock(&lx_lock);
+	hakiospcie_lx_os_unlock();
 }
 
-int
-lx_os_sleep(const void *address, unsigned long long nanoseconds)
-{
-	uint64_t deadline;
-
-	if (nanoseconds == 0) {
-		return lck_mtx_sleep(&lx_lock, LCK_SLEEP_DEFAULT, (event_t)address, THREAD_UNINT) == THREAD_TIMED_OUT;
-	}
-	nanoseconds_to_absolutetime(nanoseconds, &deadline);
-	deadline += mach_absolute_time();
-	return lck_mtx_sleep_deadline(&lx_lock, LCK_SLEEP_DEFAULT, (event_t)address, THREAD_UNINT, deadline) == THREAD_TIMED_OUT;
-}
+/* lx_os_sleep is the driver's too (bsd/dev/hakios.wifi_pcie.c). */
 
 void
 lx_os_wakeup(const void *address)
@@ -232,7 +224,7 @@ lx_os_firmware(const char *name, const void **data, unsigned long *size)
 {
 	uint64_t length = 0;
 	const uint8_t *file = hakiospcie_wifi_driver_mode() ? hakiospcie_wifi_driver_file(name, &length) :
-	    hakios_wifi_driver_file(name, &length);
+	    hakiospcie_wifi_driver_file(name, &length);
 
 	if (file == NULL) {
 		return ENOENT;
@@ -246,7 +238,7 @@ int
 lx_os_rproc_boot(void)
 {
 	if (hakiospcie_wifi_driver_mode()) { return 0; }
-	return hakios_wifi_dsp_is_up() ? 0 : ENXIO;
+	return (hakiospcie_wifi_driver_mode() != 0) ? 0 : ENXIO;
 }
 
 int
@@ -346,14 +338,14 @@ lx_os_net_attach(const unsigned char *address)
 	}
 	lx_queue = kalloc_data(LX_QUEUE * sizeof(*lx_queue), Z_WAITOK | Z_ZERO);
 	if (lx_queue == NULL || kernel_thread_start(lx_queue_runs, NULL, &thread) != KERN_SUCCESS) {
-		say("lx: no memory or no thread for the frames to send: the radio's frames go nowhere\n");
+		hakios_wifi_say("lx: no memory or no thread for the frames to send: the radio's frames go nowhere\n");
 		return;
 	}
 	thread_set_thread_name(thread, "wifi-send");
 	thread_deallocate(thread);
 	memcpy(lx_link.address, address, sizeof(lx_link.address));
 	lx_link_attached = redwood_net_attach(&lx_link);
-	say("lx: %s\n", lx_link_attached ? "the radio is the link behind en0" : "EN0 HAS A LINK ALREADY: the radio's frames go "
+	hakios_wifi_say("lx: %s\n", lx_link_attached ? "the radio is the link behind en0" : "EN0 HAS A LINK ALREADY: the radio's frames go "
 	    "nowhere");
 }
 
@@ -549,15 +541,15 @@ lx_os_irq_count(unsigned vector)
 /* ---- the station (sys/redwood_sta.h) --------------------------------------------------------------------- */
 
 void
-lx_os_station(const struct redwood_sta_ops *ops)
+lx_os_station(const struct hakios_sta_ops *ops)
 {
-	redwood_sta_attach(ops);
+	hakios_sta_attach(ops);
 }
 
 void
 lx_os_station_lost(int error)
 {
-	redwood_sta_lost(error);
+	hakios_sta_lost(error);
 }
 
 /* ---- the driver ---------------------------------------------------------------------------------------- */
@@ -566,7 +558,7 @@ lx_os_station_lost(int error)
 __attribute__((weak)) int
 lx_start(void)
 {
-	say("lx: THE DRIVER IS NOT BUILT IN: its object was not there when this kernel was built (tools/mk-ath11k.sh, then "
+	hakios_wifi_say("lx: THE DRIVER IS NOT BUILT IN: its object was not there when this kernel was built (tools/mk-ath11k.sh, then "
 	    "build the kernel again)\n");
 	return ENXIO;
 }
@@ -589,13 +581,13 @@ lx_transmit(__unused const unsigned char *frame, __unused unsigned long length)
 }
 
 int
-hakios_lx_start(void)
+redwood_lx_start(void)
 {
 	return lx_start();
 }
 
 void
-hakios_lx_stop(void)
+redwood_lx_stop(void)
 {
 	lx_stop();
 }
@@ -604,4 +596,118 @@ int
 redwood_lx_prepare(void)
 {
 	return lx_prepare();
+}
+
+/* ---- what this tree's own driver answers, while the PCIe one cannot yet ----------------------------------- */
+/*
+ * bsd/dev/hakios.sta.c (the station, and the small image's network) and the AHB driver's say()/option() belong
+ * to the other radio's object, which is not built when this one is. These four answer as a driver that has been
+ * given no network: ath11k starts, finds no station to report to, and says so in its own words.
+ */
+#define HAKIOS_PCIE_GLUE 1
+
+__attribute__((weak)) void
+hakios_sta_attach(const struct hakios_sta_ops *ops)
+{
+	static int said;
+
+	if (!said++) {
+		hakios_wifi_say("wifi-pcie: the station glue is not in this kernel (bsd/dev/hakios.sta.c is the AHB driver's)\n");
+	}
+	(void)ops;
+}
+
+__attribute__((weak)) void
+hakios_sta_lost(int error)
+{
+	(void)error;
+}
+
+__attribute__((weak)) bool
+hakios_wifi_network(uint8_t *name, unsigned *name_length, uint8_t *passphrase, unsigned *passphrase_length)
+{
+	(void)name;
+	(void)name_length;
+	(void)passphrase;
+	(void)passphrase_length;
+	return false;
+}
+
+__attribute__((weak)) uint32_t
+hakios_wifi_option(const char *name)
+{
+	uint32_t value = 0;
+
+	if (name != NULL) {
+		PE_parse_boot_argn(name, &value, sizeof(value));
+	}
+	return value;
+}
+
+__attribute__((weak)) int
+hakios_wifi_say(const char *format, ...)
+{
+	char line[400];
+	va_list list;
+
+	va_start(list, format);
+	vsnprintf(line, sizeof(line), format, list);
+	va_end(list);
+	printf("wifi-pcie: %s\n", line);
+	return 0;
+}
+
+__attribute__((weak)) int
+hakios_wifi_tell(const char *format, ...)
+{
+	return hakios_wifi_say(format);
+}
+
+__attribute__((weak)) bool
+hakios_wifi_radio_map(uint64_t physical, uint64_t size, unsigned long long *address)
+{
+	(void)physical;
+	(void)size;
+	if (address != NULL) {
+		*address = 0;
+	}
+	return false;
+}
+
+__attribute__((weak)) bool
+hakios_wifi_radio_msi(unsigned long long *address, uint32_t *data, uint32_t *first_spi)
+{
+	(void)address;
+	(void)data;
+	(void)first_spi;
+	return false;
+}
+
+__attribute__((weak)) bool
+hakios_wifi_radio_address(uint8_t *address)
+{
+	(void)address;
+	return false;
+}
+
+/* The network side of this tree (bsd/dev/hakios.sta.c) is the AHB driver's; until the PCIe one has its own, a
+ * frame that arrives is dropped and no link is announced, which is the truth: there is no interface. */
+__attribute__((weak)) bool
+redwood_net_attach(const struct redwood_net_link *link)
+{
+	(void)link;
+	return false;
+}
+
+__attribute__((weak)) void
+redwood_net_input(const uint8_t *frame, size_t length)
+{
+	(void)frame;
+	(void)length;
+}
+
+__attribute__((weak)) void
+redwood_net_link_state(bool up)
+{
+	(void)up;
 }

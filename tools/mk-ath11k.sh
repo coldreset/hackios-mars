@@ -68,6 +68,14 @@ if [ "$(cat src/.release 2>/dev/null)" != "$VERSION $SHA256" ]; then
 fi
 [ "$1" = fetch ] && { echo "mk-ath11k.sh: ath11k of Linux $VERSION: $B/src/ath11k"; exit 0; }
 W=$ROOT/wifi/lx
+# The QCA6490 profile the OnePlus 9 port wrote: a pinned copy of the same ath11k source with the
+# QCA6490 hw entry and its 3200-byte CE2 limit. HAKIOS_PCIE=1 builds that copy, and lx_bus.c then
+# talks to the radio over the kernel's PCIe hooks instead of an AHB mapping.
+ATH_SOURCE=src
+if [ "${HAKIOS_PCIE:-0}" = 1 ]; then
+	python3 "$ROOT/tools/hakios-ath11k-profile.py" "$B/src" "$B/src-pcie"
+	ATH_SOURCE=src-pcie
+fi
 
 # --- FreeBSD's LinuxKPI and the kernel headers under it, with our patches on top. When the patches
 # change, the tree is taken from the archive again (as tools/mk-mesa.sh does with Mesa's).
@@ -123,7 +131,7 @@ CFLAGS="-mkernel -mgeneral-regs-only -fno-builtin -fno-common -ffreestanding -fn
 	-I$W/include -Igen -I$S -I$S/contrib/ck/include
 	-I$S/compat/linuxkpi/common/include -I$S/compat/linuxkpi/dummy/include
 	-include $S/compat/linuxkpi/common/include/linux/kconfig.h -DLINUXKPI_VERSION=70000"
-DFLAGS="-Isrc/ath11k -Isrc -include $W/include/lx_prelude.h -DCONFIG_ATH11K_AHB -DCONFIG_ATH11K_DEBUG
+DFLAGS="-I$ATH_SOURCE/ath11k -I$ATH_SOURCE -include $W/include/lx_prelude.h -DCONFIG_ATH11K_AHB -DCONFIG_ATH11K_DEBUG
 	-DKBUILD_MODNAME=\"ath11k\""
 # two headers are the kernel's: what it offers this object (wifi/lx/include/lx_os.h), and its QMI
 # helpers (wifi/lx/include/linux/soc/qcom/qmi.h)
@@ -131,6 +139,7 @@ source "$ROOT/xnu-env.sh"
 for h in lx qmi; do
 	[ -f "$XNU_SRC/bsd/sys/hakios.$h.h" ] || { echo "mk-ath11k.sh: the kernel tree has no bsd/sys/hakios.$h.h" >&2; exit 1; }
 done
+if [ "$ATH_SOURCE" = src-pcie ]; then DFLAGS="$DFLAGS -DHAKIOS_PCIE=1"; fi
 DFLAGS="$DFLAGS -DLX_HAKIOS_LX_H=\"$XNU_SRC/bsd/sys/hakios.lx.h\" -DLX_HAKIOS_QMI_H=\"$XNU_SRC/bsd/sys/hakios.qmi.h\""
 mkdir -p obj out
 rm -f obj/*.err
@@ -142,7 +151,7 @@ compile() {		# compile SOURCE OBJECT [FLAGS]: only when the object is older than
 	fi
 	$CC $CFLAGS "$@" -MMD -MF "$obj.d" -c "$src" -o "$obj" 2> "$obj.err" || rm -f "$obj"
 }
-for f in $DRIVER; do compile src/ath11k/$f.c obj/ath11k_$f.o $DFLAGS & done
+for f in $DRIVER; do compile $ATH_SOURCE/ath11k/$f.c obj/ath11k_$f.o $DFLAGS & done
 for f in "$W"/src/*.c; do [ -f "$f" ] && compile "$f" obj/lx_$(basename "$f" .c).o $DFLAGS -I$W/src & done
 wait
 bad=
