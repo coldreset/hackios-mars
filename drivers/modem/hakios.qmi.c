@@ -738,6 +738,24 @@ qmi_receive(void *context, uint32_t node, uint32_t port, const void *data, size_
 			os_unlock(&s->lock);
 			return;
 		}
+		if (txn == NULL) {
+			/* The radio sometimes answers a request without echoing its
+			 * transaction id. When exactly one transaction is waiting, a reply
+			 * that matches no id can only be for it. */
+			struct qmi_txn *only = NULL;
+			unsigned waiting = 0;
+			for (struct qmi_txn *p = s->transactions; p != NULL; p = p->next) {
+				if (!p->done) { only = p; waiting++; }
+			}
+			if (waiting == 1 && only != NULL) {
+				os_log("QMI in  %#x id %u matched no transaction; the one waiting takes it\n", message, id);
+				only->result = hakios_qmi_decode(data, length, only->ei, only->dest);
+				only->done = true;
+				os_wake(&s->lock, only);
+				os_unlock(&s->lock);
+				return;
+			}
+		}
 		os_unlock(&s->lock);
 		if (txn == NULL) {
 			return;                         /* a reply to nothing: late, after its transaction was given up */

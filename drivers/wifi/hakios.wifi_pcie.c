@@ -75,6 +75,8 @@ static unsigned wifi_mem_empty;
 static unsigned wifi_mem_align;
 /* wifi_mem_build: answer with a reply we compose, inside the window we mapped */
 static unsigned wifi_mem_build;
+/* wifi_mem_shift: undo the eight bit shift in the sizes of a memory reply */
+static unsigned wifi_mem_shift;
 struct hakiospcie_packet { struct hakiospcie_packet *next; unsigned length; uint8_t data[]; };
 static struct {
     volatile bool enabled, wanted, running, failed;
@@ -1789,6 +1791,7 @@ void hakiospcie_wifi_init(void) {
     PE_parse_boot_argn("wifi_mem_empty", &wifi_mem_empty, sizeof(wifi_mem_empty));
     PE_parse_boot_argn("wifi_mem_align", &wifi_mem_align, sizeof(wifi_mem_align));
     PE_parse_boot_argn("wifi_mem_build", &wifi_mem_build, sizeof(wifi_mem_build));
+    PE_parse_boot_argn("wifi_mem_shift", &wifi_mem_shift, sizeof(wifi_mem_shift));
     hakiospcie_tl("wifi-pcie: begin PCIe/CNSS survey mode %u\n", mode);
     wifi_mode = mode;
     bool ok = inspect();
@@ -1923,6 +1926,34 @@ qrtr_send(struct hakios_qrtr_port *port, uint32_t node, uint32_t to_port, const 
 		empty[5] = 0; empty[6] = 0;
 		hakiospcie_tl("QMI probe: answering the memory request with an empty reply, not %u bytes\n", (unsigned)length);
 		data = empty; length = sizeof(empty);
+	} else if (wifi_mem_shift && length >= 27 && ((const uint8_t *)data)[3] == 0x36 && ((const uint8_t *)data)[4] == 0) {
+		/* The size of each segment comes out eight bits too high: 0x01005e00
+		 * where the radio asked for 0x0001005e. Find each segment by its
+		 * address and divide the size that follows it back down. */
+		/* From the dump: each segment is eight bytes of address, one pad
+		 * byte, four bytes of size, then four bytes of type. */
+		uint8_t *editable = (uint8_t *)data;
+		for (unsigned at = 7; at + 17 <= length; at++) {
+			uint64_t address = 0;
+			memcpy(&address, editable + at, sizeof(address));
+			if (address < WIFI_DATA_IOVA || address >= WIFI_DATA_LIMIT) { continue; }
+			uint32_t size = 0;
+			memcpy(&size, editable + at + 9, sizeof(size));
+			uint32_t fixed = size >> 8;
+			if ((size & 0xff) || fixed < 1024 || fixed > 8u * 1024 * 1024) { continue; }
+			memcpy(editable + at + 9, &fixed, sizeof(fixed));
+			hakiospcie_tl("QMI probe: segment at %#llx says %u bytes, corrected to %u\n",
+			    address, size, fixed);
+			if (wifi_mem_align) {
+				uint64_t mask = (uint64_t)wifi_mem_align - 1;
+				uint64_t rounded = address & ~mask;
+				if (rounded != address) {
+					memcpy(editable + at, &rounded, sizeof(rounded));
+					hakiospcie_tl("QMI probe: that segment moved from %#llx to %#llx\n",
+					    address, rounded);
+				}
+			}
+		}
 	} else if (wifi_mem_build && length >= 7 && ((const uint8_t *)data)[3] == 0x36 && ((const uint8_t *)data)[4] == 0) {
 		/* The two regions are inside the 44 MB window dma_prepare() mapped, far
 		 * from the rings at its start, and page aligned. Sizes are the ones the
