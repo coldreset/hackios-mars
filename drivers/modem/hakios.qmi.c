@@ -19,6 +19,7 @@
  * The same file is compiled into the kernel and, for its tests, on the machine that builds it
  * (tools/qmi-test): the few things it needs from an operating system are in the first section.
  */
+#include <sys/hakios.wifi_pcie.h>
 #include <sys/hakios.qmi.h>
 #include <sys/hakios.qrtr.h>
 
@@ -709,6 +710,8 @@ qmi_receive(void *context, uint32_t node, uint32_t port, const void *data, size_
 	if (message == 0x35) {
 		unsigned i;
 		char line[3 * 8 + 1];
+		/* The transport has no other way to see this one before ath11k consumes it. */
+		hakiospcie_note_memory_request(header, (unsigned)length);
 		os_log("QMI in 0x35 body, %zu bytes:\n", length);
 		for (i = 0; i < length; i += 8) {
 			unsigned j, n = 0;

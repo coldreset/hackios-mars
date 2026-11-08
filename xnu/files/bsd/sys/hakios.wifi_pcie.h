@@ -5,6 +5,8 @@
 
 /* Available only while the exact-platform PCIe/MHI runtime owns the device. */
 void hakiospcie_wifi_stop(void);
+/* Read a QMI memory request wherever the transport hands it over, before ath11k decodes it. */
+void hakiospcie_note_memory_request(const uint8_t *data, unsigned size);
 unsigned hakiospcie_wifi_driver_mode(void);
 void *hakiospcie_wifi_driver_memory(unsigned long size, unsigned long long *iova);
 const uint8_t *hakiospcie_wifi_driver_file(const char *name, uint64_t *size);

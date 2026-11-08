@@ -888,7 +888,68 @@ static bool ipcr_qrtr_send(uint32_t type, uint32_t source_port, uint32_t node, u
     memcpy(packet, &header, sizeof(header)); memcpy(packet + sizeof(header), payload, size);
     return ipcr_send(packet, sizeof(header) + ((size + 3) & ~3u));
 }
+/*
+ * The memory request has to be understood here, not further down: once ath11k is running
+ * every packet goes straight to driver_receive() and never reaches the TLV walk in
+ * ipcr_receive(), so ipcr.memory[] stayed empty and the reply was built from ath11k's
+ * one-byte-off decode of the request.
+ */
+void
+hakiospcie_note_memory_request(const uint8_t *data, unsigned size)
+{
+    unsigned at = 0, found = 0;
+
+    if (ipcr.memory_count || size < 22) { return; }
+
+    /* Do not guess the QRTR framing: look for the QMI indication itself. Its size field
+     * must agree with the bytes that follow, which is what makes the match safe. */
+    for (unsigned i = 0; i + 7 <= size; i++) {
+        if (data[i] != 4 || data[i + 3] != 0x35 || data[i + 4] != 0) { continue; }
+        if ((unsigned)(data[i + 5] | (data[i + 6] << 8)) == size - i - 7) { at = i; found = 1; break; }
+    }
+    if (!found) {
+        if (size >= 16) {
+            hakiospcie_tl("QMI probe: no 0x35 in %u bytes: %02x %02x %02x %02x %02x %02x %02x %02x\n",
+                size, data[0], data[1], data[2], data[3], data[4], data[5], data[6], data[7]);
+        }
+        return;
+    }
+
+    const uint8_t *qmi = data + at;
+    unsigned end_all = size - at, pos = 7;
+    hakiospcie_tl("QMI probe: 0x35 found at %u, %u bytes of body\n", at, end_all - 7);
+    for (unsigned o = 0; o < end_all && o < 40; o += 8) {
+        hakiospcie_tl("QMI probe: 0x35 %02u: %02x %02x %02x %02x %02x %02x %02x %02x\n",
+            o, o + 0 < end_all ? qmi[o + 0] : 0, o + 1 < end_all ? qmi[o + 1] : 0,
+            o + 2 < end_all ? qmi[o + 2] : 0, o + 3 < end_all ? qmi[o + 3] : 0,
+            o + 4 < end_all ? qmi[o + 4] : 0, o + 5 < end_all ? qmi[o + 5] : 0,
+            o + 6 < end_all ? qmi[o + 6] : 0, o + 7 < end_all ? qmi[o + 7] : 0);
+    }
+    while (pos + 3 <= end_all) {
+        unsigned type = qmi[pos], length = qmi[pos + 1] | (qmi[pos + 2] << 8); pos += 3;
+        if (length > end_all - pos) { hakiospcie_tl("QMI probe: 0x35 tlv overruns\n"); return; }
+        if (type == 1 && length && qmi[pos] && qmi[pos] <= 16) {
+            unsigned count = qmi[pos], at2 = pos + 1, end = pos + length;
+            for (unsigned i = 0; i < count; i++) {
+                if (end - at2 < 9) { return; }
+                memcpy(&ipcr.memory[i].size, qmi + at2, 4);
+                memcpy(&ipcr.memory[i].type, qmi + at2 + 4, 4);
+                unsigned configs = qmi[at2 + 8]; at2 += 9;
+                if (configs > 2 || configs * 13 > end - at2) { return; }
+                ipcr.memory[i].configs = configs; at2 += configs * 13;
+                hakiospcie_tl("QMI probe: the radio asks for type %u, %u bytes, %u configs\n",
+                    ipcr.memory[i].type, ipcr.memory[i].size, configs);
+            }
+            if (at2 != end) { return; }
+            ipcr.memory_count = count;
+            hakiospcie_tl("QMI probe: the request is understood, %u segments\n", count);
+        }
+        pos += length;
+    }
+}
+
 static bool ipcr_receive(const uint8_t *data, unsigned size) {
+    hakiospcie_note_memory_request(data, size);
     if (driver_runtime.enabled) { ipcr.rx_packets++; return driver_receive(data, size); }
     struct hakiospcie_qrtr_header header = {0};
     unsigned offset;
@@ -961,28 +1022,38 @@ static bool ipcr_receive(const uint8_t *data, unsigned size) {
             if (at != header.size) { return false; }
         } else if (qmi[0] == 4 && message == 0x35) {
             unsigned at = 7;
+            hakiospcie_tl("QMI probe: 0x35 in, %u bytes: %02x %02x %02x %02x %02x %02x %02x %02x\n",
+                header.size, qmi[0], qmi[1], qmi[2], qmi[3], qmi[4], qmi[5], qmi[6], qmi[7]);
             while (at + 3 <= header.size) {
                 unsigned type = qmi[at], length = qmi[at + 1] | (qmi[at + 2] << 8); at += 3;
-                if (length > header.size - at) { return false; }
+                hakiospcie_tl("QMI probe: tlv type %u length %u\n", type, length);
+                if (length > header.size - at) { hakiospcie_tl("QMI probe: tlv overruns\n"); return false; }
                 if (type == 1) {
-                    if (!length || !qmi[at] || qmi[at] > 16 || ipcr.memory_count) { return false; }
+                    if (!length || !qmi[at] || qmi[at] > 16 || ipcr.memory_count) {
+                        hakiospcie_tl("QMI probe: count %u length %u refused\n", qmi[at], length);
+                        return false;
+                    }
                     unsigned count = qmi[at], pos = at + 1, end = at + length;
                     for (unsigned i = 0; i < count; i++) {
-                        if (end - pos < 9) { return false; }
+                        if (end - pos < 9) { hakiospcie_tl("QMI probe: segment %u short\n", i); return false; }
                         memcpy(&ipcr.memory[i].size, qmi + pos, 4);
                         memcpy(&ipcr.memory[i].type, qmi + pos + 4, 4);
                         unsigned configs = qmi[pos + 8]; pos += 9;
-                        if (configs > 2 || configs * 13 > end - pos) { return false; }
+                        if (configs > 2 || configs * 13 > end - pos) {
+                            hakiospcie_tl("QMI probe: segment %u configs %u bad\n", i, configs);
+                            return false;
+                        }
                         ipcr.memory[i].configs = configs; pos += configs * 13;
                         hakiospcie_tl("wifi-pcie: WLFW memory request %u type %u bytes %u configs %u\n",
                             i, ipcr.memory[i].type, ipcr.memory[i].size, configs);
                     }
-                    if (pos != end) { return false; }
+                    if (pos != end) { hakiospcie_tl("QMI probe: %u bytes left over\n", end - pos); return false; }
                     ipcr.memory_count = count;
+                    hakiospcie_tl("QMI probe: the request is understood, %u segments\n", count);
                 }
                 at += length;
             }
-            if (at != header.size) { return false; }
+            if (at != header.size) { hakiospcie_tl("QMI probe: ended at %u of %u\n", at, header.size); return false; }
         } else if (qmi[0] == 4 && message == 0x37) {
             ipcr.memory_ready = true;
             hakiospcie_tl("wifi-pcie: WLFW firmware memory ready indication\n");
@@ -1981,10 +2052,12 @@ qrtr_send(struct hakios_qrtr_port *port, uint32_t node, uint32_t to_port, const 
 		 * fields one byte off. addr, size, type, restore: seventeen bytes a segment.
 		 */
 		static uint8_t answered[11 + 17 * 16];
+		hakiospcie_tl("QMI probe: answering from our own table, %u segments\n", ipcr.memory_count);
 		unsigned count = ipcr.memory_count > 16 ? 16 : ipcr.memory_count;
 		unsigned at = 11;
 
-		answered[0] = 0x00; answered[1] = 0x00; answered[2] = 0x36;
+		/* the QMI header stays what ath11k wrote: type, transaction, message */
+		memcpy(answered, data, 7);
 		answered[7] = 0x01;
 		answered[10] = (uint8_t)count;
 		for (unsigned i = 0; i < count; i++) {
@@ -2003,10 +2076,10 @@ qrtr_send(struct hakios_qrtr_port *port, uint32_t node, uint32_t to_port, const 
 			unsigned body = at - 7;
 			unsigned tlv = body - 3;
 
-			answered[3] = (uint8_t)((body >> 8) & 0xff);
-			answered[4] = (uint8_t)(body & 0xff);
-			answered[8] = (uint8_t)((tlv >> 8) & 0xff);
-			answered[9] = (uint8_t)(tlv & 0xff);
+			answered[5] = (uint8_t)(body & 0xff);
+			answered[6] = (uint8_t)((body >> 8) & 0xff);
+			answered[8] = (uint8_t)(tlv & 0xff);
+			answered[9] = (uint8_t)((tlv >> 8) & 0xff);
 		}
 		data = answered;
 		length = at;
