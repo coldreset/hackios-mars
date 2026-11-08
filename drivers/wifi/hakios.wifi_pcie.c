@@ -1344,17 +1344,25 @@ void *hakiospcie_wifi_driver_memory(unsigned long size, unsigned long long *iova
     *iova = address; return (void *)memory;
 }
 const uint8_t *hakiospcie_wifi_driver_file(const char *name, uint64_t *size) {
+    hakiospcie_tl("wifi-pcie: file request \"%s\"\n", name);
     /* The driver asks both ways: "ath11k/QCA6490/hw1.0/board.bin" and "QCA6490/hw1.0/firmware-2.bin". */
     static const char prefix[] = "ath11k/";
-    if (!hakiospcie_wifi_driver_mode()) { return NULL; }
+    if (!hakiospcie_wifi_driver_mode()) { hakiospcie_tl("wifi-pcie:   not in driver mode\n"); return NULL; }
     if (!strncmp(name, prefix, sizeof(prefix) - 1)) { name += sizeof(prefix) - 1; }
-    if (strncmp(name, "QCA6490/hw1.0/", 14)) { return NULL; }
+    if (strncmp(name, "QCA6490/hw1.0/", 14)) { hakiospcie_tl("wifi-pcie:   not under QCA6490/hw1.0/: %s\n", name); return NULL; }
     const char *file = name + 14;
     /* firmware-2.bin is ath11k's own container (magic "QCOM-ATH11K-FW"): the AMSS and M3 images in one file. */
     if (strcmp(file, "board.bin") && strcmp(file, "regdb.bin") && strcmp(file, "m3.bin") &&
-        strcmp(file, "bdwlan.bin") && strcmp(file, "amss.bin") && strcmp(file, "firmware-2.bin")) { return NULL; }
+        strcmp(file, "bdwlan.bin") && strcmp(file, "amss.bin") && strcmp(file, "firmware-2.bin")) {
+        hakiospcie_tl("wifi-pcie:   %s is not one of the files we hand out\n", file);
+        return NULL;
+    }
     const uint8_t *data = hakios_image_file("fw", file, size, NULL);
-    if (!data || !*size || *size > 8u * 1024 * 1024) { return NULL; }
+    if (!data || !*size || *size > 8u * 1024 * 1024) {
+        hakiospcie_tl("wifi-pcie:   fw/%s: %s (%llu bytes)\n", file, data ? "too big or empty" : "not in the image",
+            (unsigned long long)(size ? *size : 0));
+        return NULL;
+    }
     hakiospcie_tl("wifi-pcie: ath11k asks for %s and gets %s, %u bytes\n", name, file, (unsigned)*size);
     return data;
 }
@@ -1877,6 +1885,43 @@ qrtr_send(struct hakios_qrtr_port *port, uint32_t node, uint32_t to_port, const 
 	return ipcr_qrtr_send(1, mine->id, node, to_port, data, (unsigned)length) ? 0 : -EIO;
 }
 
+/* what the radio has already told us about, so a lookup can be answered from memory */
+struct qrtr_known {
+	uint32_t service, version, instance, node, port;
+	struct qrtr_known *next;
+};
+
+static struct qrtr_known *qrtr_known;
+
+static void
+qrtr_remember(bool found, uint32_t service, uint32_t version, uint32_t instance, uint32_t node, uint32_t port)
+{
+	struct qrtr_known *known = qrtr_known, **at = &qrtr_known;
+
+	while (known != NULL) {
+		if (known->service == service && known->version == version && known->instance == instance) {
+			break;
+		}
+		known = known->next;
+	}
+	if (!found) {
+		if (known != NULL) {
+			*at = known->next;
+			kfree_type(struct qrtr_known, known);
+		}
+		return;
+	}
+	if (known == NULL) {
+		known = kalloc_type(struct qrtr_known, Z_WAITOK | Z_ZERO);
+		if (known == NULL) {
+			return;
+		}
+		known->service = service; known->version = version; known->instance = instance;
+		known->next = qrtr_known; qrtr_known = known;
+	}
+	known->node = node; known->port = port;
+}
+
 static int
 qrtr_lookup(struct hakios_qrtr_port *port, uint32_t service, uint32_t version, uint32_t instance)
 {
@@ -1900,6 +1945,19 @@ qrtr_lookup(struct hakios_qrtr_port *port, uint32_t service, uint32_t version, u
 		}
 		ask->service = service; ask->version = version; ask->instance = instance;
 		ask->next = mine->lookups; mine->lookups = ask;
+	}
+	for (struct qrtr_known *known = qrtr_known; known != NULL; known = known->next) {
+		if (known->service != service ||
+		    (version != 0xffffffffu && known->version != version) ||
+		    (instance != 0xffffffffu && known->instance != instance)) {
+			continue;
+		}
+		hakiospcie_tl("wifi-pcie: service %#x version %u instance %u is already known: node %u port %#x\n",
+		    service, version, instance, known->node, known->port);
+		if (((struct qrtr_port *)port)->server != NULL) {
+			((struct qrtr_port *)port)->server(((struct qrtr_port *)port)->context, true, service, version, instance, known->node, known->port);
+		}
+		return 0;
 	}
 	control.command = 8;
 	control.words[0] = service;
@@ -1982,6 +2040,7 @@ hakios_qrtr_deliver(const void *packet, unsigned length)
 			uint32_t version = control.words[1] & 255;
 			uint32_t instance = control.words[1] >> 8;
 
+			qrtr_remember(control.command == 4, service, version, instance, control.words[2], control.words[3]);
 			hakiospcie_tl("wifi-pcie: the router says service %#x version %u instance %u is %s (node %u port %#x)\n",
 			    service, version, instance, control.command == 4 ? "there" : "gone",
 			    control.words[2], control.words[3]);

@@ -92,9 +92,12 @@ os_now_ms(void)
 static void
 os_wait(struct os_lock *l, void *what, uint64_t ms)
 {
-	struct timespec ts = { .tv_sec = (time_t)(ms / 1000), .tv_nsec = (long)(ms % 1000) * NSEC_PER_MSEC };
+	uint64_t interval, deadline;
 
-	msleep(what, &l->mutex, PZERO, "hakios-qmi", &ts);
+	/* msleep1() takes a deadline in absolute time, not a timespec and not ticks. */
+	nanoseconds_to_absolutetime(ms * NSEC_PER_MSEC, &interval);
+	clock_absolutetime_interval_to_deadline(interval, &deadline);
+	msleep1(what, &l->mutex, PZERO, "hakios-qmi", deadline);
 }
 
 static void
