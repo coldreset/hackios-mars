@@ -23,6 +23,9 @@ HASHES = {
 
 def transform(files):
     out = dict(files)
+    # Every line the driver prints goes to this tree's console, which is the only way they are seen on the phone.
+    out['core.c'] = out['core.c'].replace('unsigned int ath11k_debug_mask;',
+        'unsigned int ath11k_debug_mask = 0x1;   /* mars: ATH11K_DBG_BOOT, the console is the only log */')
     out['core.h'] = out['core.h'].replace('enum ath11k_hw_rev {',
         'enum ath11k_hw_rev {\n\tATH11K_HW_QCA6490_HW10 = 100,\n\t/* Preserve upstream revision values. */')
     out['core.h'] = out['core.h'].replace('\tATH11K_HW_IPQ8074,', '\tATH11K_HW_IPQ8074 = 0,', 1)
@@ -45,6 +48,9 @@ def transform(files):
             raise ValueError('Pinned profile field missing: ' + old)
         profile = profile.replace(old, new)
     out['core.c'] = files['core.c'][:start] + profile + files['core.c'][start:]
+    # Every line the driver prints goes to this tree's console, which is the only way they are seen on the phone.
+    out['core.c'] = out['core.c'].replace('unsigned int ath11k_debug_mask;',
+        'unsigned int ath11k_debug_mask = 0x1;   /* mars: ATH11K_DBG_BOOT, the console is the only log */')
     for name, symbol, field in (
         ('ce.c', 'ath11k_host_ce_config_qca6390', r'(\.src_sz_max = )2048'),
         ('hw.c', 'ath11k_target_ce_config_wlan_qca6390', r'(\.nbytes_max = __cpu_to_le32\()2048'),

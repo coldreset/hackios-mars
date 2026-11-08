@@ -1463,7 +1463,9 @@ static void
 driver_start_thread(void *unused)
 {
 	(void)unused;
+	hakiospcie_tl("wifi-pcie: the ath11k thread is in lx_start()\n");
 	driver_start_result = hakios_lx_start();
+	hakiospcie_tl("wifi-pcie: lx_start() came back with %d\n", driver_start_result);
 	wakeup((event_t)&driver_start_result);
 }
 
@@ -1485,7 +1487,9 @@ static bool driver_probe(void) {
     /* ath11k waits for the firmware inside lx_start(); on this machine that wait can be endless, and the boot thread
        must not go with it. Ninety seconds is more than the driver's own sixty-second deadline. */
     driver_start_result = -1;
+    hakiospcie_tl("wifi-pcie: starting ath11k on a thread of its own\n");
     if (hakiospcie_lx_os_thread("ath11k-start", driver_start_thread, NULL)) {
+        hakiospcie_tl("wifi-pcie: the thread could not be made; the stage stops here\n");
         return false;
     }
     for (unsigned i = 0; i < 900 && driver_start_result < 0; i++) {
@@ -1772,7 +1776,9 @@ void
 lx_os_lock(void)
 {
 	pcie_lock_once();
-	lck_mtx_lock(pcie_lock);
+	if (pcie_lock != NULL) {
+		lck_mtx_lock(pcie_lock);
+	}
 }
 
 void
