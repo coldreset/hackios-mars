@@ -686,17 +686,47 @@ qmi_receive(void *context, uint32_t node, uint32_t port, const void *data, size_
 	uint16_t id, message;
 	uint8_t type;
 
-	if (length < QMI_HEADER_SIZE || length > s->largest + QMI_HEADER_SIZE ||
-	    (size_t)(header[5] | header[6] << 8) > length - QMI_HEADER_SIZE) {
-		if (!s->said_malformed) {
-			s->said_malformed = true;
-			os_log("qmi: a datagram of %zu bytes from %u:%u is no message we take (said once)\n", length, node, port);
+	{
+		size_t declared = length >= QMI_HEADER_SIZE ? (size_t)(header[5] | header[6] << 8) : 0;
+
+		if (length < QMI_HEADER_SIZE) {
+			os_log("QMI in  %zu bytes from %u:%u is shorter than a QMI header\n", length, node, port);
+			return;
 		}
-		return;
+		if (declared + QMI_HEADER_SIZE > length) {
+			os_log("QMI in  %#x says %zu bytes but the datagram has %zu\n",
+			    (uint16_t)(header[3] | header[4] << 8), declared, length);
+			return;
+		}
+		if (length > s->largest + QMI_HEADER_SIZE) {
+			os_log("QMI in  %zu bytes is more than the %zu we allow\n", length, s->largest + QMI_HEADER_SIZE);
+			return;
+		}
 	}
 	type = header[0];
 	id = (uint16_t)(header[1] | header[2] << 8);
 	message = (uint16_t)(header[3] | header[4] << 8);
+	if (message == 0x35) {
+		unsigned i;
+		char line[3 * 16 + 1];
+		os_log("QMI in 0x35 body, %zu bytes:\n", length);
+		for (i = 7; i < length && i < 71; i += 16) {
+			unsigned j, n = 0;
+			for (j = 0; j < 16 && i + j < length; j++) {
+				static const char hex[] = "0123456789abcdef";
+				line[n++] = hex[header[i + j] >> 4];
+				line[n++] = hex[header[i + j] & 0xf];
+				line[n++] = ' ';
+			}
+			line[n] = '\0';
+			os_log("QMI in 0x35 +%u: %s\n", i - 7, line);
+		}
+	}
+	os_log("QMI in  %#x id %u type %u %zu bytes: %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x\n",
+	    message, id, type, length,
+	    header[0], header[1], header[2], header[3], header[4], header[5],
+	    header[6], header[7], length > 8 ? header[8] : 0, length > 9 ? header[9] : 0,
+	    length > 10 ? header[10] : 0, length > 11 ? header[11] : 0);
 	if (type == QMI_RESPONSE) {
 		os_lock(&s->lock);
 		found = find_transaction(s, NULL, id);
@@ -918,7 +948,30 @@ qmi_send_request(struct qmi_handle *qmi, struct sockaddr_qrtr *sq, struct qmi_tx
 		os_free(buffer, size);
 		return length;
 	}
+	os_log("QMI out %#x id %u %zu bytes: %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x\n",
+	    msg_id, txn->id, (size_t)length,
+	    ((const uint8_t *)buffer)[0], ((const uint8_t *)buffer)[1], ((const uint8_t *)buffer)[2],
+	    ((const uint8_t *)buffer)[3], ((const uint8_t *)buffer)[4], ((const uint8_t *)buffer)[5],
+	    ((const uint8_t *)buffer)[6], ((const uint8_t *)buffer)[7], ((const uint8_t *)buffer)[8],
+	    ((const uint8_t *)buffer)[9], ((const uint8_t *)buffer)[10], ((const uint8_t *)buffer)[11]);
+	if (msg_id == 0x36) {
+		unsigned i;
+		char line[3 * 16 + 1];
+		os_log("QMI out 0x36 body, %zu bytes:\n", (size_t)length);
+		for (i = 0; i < (size_t)length && i < 64; i += 16) {
+			unsigned j, n = 0;
+			for (j = 0; j < 16 && i + j < (size_t)length; j++) {
+				static const char hex[] = "0123456789abcdef";
+				line[n++] = hex[((const uint8_t *)buffer)[i + j] >> 4];
+				line[n++] = hex[((const uint8_t *)buffer)[i + j] & 0xf];
+				line[n++] = ' ';
+			}
+			line[n] = '\0';
+			os_log("QMI out 0x36 +%u: %s\n", i, line);
+		}
+	}
 	error = s->transport->send(s->port, node, port, buffer, (size_t)length);
+	os_log("QMI out %#x id %u: the transport said %d (%zu bytes)\n", msg_id, txn->id, error, (size_t)length);
 	os_free(buffer, size);
 	return error > 0 ? -error : error;
 }
