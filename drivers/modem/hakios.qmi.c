@@ -945,6 +945,11 @@ hakios_qmi_txn_wait_ms(struct qmi_txn *txn, uint64_t milliseconds)
 {
 	struct qmi_state *s = state_of(txn->qmi);
 	uint64_t now = os_now_ms(), until = now + milliseconds;
+	{
+		extern int hz;
+
+		printf("wifi-pcie: qmi wait asked for %llu ms (hz %d)\n", milliseconds, hz);
+	}
 	struct qmi_txn **found;
 	int result;
 
