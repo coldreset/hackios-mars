@@ -1522,6 +1522,19 @@ static bool driver_probe(void) {
     bool ok = result == 0 && !driver_runtime.failed && mhi_dma_ok();
     hakiospcie_tl("wifi-pcie: ath11k driver result %d transport_failed %u FSR %#x global %#x\n",
         result, driver_runtime.failed, rd(dma_space.cb, 0x58), rd(dma_space.mmio, 0x48));
+    if (!ok) {
+        /* A capability request is the cheapest thing the firmware answers:
+           an empty body, no transaction state on our side. If this comes back
+           the radio is alive and it is the memory reply it objected to. */
+        hakiospcie_tl("QMI probe: the memory handshake failed; asking the firmware whether it still speaks\n");
+        static const uint8_t ping[] = {0x00, 0x77, 0x00, 0x24, 0x00, 0x00, 0x00};
+        hakiospcie_tl("QMI probe: sending a capability request, the cheapest thing it always answers\n");
+        int sent = ipcr_send(ping, sizeof(ping)) ? 0 : ENOBUFS;
+        hakiospcie_tl("QMI probe: it left with %d; waiting three seconds for any answer\n", sent);
+        for (unsigned waited = 0; waited < 30; waited++) { delay(100000); }
+        hakiospcie_tl("QMI probe: after the wait, MHI BHI %#x BHIE %#x EE %#x\n",
+            rd(bar, 0x28), rd(bar, 0x224), rd(bar, 0x128));
+    }
     if (ok) { hakiospcie_tl("wifi-pcie: stage 22 QCA6490 major-1 ath11k startup completed\n"); }
     return ok;
 }
