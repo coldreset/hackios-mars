@@ -449,6 +449,10 @@ fi
 if [ -f ../fw-wifi/amss.bin ]; then
 	mkdir -p root/fw
 	install -m 0644 ../fw-wifi/amss.bin root/fw/amss.bin
+	# ath11k asks for "firmware-2.bin", which is the board data: this phone calls it bdwlan.bin
+	# the board data ship as ELF containers (bdwlan.e01 and its neighbours); the radio wants the .data section
+	if [ -f ../fw-wifi/bdwlan.bin ]; then install -m 0644 ../fw-wifi/bdwlan.bin root/fw/bdwlan.bin; fi
+	if [ -f ../fw-wifi/firmware-2.bin ]; then install -m 0644 ../fw-wifi/firmware-2.bin root/fw/firmware-2.bin; fi
 	for f in m3.bin bdwlan.elf regdb.bin regdb_xiaomi.bin; do
 		[ -f "../fw-wifi/$f" ] && install -m 0644 "../fw-wifi/$f" "root/fw/$f"
 	done

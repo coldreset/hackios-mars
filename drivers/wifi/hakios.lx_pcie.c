@@ -27,6 +27,8 @@
 #include <sys/random.h>
 #include <sys/hakios.input.h>
 #include <sys/hakios.lx.h>
+
+#include <sys/hakios.input.h>
 #include <sys/hakios.sta.h>
 #include <sys/hakios.input.h>
 #include <sys/redwood_net.h>
@@ -227,7 +229,17 @@ lx_os_firmware(const char *name, const void **data, unsigned long *size)
 	    hakiospcie_wifi_driver_file(name, &length);
 
 	if (file == NULL) {
-		return ENOENT;
+		/* the name comes in as "ath11k/QCA6490/hw1.0/firmware-2.bin": fall back to the bare name in fw/ */
+		const char *slash = strrchr(name, '/');
+		uint64_t fallback = 0;
+		file = hakios_image_file("fw", slash != NULL ? slash + 1 : name, &fallback, NULL);
+		length = fallback;
+		if (file == NULL) {
+			printf("lx: the driver asks for the file \"%s\": not there\n", name);
+			return ENOENT;
+		}
+		printf("lx: the driver asks for \"%s\" and fw/%s has it, %lu bytes\n", name,
+		    slash != NULL ? slash + 1 : name, (unsigned long)fallback);
 	}
 	*data = file;
 	*size = (unsigned long)length;

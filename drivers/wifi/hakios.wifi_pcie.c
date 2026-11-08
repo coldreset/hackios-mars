@@ -1350,12 +1350,11 @@ const uint8_t *hakiospcie_wifi_driver_file(const char *name, uint64_t *size) {
     if (!strncmp(name, prefix, sizeof(prefix) - 1)) { name += sizeof(prefix) - 1; }
     if (strncmp(name, "QCA6490/hw1.0/", 14)) { return NULL; }
     const char *file = name + 14;
-    /* firmware-2.bin is the vendor tree's name for the board data: ours is the bdwlan file. */
-    if (!strcmp(file, "firmware-2.bin")) { file = "bdwlan.bin"; }
+    /* firmware-2.bin is ath11k's own container (magic "QCOM-ATH11K-FW"): the AMSS and M3 images in one file. */
     if (strcmp(file, "board.bin") && strcmp(file, "regdb.bin") && strcmp(file, "m3.bin") &&
-        strcmp(file, "bdwlan.bin") && strcmp(file, "amss.bin")) { return NULL; }
+        strcmp(file, "bdwlan.bin") && strcmp(file, "amss.bin") && strcmp(file, "firmware-2.bin")) { return NULL; }
     const uint8_t *data = hakios_image_file("fw", file, size, NULL);
-    if (!data || !*size || *size > 1024 * 1024) { return NULL; }
+    if (!data || !*size || *size > 8u * 1024 * 1024) { return NULL; }
     hakiospcie_tl("wifi-pcie: ath11k asks for %s and gets %s, %u bytes\n", name, file, (unsigned)*size);
     return data;
 }
@@ -1371,8 +1370,14 @@ static bool driver_window(uint32_t offset, unsigned *windowed) {
     *windowed = 0x80000 + (offset & 0x7ffff);
     return true;
 }
+static unsigned reg_read_calls, reg_write_calls;
+
 uint32_t hakiospcie_wifi_register_read(uint32_t offset) {
     unsigned at; uint32_t value = 0;
+    if (reg_read_calls < 32) {
+        hakiospcie_tl("wifi-pcie: read %#x (call %u, thread %p)\n", offset, reg_read_calls, current_thread());
+        reg_read_calls++;
+    }
     lck_mtx_lock(&hakiospcie_window_lock);
     if (driver_window(offset, &at)) { value = rd(bar, at); }
     lck_mtx_unlock(&hakiospcie_window_lock);
@@ -1380,6 +1385,11 @@ uint32_t hakiospcie_wifi_register_read(uint32_t offset) {
 }
 void hakiospcie_wifi_register_write(uint32_t offset, uint32_t value) {
     unsigned at;
+    if (reg_write_calls < 32) {
+        hakiospcie_tl("wifi-pcie: write %#x = %#x (call %u, thread %p)\n", offset, value, reg_write_calls,
+            current_thread());
+        reg_write_calls++;
+    }
     lck_mtx_lock(&hakiospcie_window_lock);
     if (driver_window(offset, &at)) { wr(bar + at, value); }
     lck_mtx_unlock(&hakiospcie_window_lock);
@@ -1492,8 +1502,9 @@ static bool driver_probe(void) {
         hakiospcie_tl("wifi-pcie: the thread could not be made; the stage stops here\n");
         return false;
     }
+    /* lx_os_sleep() here came back at once (its clock is not running this early), so the wait is a plain delay. */
     for (unsigned i = 0; i < 900 && driver_start_result < 0; i++) {
-        lx_os_sleep(&driver_start_result, 100 * 1000 * 1000);
+        delay(100000);
     }
     int result = driver_start_result;
     if (result < 0) {
