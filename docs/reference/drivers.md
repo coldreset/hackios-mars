@@ -105,5 +105,6 @@ Every driver the kernel can be built with. `CONFIG_HAKIOS_<NAME>=y` in a defconf
 | Driver | Files | Requires | Boot arguments | mars | qemu | redwood | |
 |---|---|---|---|---|---|---|
 | **`HAKIOS_WIFI`**<br>Wi-Fi of the WCN6750 (wifi=1, wifi_step=N): the DSP that runs the radio's firmware, Linux's ath11k (its object, made by tools/mk-ath11k.sh, is linked in only with this), a station, and the Apple80211 surface Darwin's wifid talks to. Needs fw-wifi/ from the phone | `hakios.wifi.c`<br>`hakios.wlfw.c`<br>`hakios.lx.c`<br>`hakios.sta.c`<br>`hakios.apple80211.c`<br>`hakios.wlan.cpp` | `HAKIOS_QMI` | `wifi=`, `wifi_again=`, `wifi_ask=`, `wifi_cal=`, `wifi_dirty=`, `wifi_file=`, `wifi_fine=`, `wifi_keep=` and 14 more |  |  | built | |
+| **`HAKIOS_WIFI_PCIE`**<br>Wi-Fi of the QCA6490 on PCIe (wifipcie=1): the links the OnePlus 9 port of the same SoC has | `hakios.wifi_pcie.c`<br>`hakios.radio_pcie.c`<br>`hakios.lx_pcie.c` | `HAKIOS_QMI` | `cpufreq=`, `gpu=`, `hakiospcie_dma_verified=`, `hakiospcie_runtime=`, `hakiospcie_wifi=`, `touchscreen=` | built | built | built | |
 
 The columns on the right are the devices' defconfigs: "built" means that defconfig builds the driver in.

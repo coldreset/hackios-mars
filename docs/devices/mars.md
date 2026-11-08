@@ -20,10 +20,10 @@
 | cpu | works | all 8 cores (cpus=8); A78/X1 at their top OPP with cpufreq=1 |
 | gpu | works | Adreno 660, all 21 bring-up steps; OpenGL ES through Mesa freedreno (gpu=1 adreno_nomeasure=1) |
 | storage | partly | the system image is resident in RAM; var_store / UFS writes not enabled |
-| buttons | no | the driver is in the tree, off in this device's config |
-| battery | no | the driver is in the tree, off in this device's config |
+| buttons | partly | CONFIG_HAKIOS_BUTTONS reads the power and volume keys (presses, releases, hold times) but no event reaches backboardd yet |
+| battery | partly | runs, but the loader's shared page never says a charger or a voltage, so the percentage reads -1% |
 | thermal | no | the driver is in the tree, off in this device's config |
-| wifi | no | the driver is in the tree, off in this device's config |
+| wifi | partly | QCA6490 over PCIe: bring-up stages 1-21 pass, ath11k starts, the firmware answers QMI; it stops at stage 22 waiting for the memory handshake |
 | audio | no | the driver is in the tree, off in this device's config |
 | camera | no | the driver is in the tree, off in this device's config |
 
