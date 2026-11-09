@@ -65,6 +65,7 @@ extern lck_mtx_t hakios_smmu_lock;
 static void dma_restore(void);
 static void driver_quiesce(void);
 static bool driver_receive(const uint8_t *, unsigned);
+static unsigned driver_in_seq, driver_out_seq;
 static LCK_GRP_DECLARE(hakiospcie_wifi_group, "lemonade-wifi");
 static LCK_MTX_DECLARE(hakiospcie_mhi_lock, &hakiospcie_wifi_group);
 static LCK_MTX_DECLARE(hakiospcie_window_lock, &hakiospcie_wifi_group);
@@ -1569,6 +1570,9 @@ void hakiospcie_wifi_register_write(uint32_t offset, uint32_t value) {
 }
 static bool driver_receive(const uint8_t *data, unsigned length) {
     if (!length || length > 8192 + 32 || driver_runtime.queued >= 32) { return false; }
+    hakiospcie_tl("QMI seq: in %u, %u bytes, head %02x %02x %02x %02x (queued %u)\n",
+        ++driver_in_seq, length, length > 0 ? data[0] : 0, length > 1 ? data[1] : 0,
+        length > 2 ? data[2] : 0, length > 3 ? data[3] : 0, driver_runtime.queued);
     struct hakiospcie_packet *packet = kalloc_data(sizeof(*packet) + length, Z_WAITOK | Z_ZERO);
     if (!packet) { return false; }
     packet->length = length; memcpy(packet->data, data, length);
@@ -1588,6 +1592,9 @@ static int driver_send(const void *packet, unsigned length) {
     }
     lck_mtx_lock(&hakiospcie_mhi_lock);
     int error = !driver_runtime.enabled || driver_runtime.failed ? ENXIO : ipcr_send(packet, length) ? 0 : ENOBUFS;
+    hakiospcie_tl("QMI seq: out %u, %u bytes, head %02x %02x %02x %02x, error %d\n",
+        ++driver_out_seq, length, length > 0 ? bytes[0] : 0, length > 1 ? bytes[1] : 0,
+        length > 2 ? bytes[2] : 0, length > 3 ? bytes[3] : 0, error);
     lck_mtx_unlock(&hakiospcie_mhi_lock);
     return error;
 }
