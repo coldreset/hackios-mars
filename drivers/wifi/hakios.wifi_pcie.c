@@ -84,7 +84,9 @@ static unsigned wifi_skip_regdb;
 static unsigned wifi_board_pace = 20;
 static unsigned wifi_board_elf;
 static unsigned board_total_constant;
-static unsigned board_repeat_first; /* 1: send the same first piece over and over */ /* 1: keep total_size at the size of the whole file */
+static unsigned board_repeat_first;
+static unsigned wifi_board_end;
+static unsigned wifi_board_cap;   /* hand ath11k only this many bytes of board data */   /* tell ath11k to cut the board file short */   /* 1: claim the fourth piece is the last one */ /* 1: send the same first piece over and over */ /* 1: keep total_size at the size of the whole file */
 static unsigned board_file_total; /* 1: hand out the vendor ELF, which ath11k sends as bdf type 1 */
 /* wifi_mem_real: name memory we really allocated, not a spot in the window */
 static unsigned wifi_mem_real = 1;
@@ -1501,6 +1503,14 @@ const uint8_t *hakiospcie_wifi_driver_file(const char *name, uint64_t *size) {
             (unsigned long long)(size ? *size : 0));
         return NULL;
     }
+    /* wifi_board_cap: hand ath11k only part of the board file, so its last
+     * piece carries end=1 and the radio sees a complete transfer. */
+    if (wifi_board_cap && (!strcmp(file, "board.bin") || !strcmp(file, "board-2.bin")) &&
+        *size > wifi_board_cap) {
+        hakiospcie_tl("wifi-pcie: ath11k gets only the first %u of %u bytes of %s\n",
+            wifi_board_cap, (unsigned)*size, file);
+        *size = wifi_board_cap;
+    }
     hakiospcie_tl("wifi-pcie: ath11k asks for %s and gets %s, %u bytes\n", name, file, (unsigned)*size);
     return data;
 }
@@ -1945,6 +1955,8 @@ void hakiospcie_wifi_init(void) {
     PE_parse_boot_argn("wifi_skip_regdb", &wifi_skip_regdb, sizeof(wifi_skip_regdb));
     PE_parse_boot_argn("wifi_board_pace", &wifi_board_pace, sizeof(wifi_board_pace));
     PE_parse_boot_argn("wifi_board_elf", &wifi_board_elf, sizeof(wifi_board_elf));
+    PE_parse_boot_argn("wifi_board_end", &wifi_board_end, sizeof(wifi_board_end));
+    PE_parse_boot_argn("wifi_board_cap", &wifi_board_cap, sizeof(wifi_board_cap));
     PE_parse_boot_argn("board_total_constant", &board_total_constant, sizeof(board_total_constant));
     PE_parse_boot_argn("board_repeat_first", &board_repeat_first, sizeof(board_repeat_first));
     PE_parse_boot_argn("wifi_mem_real", &wifi_mem_real, sizeof(wifi_mem_real));
@@ -2169,6 +2181,16 @@ qrtr_send(struct hakios_qrtr_port *port, uint32_t node, uint32_t to_port, const 
 					}
 				}
 				seg = 0;  /* the wire says segment zero; say so here too */
+			}
+			if (wifi_board_end && seg == 3) {
+				for (unsigned i = length >= 8 ? length - 8 : 7; i + 7 <= length; i++) {
+					if (edited[i] == 0x14 && edited[i + 1] == 0x01 &&
+					    edited[i + 2] == 0x00) {
+						edited[i + 3] = 1;
+						hakiospcie_tl("QMI probe: calling piece %u the last one\n", seg);
+						break;
+					}
+				}
 			}
 			{
 				unsigned wire = 0;
