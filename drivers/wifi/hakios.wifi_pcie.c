@@ -79,10 +79,13 @@ static unsigned wifi_mem_build;
 static unsigned wifi_mem_shift;
 /* wifi_mem_type: the type field to write into each segment of a memory reply */
 static unsigned wifi_mem_type;
+static unsigned wifi_board_type;
+static unsigned wifi_skip_regdb; /* 0: leave it alone, else the bdf type to claim */
 /* wifi_mem_real: name memory we really allocated, not a spot in the window */
 static unsigned wifi_mem_real = 1;
 /* the two regions the radio asked for, mapped once before the conversation starts */
 static uint64_t mem_host_iova[2];
+static vm_offset_t mem_host_memory[2];
 static bool mem_host_ready;
 struct hakiospcie_packet { struct hakiospcie_packet *next; unsigned length; uint8_t data[]; };
 static struct {
@@ -1453,6 +1456,12 @@ const uint8_t *hakiospcie_wifi_driver_file(const char *name, uint64_t *size) {
     if (!strncmp(name, prefix, sizeof(prefix) - 1)) { name += sizeof(prefix) - 1; }
     if (strncmp(name, "QCA6490/hw1.0/", 14)) { hakiospcie_tl("wifi-pcie:   not under QCA6490/hw1.0/: %s\n", name); return NULL; }
     const char *file = name + 14;
+    /* wifi_skip_regdb: let the board data go first, to see whether the radio
+     * only takes one board file before it stops answering. */
+    if (wifi_skip_regdb && !strcmp(file, "regdb.bin")) {
+        hakiospcie_tl("wifi-pcie:   regdb is skipped on purpose, so the board data goes first\n");
+        return NULL;
+    }
     /* firmware-2.bin is ath11k's own container (magic "QCOM-ATH11K-FW"): the AMSS and M3 images in one file. */
     if (strcmp(file, "board.bin") && strcmp(file, "board-2.bin") && strcmp(file, "regdb.bin") &&
         strcmp(file, "m3.bin") && strcmp(file, "bdwlan.bin") && strcmp(file, "amss.bin") &&
@@ -1468,7 +1477,7 @@ const uint8_t *hakiospcie_wifi_driver_file(const char *name, uint64_t *size) {
      * data afterwards. A bare .data section is what the radio ignored.
      */
     const char *stored = !strcmp(file, "board-2.bin") ? "board-2.bin" :
-        !strcmp(file, "board.bin") ? "bdwlan.elf" : file;
+        !strcmp(file, "board.bin") ? "bdwlan.bin" : file;
     const uint8_t *data = hakios_image_file("fw", stored, size, NULL);
     if (!data || !*size || *size > 8u * 1024 * 1024) {
         hakiospcie_tl("wifi-pcie:   fw/%s: %s (%llu bytes)\n", file, data ? "too big or empty" : "not in the image",
@@ -1626,6 +1635,7 @@ static bool driver_probe(void) {
         for (unsigned i = 0; i < 2; i++) {
             if (!dma_allocate_at(size[i], true, at[i], &memory, &iova)) { all = false; break; }
             mem_host_iova[i] = iova;
+            mem_host_memory[i] = memory;
         }
         mem_host_ready = all;
         hakiospcie_tl("QMI probe: host memory for the radio: %s %#llx and %#llx\n",
@@ -1914,6 +1924,8 @@ void hakiospcie_wifi_init(void) {
     PE_parse_boot_argn("wifi_mem_build", &wifi_mem_build, sizeof(wifi_mem_build));
     PE_parse_boot_argn("wifi_mem_shift", &wifi_mem_shift, sizeof(wifi_mem_shift));
     PE_parse_boot_argn("wifi_mem_type", &wifi_mem_type, sizeof(wifi_mem_type));
+    PE_parse_boot_argn("wifi_board_type", &wifi_board_type, sizeof(wifi_board_type));
+    PE_parse_boot_argn("wifi_skip_regdb", &wifi_skip_regdb, sizeof(wifi_skip_regdb));
     PE_parse_boot_argn("wifi_mem_real", &wifi_mem_real, sizeof(wifi_mem_real));
     hakiospcie_tl("wifi-pcie: begin PCIe/CNSS survey mode %u\n", mode);
     wifi_mode = mode;
@@ -1922,6 +1934,16 @@ void hakiospcie_wifi_init(void) {
     if (ok && mode >= 2) {
         ok = power_root(mode);
         hakiospcie_tl("wifi-pcie: stage %u %s; networking not yet verified\n", mode, ok ? "passed" : "failed");
+        if (!ok && mem_host_ready && mem_host_memory[0]) {
+            /* Did the radio write anything into the heap we handed it? */
+            const uint32_t *ddr = (const uint32_t *)mem_host_memory[0];
+            const uint32_t *cal = (const uint32_t *)mem_host_memory[1];
+
+            hakiospcie_tl("QMI probe: the radio's heap now starts %08x %08x %08x %08x\n",
+                ddr[0], ddr[1], ddr[2], ddr[3]);
+            hakiospcie_tl("QMI probe: the calibration window starts %08x %08x %08x %08x\n",
+                cal[0], cal[1], cal[2], cal[3]);
+        }
         if (ok && mode == 24) {
             hakiospcie_tl("wifi-pcie: station offered to iOS; runtime kept until normal stop\n");
         } else {
@@ -2031,6 +2053,47 @@ qrtr_open(hakios_qrtr_receive_t receive, hakios_qrtr_server_t server, void *cont
 	return (struct hakios_qrtr_port *)port;
 }
 
+/* HAKIOS: the board download carries file id 0xff on this machine because the
+ * radio never told us a board id.  A real one is a small number, so rewrite it
+ * to 0: 0xff may send the radio looking for a window that does not exist.
+ */
+static void
+qmi_board_type_claim(uint8_t *data, unsigned length)
+{
+	unsigned i;
+
+	if (wifi_board_type == 0 || length < 18) { return; }
+	if (data[3] != 0x25 || data[4] != 0x00) { return; }
+	for (i = 7; i + 4 <= length; i++) {
+		if (data[i] == 0x15 && data[i + 1] == 0x01 && data[i + 2] == 0x00) {
+			if (data[i + 3] != wifi_board_type) {
+				hakiospcie_tl("QMI probe: the board data is claimed to be type %u, not %u\n",
+				    wifi_board_type, data[i + 3]);
+			}
+			data[i + 3] = (uint8_t)wifi_board_type;
+			return;
+		}
+	}
+}
+
+static void
+qmi_board_file_id_zero(uint8_t *data, unsigned length)
+{
+	unsigned i;
+
+	if (length < 18) { return; }
+	if (data[3] != 0x25 || data[4] != 0x00) { return; }
+	for (i = 7; i + 7 <= length; i++) {
+		if (data[i] == 0x10 && data[i + 1] == 0x04 && data[i + 2] == 0x00) {
+			if (data[i + 3] != 0 || data[i + 4] != 0) {
+				hakiospcie_tl("QMI probe: the board data is asked for as file 0, not %02x\n", data[i + 3]);
+			}
+			data[i + 3] = 0; data[i + 4] = 0; data[i + 5] = 0; data[i + 6] = 0;
+			return;
+		}
+	}
+}
+
 static int
 qrtr_send(struct hakios_qrtr_port *port, uint32_t node, uint32_t to_port, const void *data, size_t length)
 {
@@ -2039,6 +2102,11 @@ qrtr_send(struct hakios_qrtr_port *port, uint32_t node, uint32_t to_port, const 
 
 	if (mine == NULL || qrtr_send_raw == NULL || length == 0 || length > 8000) {
 		return -EINVAL;
+	}
+	if (length >= 18 && ((const uint8_t *)data)[3] == 0x25) {
+		uint8_t *edited = (uint8_t *)data;
+		qmi_board_file_id_zero(edited, (unsigned)length);
+		qmi_board_type_claim(edited, (unsigned)length);
 	}
 	/* wifi_mem_empty: hand the radio an empty respond-mem, the way Linux'
 	 * delayed path does, to see whether it is the payload that silences it. */
@@ -2232,6 +2300,35 @@ qrtr_send(struct hakios_qrtr_port *port, uint32_t node, uint32_t to_port, const 
 			memcpy(&size, body + 9 + i * 17, sizeof(size));
 			memcpy(&type, body + 13 + i * 17, sizeof(type));
 			hakiospcie_tl("QMI probe: segment %u: %#llx for %u bytes, type %u\n", i, addr, size, type);
+		}
+	}
+	{
+		/*
+		 * The last piece of a file has to carry end = 1, or the radio keeps
+		 * waiting for more pieces and never looks at what follows.  Our QMI
+		 * encoder writes that byte as zero, so set it here: a piece whose
+		 * total_size is no larger than one piece is the last one.
+		 */
+		uint8_t *b = (uint8_t *)(uintptr_t)data;
+
+		if (length >= 24 && b[3] == 0x25) {
+			/* total_size is the fourth TLV, at a fixed place in this message */
+			unsigned at, total = 0xffffffffu, end_at = 0;
+
+			for (at = 7; at + 7 <= 40 && at + 7 <= (unsigned)length; at++) {
+				if (b[at] == 0x11 && b[at + 1] == 0x04 && b[at + 2] == 0x00) {
+					total = b[at + 3] | (b[at + 4] << 8) | ((unsigned)b[at + 5] << 16) | ((unsigned)b[at + 6] << 24);
+					break;
+				}
+			}
+			/* end and bdf_type are the last eight bytes: end, then bdf type */
+			if (b[length - 8] == 0x14 && b[length - 7] == 0x01 && b[length - 6] == 0x00) {
+				end_at = (unsigned)length - 5;
+			}
+			if (end_at != 0 && total <= 6144 && b[end_at] != 1) {
+				b[end_at] = 1;
+				hakiospcie_tl("QMI probe: last piece of %u bytes: end set to 1\n", total);
+			}
 		}
 	}
 	return ipcr_qrtr_send(1, mine->id, node, to_port, data, (unsigned)length) ? 0 : -EIO;
