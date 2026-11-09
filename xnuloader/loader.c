@@ -1023,6 +1023,8 @@ static int wdt_armed;
 static const struct kernel_live *running_live;
 static int run_park;   /* "oem run park": stay in the loader instead of resetting */
 static int usb_after;   /* boot-arg usb_after=1: take the controller back after the kernel returns */
+static unsigned loader_wait = 120;  /* boot-arg loader_wait=SEC: how long to hold the log before resetting */
+static int reset_now;               /* "oem done": the host has the log, reset without waiting */
 static char kmdline[1024];  /* the kernel's command line, for what the log screen looks for */
 /*
  * Set for the whole of run_on_other_cpu(), whether the kernel has a live block or not.
@@ -3201,6 +3203,12 @@ run_kernel(int have_checkpoint, uint64_t checkpoint)
 			kernel_mpidr = (uint64_t)(c[8] - '0') << PLAT->core_shift;
 		}
 		more_cores |= (starts_with(c, "cpus=") || starts_with(c, "cpumask=")) && (c == pi.cmdline || c[-1] == ' ');
+		if (starts_with(c, "loader_wait=") && (c == pi.cmdline || c[-1] == ' ')) {
+			const char *v = c + 12;
+			unsigned want = 0;
+			while (*v >= '0' && *v <= '9') { want = want * 10 + (unsigned)(*v - '0'); v++; }
+			if ((*v == 0 || *v == ' ') && want >= 10 && want <= 3600) loader_wait = want;
+		}
 		if (starts_with(c, "usb_after=") && (c == pi.cmdline || c[-1] == ' ')) {
 			const char *v = c + 10;
 			int want = 0;
@@ -4420,17 +4428,32 @@ fb_command(char *cmd)
 						print("== %d interesting lines of the kernel log, of %d bytes ==\n", lines, klog_len - start);
 					}
 					print("\n== END OF LOG: the machine cold resets now ==\n");
-					/* No usb_poll_command() here: after the kernel has run the endpoints are dead, and
-					 * polling them hangs the loader with the phone enumerating but answering nothing.
-					 * The log is on the screen; the machine resets from here. */
-					print("== the machine cold resets in 120 seconds ==\n");
-					for (int k = 0; k < 120; k++) {
-						wdt_pet();
-						BS->stall(1000000);
+					/*
+					 * Stay here so the host can take the log over the cable ("oem log", then
+					 * "oem done" when it has all of it). The commands are answered from the
+					 * same gadget that survived the run; usb_poll_command() is what "oem run
+					 * park" already does in this state, and it is what makes the waiting
+					 * window useful instead of a screen to photograph.
+					 */
+					print("== the machine holds the log for %d seconds; \"oem done\" resets now ==\n",
+					    loader_wait);
+					for (unsigned k = 0; k < loader_wait && !reset_now; k++) {
+						for (unsigned j = 0; j < 100; j++) {     /* 100 x 10 ms = 1 s */
+							wdt_pet();
+							usb_poll_command();
+							if (reset_now) {
+								break;
+							}
+							BS->stall(10000);
+						}
 					}
 					ST->rt->reset_system(0 /* EfiResetCold */, 0, 0, NULL);
 				}
 			}
+		} else if (starts_with(cmd, "oem done")) {
+			/* The host has what it came for: reset instead of sitting out the window. */
+			reset_now = 1;
+			fb_reply("OKAY", "resetting");
 		} else if (starts_with(cmd, "oem hang")) {
 			fb_reply("OKAY", "watchdog test: not petting any more");
 			for (;;) {
