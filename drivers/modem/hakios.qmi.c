@@ -735,7 +735,11 @@ qmi_receive(void *context, uint32_t node, uint32_t port, const void *data, size_
 		found = find_transaction(s, NULL, id);
 		txn = found != NULL ? *found : NULL;
 		if (txn != NULL && !txn->done && txn->ei != NULL && txn->dest != NULL) {
-			txn->result = hakios_qmi_decode(data, length, txn->ei, txn->dest);
+			{
+				int decoded = hakios_qmi_decode(data, length, txn->ei, txn->dest);
+
+				txn->result = decoded < 0 ? decoded : 0;
+			}
 			txn->done = true;
 			os_wake(&s->lock, txn);
 			os_unlock(&s->lock);
@@ -752,7 +756,11 @@ qmi_receive(void *context, uint32_t node, uint32_t port, const void *data, size_
 			}
 			if (waiting == 1 && only != NULL) {
 				os_log("QMI in  %#x id %u matched no transaction; the one waiting takes it\n", message, id);
-				only->result = hakios_qmi_decode(data, length, only->ei, only->dest);
+				{
+					int decoded = hakios_qmi_decode(data, length, only->ei, only->dest);
+
+					only->result = decoded < 0 ? decoded : 0;
+				}
 				only->done = true;
 				os_wake(&s->lock, only);
 				os_unlock(&s->lock);
@@ -1019,20 +1027,25 @@ hakios_qmi_txn_wait_ms(struct qmi_txn *txn, uint64_t milliseconds)
 {
 	struct qmi_state *s = state_of(txn->qmi);
 	uint64_t now = os_now_ms(), until = now + milliseconds;
-	{
-		extern int hz;
-
-		printf("wifi-pcie: qmi wait asked for %llu ms (hz %d)\n", milliseconds, hz);
-	}
 	struct qmi_txn **found;
 	int result;
+
+	printf("QMI probe: wait asked for %llu ms, done %d, now %llu\n",
+	    milliseconds, txn->done, now);
 
 	if (s == NULL) {
 		return -EINVAL;
 	}
 	os_lock(&s->lock);
-	while (!txn->done && now < until) {
-		os_wait(&s->lock, txn, until - now);
+	{
+		/* The clock cannot be trusted to end this wait, so count the sleeps. */
+		uint64_t rounds = milliseconds / 2 + 1, i;
+
+		for (i = 0; i < rounds && !txn->done; i++) {
+			os_unlock(&s->lock);
+			delay(2000);                /* 2 ms, with the lock let go */
+			os_lock(&s->lock);
+		}
 		now = os_now_ms();
 	}
 	found = find_transaction(s, txn, 0);
@@ -1040,6 +1053,8 @@ hakios_qmi_txn_wait_ms(struct qmi_txn *txn, uint64_t milliseconds)
 		*found = txn->next;
 	}
 	result = txn->done ? txn->result : -ETIMEDOUT;
+	printf("QMI probe: wait over, done %d, result %d, after %llu ms\n",
+	    txn->done, result, os_now_ms() - now);
 	os_unlock(&s->lock);
 	return result;
 }

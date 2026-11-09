@@ -931,10 +931,6 @@ hakiospcie_note_memory_request(const uint8_t *data, unsigned size)
         if ((unsigned)(data[i + 5] | (data[i + 6] << 8)) == size - i - 7) { at = i; found = 1; break; }
     }
     if (!found) {
-        if (size >= 16) {
-            hakiospcie_tl("QMI probe: no 0x35 in %u bytes: %02x %02x %02x %02x %02x %02x %02x %02x\n",
-                size, data[0], data[1], data[2], data[3], data[4], data[5], data[6], data[7]);
-        }
         return;
     }
 
@@ -1465,8 +1461,14 @@ const uint8_t *hakiospcie_wifi_driver_file(const char *name, uint64_t *size) {
         return NULL;
     }
     /* ath11k asks for the board data under its own name; the card's BDF is the same bytes. */
+    /*
+     * The vendor ships the board data as an ELF container, and this radio's
+     * firmware takes it that way: ath11k picks the BDF type from the first four
+     * bytes (qmi.c:2436), so an ELF here means type 1, ten chunks, and no cal
+     * data afterwards. A bare .data section is what the radio ignored.
+     */
     const char *stored = !strcmp(file, "board-2.bin") ? "board-2.bin" :
-        !strcmp(file, "board.bin") ? "bdwlan.bin" : file;
+        !strcmp(file, "board.bin") ? "bdwlan.elf" : file;
     const uint8_t *data = hakios_image_file("fw", stored, size, NULL);
     if (!data || !*size || *size > 8u * 1024 * 1024) {
         hakiospcie_tl("wifi-pcie:   fw/%s: %s (%llu bytes)\n", file, data ? "too big or empty" : "not in the image",
@@ -2158,6 +2160,8 @@ qrtr_send(struct hakios_qrtr_port *port, uint32_t node, uint32_t to_port, const 
 		data = answered;
 		length = at;
 		hakiospcie_tl("QMI probe: answering from the request itself: %u bytes, %u segments\n", at, count);
+	} else if (length >= 7 && ((const uint8_t *)data)[3] == 0x4c) {
+		hakiospcie_tl("QMI probe: device info out, %u bytes\n", length);
 	} else if (length >= 12 && ((const uint8_t *)data)[3] == 0x25) {
 		/* the board file download: one segment at a time, and the radio answers each */
 		const uint8_t *b = (const uint8_t *)data;
