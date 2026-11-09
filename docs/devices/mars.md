@@ -23,7 +23,7 @@
 | buttons | partly | CONFIG_HAKIOS_BUTTONS reads the power and volume keys (presses, releases, hold times) but no event reaches backboardd yet |
 | battery | partly | runs, but the loader's shared page never says a charger or a voltage, so the percentage reads -1% |
 | thermal | no | the driver is in the tree, off in this device's config |
-| wifi | partly | QCA6490 over PCIe: bring-up stages 1-21 pass, ath11k starts, the firmware answers QMI; at stage 22 the memory reply is accepted (result 0) and the board file download that follows is never answered |
+| wifi | partly | QCA6490 over PCIe: bring-up stages 1-21 pass, ath11k starts, the firmware answers QMI; at stage 22 the memory reply is accepted (result 0) and the regulatory database downloads, but the board data cannot be delivered: the radio takes four messages of 6,144 bytes at most, one file per boot, and the vendor board data is 58 KB (docs/wifi-board-limit.md) |
 | audio | no | the driver is in the tree, off in this device's config |
 | camera | no | the driver is in the tree, off in this device's config |
 
