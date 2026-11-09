@@ -231,6 +231,12 @@ lx_os_firmware(const char *name, const void **data, unsigned long *size)
 	if (file == NULL) {
 		/* the name comes in as "ath11k/QCA6490/hw1.0/firmware-2.bin": fall back to the bare name in fw/ */
 		const char *slash = strrchr(name, '/');
+		/* the skip has to happen here too: the regulatory database arrives
+		 * through this fallback, not through the driver's own table. */
+		if (hakiospcie_wifi_regdb_skipped(slash != NULL ? slash + 1 : name)) {
+			printf("lx: the regulatory database is skipped on purpose, so the board data goes first\n");
+			return ENOENT;
+		}
 		uint64_t fallback = 0;
 		file = hakios_image_file("fw", slash != NULL ? slash + 1 : name, &fallback, NULL);
 		length = fallback;

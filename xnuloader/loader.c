@@ -4408,8 +4408,10 @@ fb_command(char *cmd)
 							put_char('\n');
 						}
 
-						head = lines > 60 ? 25 : lines;
-						tail = lines > 60 ? 20 : 0;
+						/* The screen holds about a hundred and ninety lines: show the
+						 * whole sequence while it fits, and only then fold the middle. */
+						head = lines > 150 ? 100 : lines;
+						tail = lines > 150 ? 50 : 0;
 						for (i = 0; i < head + tail; i++) {
 							uint64_t line_at = at_line[i < head ? i : lines - tail + (i - head)];
 							uint64_t n = 0;

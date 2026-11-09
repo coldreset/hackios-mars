@@ -9,6 +9,7 @@ void hakiospcie_wifi_stop(void);
 void hakiospcie_note_memory_request(const uint8_t *data, unsigned size);
 unsigned hakiospcie_wifi_driver_mode(void);
 void *hakiospcie_wifi_driver_memory(unsigned long size, unsigned long long *iova);
+int hakiospcie_wifi_regdb_skipped(const char *bare_name);
 const uint8_t *hakiospcie_wifi_driver_file(const char *name, uint64_t *size);
 void *hakiospcie_wifi_driver_bar(void);
 uint32_t hakiospcie_wifi_register_read(uint32_t offset);
