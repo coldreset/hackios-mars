@@ -1452,7 +1452,7 @@ static bool ipcr_probe(unsigned step) {
         rd(dma_space.cb, 0x58), rd(dma_space.mmio, 0x48));
     if (!ipcr.capability_seen || !ipcr.capability_ok || !mhi_dma_ok()) { return false; }
     hakiospcie_tl("wifi-pcie: stage 21 WLFW capability request/response successful over QMI; no SMMU fault\n");
-    for (unsigned n = 0; n < wifi_ping; n++) {
+    for (unsigned n = 0; n < 8; n++) {
         unsigned before = ipcr.capability_count;
         if (!ipcr_qmi_request(0x24, NULL, 0)) {
             hakiospcie_tl("QMI probe: ping %u could not be sent\n", n);
