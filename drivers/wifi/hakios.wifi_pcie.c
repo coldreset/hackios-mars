@@ -81,6 +81,7 @@ static unsigned wifi_mem_shift;
 static unsigned wifi_mem_type;
 static unsigned wifi_board_type;
 static unsigned wifi_skip_regdb;
+static unsigned wifi_ping;
 static unsigned wifi_board_pace = 20;
 static unsigned wifi_board_elf;
 static unsigned board_total_constant;
@@ -876,6 +877,7 @@ static struct {
     uint64_t pending_command;
     uint32_t service_node, service_port, service_instance;
     bool channels, hello_sent, capability_seen, capability_ok;
+    unsigned capability_count;
     uint8_t announcement[128];
     unsigned announcement_length;
     unsigned transaction, message, response_result, response_error, memory_count;
@@ -1043,6 +1045,7 @@ static bool ipcr_receive(const uint8_t *data, unsigned size) {
                     hakiospcie_tl("wifi-pcie: WLFW response message %#x result %u error %u\n", message, result, error);
                     if (message == 0x24) {
                         ipcr.capability_seen = true; ipcr.capability_ok = result == 0 && error == 0;
+                        ipcr.capability_count++;
                         hakiospcie_tl("wifi-pcie: WLFW capability response result %u error %u\n", result, error);
                     }
                 }
@@ -1449,6 +1452,20 @@ static bool ipcr_probe(unsigned step) {
         rd(dma_space.cb, 0x58), rd(dma_space.mmio, 0x48));
     if (!ipcr.capability_seen || !ipcr.capability_ok || !mhi_dma_ok()) { return false; }
     hakiospcie_tl("wifi-pcie: stage 21 WLFW capability request/response successful over QMI; no SMMU fault\n");
+    for (unsigned n = 0; n < wifi_ping; n++) {
+        unsigned before = ipcr.capability_count;
+        if (!ipcr_qmi_request(0x24, NULL, 0)) {
+            hakiospcie_tl("QMI probe: ping %u could not be sent\n", n);
+            break;
+        }
+        for (unsigned i = 0; i < 3000 && ipcr.capability_count == before; i++) {
+            if (!mhi_events()) { break; }
+            pause_us(1000);
+        }
+        hakiospcie_tl("QMI probe: ping %u answered %u (count %u, rx %u)\n", n,
+            ipcr.capability_count != before, ipcr.capability_count, ipcr.rx_packets);
+        if (ipcr.capability_count == before) { break; }
+    }
     return true;
 }
 
@@ -1953,6 +1970,7 @@ void hakiospcie_wifi_init(void) {
     PE_parse_boot_argn("wifi_mem_type", &wifi_mem_type, sizeof(wifi_mem_type));
     PE_parse_boot_argn("wifi_board_type", &wifi_board_type, sizeof(wifi_board_type));
     PE_parse_boot_argn("wifi_skip_regdb", &wifi_skip_regdb, sizeof(wifi_skip_regdb));
+    PE_parse_boot_argn("wifi_ping", &wifi_ping, sizeof(wifi_ping));
     PE_parse_boot_argn("wifi_board_pace", &wifi_board_pace, sizeof(wifi_board_pace));
     PE_parse_boot_argn("wifi_board_elf", &wifi_board_elf, sizeof(wifi_board_elf));
     PE_parse_boot_argn("wifi_board_end", &wifi_board_end, sizeof(wifi_board_end));
