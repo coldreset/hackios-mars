@@ -53,6 +53,16 @@ disappears from USB. The working one is `07b428b7…`.
   handshake (firmware answers `result=0`), the regulatory database downloads in
   four acknowledged pieces.
 
+- **Chinese interface**: the `.loctable` files held the translations all along, and
+  `userland/mklocalizations.py` writes them into the language CoreFoundation actually
+  asks for (SpringBoard's own lookup ignores `AppleLanguages`; measured). The white
+  boxes that followed were a missing font face: `tools/cjkface.py` adds the Medium
+  weight the interface asks for. See `docs/interface.md`.
+- **Wallpaper**: Apple's poster job
+  (`System/Library/LaunchAngels/com.apple.PosterBoard.plist`) is copied into the image,
+  so `com.apple.posterboardservices.services` answers, `CollectionsPoster` runs and the
+  home screen has its background.
+
 ## What does not work
 
 - **Wi-Fi board data**: the radio accepts at most four `0x25` messages, 6144
@@ -64,10 +74,10 @@ disappears from USB. The working one is `07b428b7…`.
   variant `lahaina.adsp.prod`) contains only `6490.wlanfw.eval_v1/v2_TOQ`, so
   there is no other firmware to try.
 - **Audio**: no audio device, so the volume rocker cannot show a volume bar.
-- **Wallpaper / Settings**: RunningBoard kills SpringBoard because
-  `CollectionsPoster` is never launched.
-- **Chinese UI**: `zh-Hans.lproj` does not exist in the image; needs resources
-  from an IPSW.
+- **The switcher's cards**: white frames. No application snapshot is ever written —
+  `/var/mobile/Library/SplashBoard/Snapshots` does not exist after a boot — and the
+  switcher cannot be opened from a script, so its cards can only be looked at by hand.
+  See `docs/interface.md`.
 - **Boot without a PC**: the menu boots what a *host* staged. Nothing reads a
   payload or a system image from flash, so every session needs `xl reload` plus
   `xl ramdisk userland/system.apfs` (2381 MB, 73 s). The thyme port's design is the
@@ -78,9 +88,9 @@ disappears from USB. The working one is `07b428b7…`.
 
 ## Next steps, in the order that pays off
 
-1. **Wallpaper crash** — find why `CollectionsPoster` is not launched.
-2. **Chinese resources** — needs an IPSW the user does not have; park it.
-3. **Wi-Fi** — blocked on understanding why the firmware stops after four
+1. **The switcher's cards** — nothing writes an application snapshot; find what should,
+   or give the card a picture of its own.
+2. **Wi-Fi** — blocked on understanding why the firmware stops after four
    messages. Static analysis of `amss.bin` failed: it is an ELF32/ARM image whose
    code does not disassemble (entry point is not code, Thumb `push` density is
    0.06 %, strings are mixed into executable segments). Needs the vendor's
@@ -104,6 +114,8 @@ disappears from USB. The working one is `07b428b7…`.
   from another run.
 - `fastboot get_staged` must be given a `/tmp` path: the fastboot in WSL is a
   wrapper around `fastboot.exe`, which cannot write to `/mnt/d/...`.
+- **The switcher cannot be opened from a script** (see `docs/interface.md`): every look at
+  the cards costs a phone round and a person swiping up.
 - **A screenshot is not evidence that the phone's panel shows anything.** The
   framebuffer is written through a cached mapping; only `splash_present()`
   (in `xnuloader/loader.c`) writes it back to the memory the display controller

@@ -211,6 +211,10 @@ if [ -d $DARWIN/rootfs/usr/lib ]; then
 		$DYN -fobjc-arc -framework Foundation -framework SystemConfiguration -o obj/net_test src/net_test.m
 		# (with an entitlement for "battery_test open URL", if ldid is there: src/battery_test.c)
 		$DYN -framework CoreFoundation -framework IOKit -lsqlite3 -o obj/battery_test src/battery_test.c &&
+		# what Darwin believes the interface language is, and what SpringBoard's own bundle tells
+		# it (src/language_test.m); a process of its own, so a wrong answer cannot take the home
+		# screen down the way the same question asked inside SpringBoard did
+		$DYN -fobjc-arc -framework Foundation -framework CoreText -framework CoreGraphics -o obj/language_test src/language_test.m
 			{ ${LDID:-ldid} -Ssrc/battery_test.entitlements obj/battery_test 2>/dev/null ||
 			  echo "build.sh: no ldid: battery_test is unsigned, and SpringBoard will not open URLs for it"; }
 		# (the keychain answers only a program that has a keychain access group: signed with one, if ldid is there)
@@ -319,6 +323,7 @@ if [ -d $DARWIN/rootfs/usr/lib ]; then
 	[ -f obj/fps_info ] && cp obj/fps_info root/bin/
 	[ -f obj/net_test ] && cp obj/net_test root/bin/
 	[ -f obj/battery_test ] && cp obj/battery_test root/bin/
+	[ -f obj/language_test ] && cp obj/language_test root/bin/
 	[ -f obj/keychain_test ] && cp obj/keychain_test root/bin/
 	[ -f obj/wifipw_test ] && cp obj/wifipw_test root/bin/
 	[ -f obj/sound_test ] && cp obj/sound_test root/bin/
@@ -416,7 +421,21 @@ if [ -d $DARWIN/rootfs/usr/lib ]; then
 	# and not by what select-system.py extracted here (--root-volume; seven jobs turn on the difference,
 	# fairplayd among them).
 	cp com.hakios.demo.plist com.hakios.wifi.plist root/LaunchDaemons/
-	cp com.hakios.posterboard.plist root/LaunchDaemons/
+	# the interface language, asked from a job of its own (src/language_test.m, com.hakios.languagetest.plist)
+	cp com.hakios.languagetest.plist root/LaunchDaemons/
+	# what font the interface's Chinese is drawn with, asked from a job of its own (src/font_test.c)
+	cp com.hakios.fonttest.plist root/LaunchDaemons/
+	# The font service: CoreText asks it to activate a font that is not loaded at boot, and
+	# PingFang (System/Library/Fonts/LanguageSupport, the only font here with Chinese) is one of
+	# those. Without the job, asking for a face by name waits for an answer nobody gives --
+	# measured with src/language_test.m -- and the interface draws boxes.
+	cp $DARWIN/rootfs/System/Library/LaunchDaemons/com.apple.fontservicesd.plist root/LaunchDaemons/
+	# PosterBoard: Apple ships its job as a launch angel (System/Library/LaunchAngels/com.apple.PosterBoard.plist),
+	# and that job is the only thing in the system that claims com.apple.posterboardservices.services --
+	# the name SpringBoard looks up for the wallpaper, which today answers "No such process", so the home
+	# screen has no wallpaper and the switcher's cards have nothing to lay over them. mkjobs.py takes the
+	# angels only with REST=1; this one is taken alone, because the rest of them are not needed yet.
+	cp $DARWIN/rootfs/System/Library/LaunchAngels/com.apple.PosterBoard.plist root/LaunchDaemons/
 	VOLUME=""
 	[ -n "$FLASHBOOT" ] && [ -f $DARWIN/rootfs.slt ] && VOLUME="--root-volume $DARWIN/rootfs.slt"
 	[ -n "$DARWIN_JOBS" ] && OSLOG=${OSLOG-com.apple.backboardd} ./mkjobs.py ${REST:+--rest} $VOLUME $DARWIN/rootfs root/LaunchDaemons $DARWIN_JOBS
@@ -641,6 +660,20 @@ if [ -f $DARWIN/system.manifest ] && [ -f $CACHE/dyld_shared_cache_arm64 ] &&
 	# bundle says CADisableMinimumFrameDurationOnPhone, which no application of an iPhone X's system does; the panel
 	# here runs at 120 (IOMFBDisplayRefresh, MiniIOMobileFramebuffer.cpp). New files, not edits: sysroot's are links
 	python3 mkhighrate.py sysroot
+	# the languages Darwin can find at all: a bundle advertises one with a .lproj directory, and
+	# every one in this image is en (select-system.py's KEEP_LANG); the .loctable files have held
+	# the Chinese all along (mklocalizations.py)
+	python3 mklocalizations.py sysroot
+	# the face the interface's Chinese is drawn with: SpringBoard asks for PingFangSC-Medium, which
+	# select-system.py's font trim dropped (it keeps Regular and Semibold), and CoreText's answer is
+	# LastResort -- a hollow box for every character. tools/cjkface.py puts a Medium face back, built
+	# from CJK_FONT's outlines; without it the Chinese interface is white frames.
+	if [ -n "$CJK_FONT" ]; then
+		python3 ../tools/cjkface.py sysroot/System/Library/Fonts/LanguageSupport/PingFang.ttc "$CJK_FONT"
+	else
+		python3 ../tools/cjkface.py --check sysroot/System/Library/Fonts/LanguageSupport/PingFang.ttc ||
+			echo "build.sh: PingFang has no Medium face: every Chinese word will be a hollow box (set CJK_FONT)" >&2
+	fi
 	# the audio DSP's firmware, the phone's own from ../fw-audio (never in the repository), where the kernel reads
 	# it once the root is mounted (drivers/audio/hakios.adsp.c, adsp=1): 20 MB that do not fit beside GL=1 in the small image
 	if [ -f ../fw-audio/adsp.mdt ]; then

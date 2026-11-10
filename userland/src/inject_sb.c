@@ -201,16 +201,20 @@ set_setup_required_reason(id self, SEL selector, long reason)
 #define SNAPSHOT_FORMAT_PNG             0
 #define SNAPSHOT_FORMAT_JPEG            3
 
+static int snapshots_asked;             /* how many times the log has been told a picture was asked for */
+
 static long
 snapshot_output_format(__unused id self, __unused SEL selector, id snapshot)
 {
 	SEL opaque = sel_registerName("isImageOpaque");
+	BOOL is_opaque = snapshot != NULL && class_getInstanceMethod(object_getClass(snapshot), opaque) != NULL &&
+	    ((BOOL (*)(id, SEL))objc_msgSend)(snapshot, opaque);
 
-	if (snapshot != NULL && class_getInstanceMethod(object_getClass(snapshot), opaque) != NULL &&
-	    ((BOOL (*)(id, SEL))objc_msgSend)(snapshot, opaque)) {
-		return SNAPSHOT_FORMAT_JPEG;
+	if (snapshots_asked < 4) {
+		snapshots_asked++;
+		say("hakios: snapshot: asked for a picture, %s\n", is_opaque ? "JPEG" : "PNG");
 	}
-	return SNAPSHOT_FORMAT_PNG;
+	return is_opaque ? SNAPSHOT_FORMAT_JPEG : SNAPSHOT_FORMAT_PNG;
 }
 
 /* ---- battery state from redwood's Qualcomm charger stack ----------------------------------------- */
