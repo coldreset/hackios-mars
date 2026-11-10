@@ -386,7 +386,8 @@ loader_return(void)
 	 * flushed to the console; if the console itself is what failed, that
 	 * never happens. Append the buffer so the loader gets it either way.
 	 */
-	loader_log_linearize();
+	/* The loader does this itself, on the raw head+ring layout. Doing it here too moved the
+	 * ring into place twice, which left a hole where the middle of the log should be. */
 	if (!loader_return_entered) {
 		loader_log_append_msgbuf();
 	}
