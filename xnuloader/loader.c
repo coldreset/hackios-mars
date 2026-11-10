@@ -4171,9 +4171,303 @@ keys_start(void)
 	    pon_dev.channel, pin_dev.channel);
 }
 
-/* The same key menu the host drives with "oem menu select". */
+/*
+ * Is the needle anywhere in the haystack: the kernel command line is the only caller, and it
+ * is asked one question -- whether the kernel will be looking for a root image in memory.
+ */
+static int
+text_has(const char *haystack, const char *needle)
+{
+	uint64_t n = 0;
+
+	if (haystack == NULL) {
+		return 0;
+	}
+	while (needle[n] != 0) {
+		n++;
+	}
+	if (n == 0) {
+		return 1;
+	}
+	for (; *haystack != 0; haystack++) {
+		uint64_t i = 0;
+
+		while (i < n && haystack[i] == needle[i]) {
+			i++;
+		}
+		if (i == n) {
+			return 1;
+		}
+	}
+	return 0;
+}
+
+/*
+ * The run itself, which "oem run" and the menu's first item both do once there is a payload:
+ * from here the loader stops being a boot menu and becomes the thing that boots.
+ */
 static void
-menu_select(void)
+start_payload(int have_cp, uint64_t cp)
+{
+	set_result("running", cp, 0);
+	log_len = 0;
+	print("== XNULOADER run (usb) ==\n");
+	/*
+	 * usb_after=4: shut the controller down *before* the kernel runs.  The gadget that is
+	 * handed over stays as it was, and the endpoints are dead when the kernel comes back
+	 * (stop() and start_ex() afterwards do not bring them back).  With the controller down
+	 * for the whole run, the restart afterwards is a first start, not a second one.
+	 */
+	if (usb_after >= 4 && USB != NULL) {
+		USB->stop();
+		print("usb: the controller is shut down for the run\n");
+	}
+	if (!run_kernel(have_cp, cp)) {
+		set_result("not-started", 0, 0);
+		compose_logs(NULL, 0);
+	} else {
+		/*
+		 * The kernel keeps the controller in the shape it left it: start the gadget
+		 * again, or the loader would go on enumerating and answering nothing (every
+		 * command times out, and only the power button brings the phone back).
+		 */
+		/*
+		 * The kernel leaves the controller in a state this loader cannot take back:
+		 * the gadget still enumerates but every command times out, and only the power
+		 * button brings the phone back. Reset instead: a cold reset boots Android
+		 * again, so the next "xl reload" starts from a phone that answers.
+		 * (The thyme port does the same: "cold-resets after the run instead of
+		 * hanging in USB bring-up". "oem run park" keeps the old behaviour.)
+		 */
+		if (run_park) {
+			print("usb: the kernel is back; parking, no reset\n");
+			/*
+			 * Stage the kernel's own log, not the little live ring: the whole
+			 * buffer is here, and "oem log <offset>" can then hand it out in
+			 * pieces of 32767 instead of the first 32 KB only.
+			 */
+			{
+				const char *kp = (const char *)loader_ctx[CTX_LOG_PA];
+				uint64_t klen = loader_ctx[CTX_LOG_LEN];
+				uint64_t cap = 8u << 20;
+
+				if (klen > cap) {
+					kp += klen - cap;
+					klen = cap;
+				}
+				if (kp != NULL) {
+					compose_logs(kp, klen);
+					log_has_kernel = 1;
+					print("log: %d bytes staged for the host\n", klen);
+				} else {
+					compose_logs(NULL, 0);
+				}
+			}
+		} else {
+			/*
+			 * usb_after=1: take the controller back for a while so the log can be fetched over
+			 * the cable (xl log, fastboot get_staged) instead of photographed. Nothing is written.
+			 */
+			if (usb_after == 2) {
+				/*
+				 * usb_after=2: the same gadget, not a second usb_start().  The kernel has no USB
+				 * code of its own (no dwc3 or xhci in this tree), so the controller is exactly as
+				 * this loader left it; starting it again is what wedged the endpoints.
+				 */
+				print("usb: the kernel is back; polling the gadget that was already there\n");
+				for (unsigned n = 0; n < 24000; n++) {
+					usb_poll_command();
+					wdt_pet();
+					BS->stall(10000);
+				}
+			} else if (usb_after) {
+				print("usb: the kernel is back; taking the controller again, for four minutes\n");
+				if (usb_after >= 3 && USB != NULL) USB->stop();
+				USB = NULL;
+				if (usb_start()) {
+					for (unsigned n = 0; n < 24000; n++) {    /* 240 s, unless a command ends it */
+						usb_poll_command();
+						wdt_pet();
+						BS->stall(10000);
+					}
+				} else {
+					print("usb: the controller did not come back; the screen has the log\n");
+				}
+			}
+			screen_quiet = 0;   /* the kernel is gone: the screen is ours again */
+			if (ST->con_out == NULL && real_con_out != NULL) {
+				ST->con_out = real_con_out;
+			}
+			print("usb: the kernel is back; cold resetting the machine\n");
+			{
+				/*
+				 * Only the interesting lines, the first ones and the last ones: the screen
+				 * scrolls, so a dump that runs to the end hides the boot messages, and the
+				 * boot messages are what say whether the GPU was kept and GL loaded.
+				 */
+				static const char *const wanted[] = {
+					"hakios-gl", "hakios: the server", "hakios: no GPU", "hakios: gl=",
+					"language:", "hakios: running",
+					"HakiosGPU", "frames in", "frame time", "from one frame to the next",
+					"cpu 5s", "focaltech: gesture", "touch screen ready", "adreno: gpu:",
+					"THE 3D CORE", "exited with", "is sent signal", "hakios: running", "census: ", "no program",
+					"battery: ", "buttons: ",
+				};
+				/*
+				 * logwords=a,b,c in the kernel's command line replaces the list: the
+				 * run's own question decides what the screen shows.
+				 */
+				static char logwords[400];
+				static const char *from_boot[32];
+				unsigned nwords = 0;
+				const char *const *words = wanted;
+
+				{
+					const char *w = kmdline;
+
+					while (*w != 0) {
+						if ((w == kmdline || w[-1] == ' ') && starts_with(w, "logwords=")) {
+							const char *v = w + 9;
+							unsigned n = 0;
+
+							while (*v != 0 && *v != ' ' && n + 1 < sizeof(logwords)) {
+								logwords[n++] = *v == '+' ? ' ' : *v;   /* '+' is a space: the command line has no room for one */
+								v++;
+							}
+							logwords[n] = 0;
+							if (n != 0) {
+								from_boot[nwords++] = logwords;
+								for (unsigned k = 1; k < n && nwords < 32; k++) {
+									if (logwords[k] == ',') {
+										logwords[k] = 0;
+										from_boot[nwords++] = logwords + k + 1;
+									}
+								}
+								words = (const char *const *)from_boot;
+							}
+							break;
+						}
+						while (*w != 0 && *w != ' ') {
+							w++;
+						}
+						while (*w == ' ') {
+							w++;
+						}
+					}
+				}
+				static uint32_t at_line[4096];
+				const char *klog = (const char *)loader_ctx[CTX_LOG_PA];
+				uint64_t klog_len = loader_ctx[CTX_LOG_LEN];
+				/* The head has to reach the boot lines: a busy run writes megabytes, and a
+				 * one-megabyte window would begin long after them. Eight megabytes cover a
+				 * whole boot and leave the buffer's own limits alone. */
+				uint64_t start = klog_len > (8u << 20) ? klog_len - (8u << 20) : 0;
+				uint64_t at = start, lines = 0, head, tail, i, w;
+
+				print("\n== THE KERNEL LOG: INTERESTING LINES, FIRST AND LAST ==\n");
+				if (klog != NULL && klog_len > 0) {
+					while (at < klog_len) {
+						uint64_t end = at, n = 0;
+						int keep = 0;
+						char line[224];
+
+						while (end < klog_len && klog[end] != '\n') {
+							if (n < sizeof(line) - 1) {
+								line[n++] = klog[end];
+							}
+							for (w = 0; w < (nwords != 0 ? nwords : sizeof(wanted) / sizeof(wanted[0])) && !keep; w++) {
+								const char *word = nwords != 0 ? words[w] : wanted[w];
+								uint64_t len = 0, j, k;
+
+								while (word[len] != 0) {
+									len++;
+								}
+								for (j = 0; j + len <= n; j++) {
+									for (k = 0; k < len && line[j + k] == word[k]; k++) {
+									}
+									if (k == len) {
+										keep = 1;
+										break;
+									}
+								}
+							}
+							end++;
+						}
+						if (keep && lines < sizeof(at_line) / sizeof(at_line[0])) {
+							at_line[lines++] = (uint32_t)at;
+						}
+						at = end + 1;
+					}
+				}
+				if (lines == 0) {
+					/* Nothing matched: the buffer is not what we think it is.
+					 * Show the tail raw so the screen is never blank. */
+					uint64_t from = klog_len > 3000 ? klog_len - 3000 : 0;
+
+					print("== no line matched: the last %d bytes, raw ==\n", (int)(klog_len - from));
+					for (i = from; i < klog_len; i++) {
+						char c = klog[i];
+
+						put_char((c >= 32 && c < 127) || c == '\n' ? c : '.');
+					}
+					put_char('\n');
+				}
+
+				/* The screen holds about a hundred and ninety lines: show the
+				 * whole sequence while it fits, and only then fold the middle. */
+				head = lines > 150 ? 100 : lines;
+				tail = lines > 150 ? 50 : 0;
+				for (i = 0; i < head + tail; i++) {
+					uint64_t line_at = at_line[i < head ? i : lines - tail + (i - head)];
+					uint64_t n = 0;
+
+					if (i == head) {
+						print("== ... %d lines in between ... ==\n", (int)(lines - head - tail));
+					}
+					while (line_at + n < klog_len && klog[line_at + n] != '\n' && n < 220) {
+						put_char(klog[line_at + n]);
+						n++;
+					}
+					put_char('\n');
+					BS->stall(20000);
+					wdt_pet();
+				}
+				print("== %d interesting lines of the kernel log, of %d bytes ==\n", lines, klog_len - start);
+			}
+			print("\n== END OF LOG: the machine cold resets now ==\n");
+			/*
+			 * Stay here so the host can take the log over the cable ("oem log", then
+			 * "oem done" when it has all of it). The commands are answered from the
+			 * same gadget that survived the run; usb_poll_command() is what "oem run
+			 * park" already does in this state, and it is what makes the waiting
+			 * window useful instead of a screen to photograph.
+			 */
+			print("== the machine holds the log for %d seconds; \"oem done\" resets now ==\n",
+			    loader_wait);
+			for (unsigned k = 0; k < loader_wait && !reset_now; k++) {
+				for (unsigned j = 0; j < 100; j++) {     /* 100 x 10 ms = 1 s */
+					wdt_pet();
+					usb_poll_command();
+					if (reset_now) {
+						break;
+					}
+					BS->stall(10000);
+				}
+			}
+			ST->rt->reset_system(0 /* EfiResetCold */, 0, 0, NULL);
+		}
+	}
+}
+
+static void fb_reply(const char *code, const char *text);   /* defined with the USB command loop */
+
+/*
+ * The same key menu the host drives with "oem menu select".  A choice made by a key must never
+ * be answered (an unsolicited reply desyncs the host's command stream), so when the host is the
+ * one asking this answers for itself and returns nonzero: "I have replied, say nothing more".
+ */
+static int
+menu_select(int from_host)
 {
 	if (splash_choice == 1) {
 		print("diagnostics: display %dx%d at %x, stride %d, log %d bytes, stage %d\n",
@@ -4185,9 +4479,46 @@ menu_select(void)
 		BS->stall(400000);
 		ST->rt->reset_system(0 /* EfiResetCold */, 0, 0, NULL);
 	} else {
-		splash_status("等待主机连接");
+		/*
+		 * "启动 HackiOS": the payload the loader has in memory, run without the host.  The
+		 * host's "oem run" is the same run, and until now it was the only way to get one --
+		 * the menu could be chosen but the choice did nothing but wait for a cable.
+		 */
+		struct payload_info pi;
+		int have_kernel = parse_payload(&pi, 0) && pi.kernel != NULL;
+		int wants_root = have_kernel && text_has(pi.cmdline, "rd=md0");
+		int have_root = resident_rd_size != 0 || pi.resident_rd != 0 || pi.ramdisk_size != 0;
+
+		print("menu: 启动 HackiOS: kernel %d, root image wanted %d, here %d\n", have_kernel, wants_root, have_root);
+		if (!have_kernel) {
+			splash_status("没有可启动的镜像");
+			if (from_host) {
+				fb_reply("FAIL", "no kernel in the payload");
+				return 1;
+			}
+		} else if (wants_root && !have_root) {
+			/* the kernel would look for a root image that is not there, and only panic */
+			splash_status("先上传 system.apfs");
+			if (from_host) {
+				fb_reply("FAIL", "no system image: upload one with xl ramdisk");
+				return 1;
+			}
+		} else {
+			if (!from_host) {
+				run_park = 0;   /* a run chosen by a key ends in a reset, like the host's */
+			}
+			splash_status("启动 HackiOS");
+			splash_redraw();
+			if (from_host) {
+				/* answer first: the run may take the controller away, and then no reply goes out */
+				fb_reply("OKAY", "");
+			}
+			start_payload(0, 0);   /* does not return: the kernel runs, then the machine resets */
+			return 1;
+		}
 	}
 	splash_redraw();
+	return 0;
 }
 
 /*
@@ -4279,7 +4610,7 @@ keys_service(void)
 		splash_choice = (splash_choice + 1) % 3;
 		splash_redraw();
 	} else if (event == KEY_CONFIRM) {
-		menu_select();
+		(void)menu_select(0);   /* no host is asking, so nothing is answered */
 	}
 }
 
@@ -4576,255 +4907,8 @@ fb_command(char *cmd)
 			int have_cp = selftest || (*arg >= '0' && *arg <= '9');
 			uint64_t cp = selftest ? CHECKPOINT_SELFTEST : parse_number(arg, 10);
 
-			set_result("running", cp, 0);
 			fb_reply("OKAY", "");
-			log_len = 0;
-			print("== XNULOADER run (usb) ==\n");
-			/*
-			 * usb_after=4: shut the controller down *before* the kernel runs.  The gadget that is
-			 * handed over stays as it was, and the endpoints are dead when the kernel comes back
-			 * (stop() and start_ex() afterwards do not bring them back).  With the controller down
-			 * for the whole run, the restart afterwards is a first start, not a second one.
-			 */
-			if (usb_after >= 4 && USB != NULL) {
-				USB->stop();
-				print("usb: the controller is shut down for the run\n");
-			}
-			if (!run_kernel(have_cp, cp)) {
-				set_result("not-started", 0, 0);
-				compose_logs(NULL, 0);
-			} else {
-				/*
-				 * The kernel keeps the controller in the shape it left it: start the gadget
-				 * again, or the loader would go on enumerating and answering nothing (every
-				 * command times out, and only the power button brings the phone back).
-				 */
-				/*
-				 * The kernel leaves the controller in a state this loader cannot take back:
-				 * the gadget still enumerates but every command times out, and only the power
-				 * button brings the phone back. Reset instead: a cold reset boots Android
-				 * again, so the next "xl reload" starts from a phone that answers.
-				 * (The thyme port does the same: "cold-resets after the run instead of
-				 * hanging in USB bring-up". "oem run park" keeps the old behaviour.)
-				 */
-				if (run_park) {
-					print("usb: the kernel is back; parking, no reset\n");
-					/*
-					 * Stage the kernel's own log, not the little live ring: the whole
-					 * buffer is here, and "oem log <offset>" can then hand it out in
-					 * pieces of 32767 instead of the first 32 KB only.
-					 */
-					{
-						const char *kp = (const char *)loader_ctx[CTX_LOG_PA];
-						uint64_t klen = loader_ctx[CTX_LOG_LEN];
-						uint64_t cap = 8u << 20;
-
-						if (klen > cap) {
-							kp += klen - cap;
-							klen = cap;
-						}
-						if (kp != NULL) {
-							compose_logs(kp, klen);
-							log_has_kernel = 1;
-							print("log: %d bytes staged for the host\n", klen);
-						} else {
-							compose_logs(NULL, 0);
-						}
-					}
-				} else {
-					/*
-					 * usb_after=1: take the controller back for a while so the log can be fetched over
-					 * the cable (xl log, fastboot get_staged) instead of photographed. Nothing is written.
-					 */
-					if (usb_after == 2) {
-						/*
-						 * usb_after=2: the same gadget, not a second usb_start().  The kernel has no USB
-						 * code of its own (no dwc3 or xhci in this tree), so the controller is exactly as
-						 * this loader left it; starting it again is what wedged the endpoints.
-						 */
-						print("usb: the kernel is back; polling the gadget that was already there\n");
-						for (unsigned n = 0; n < 24000; n++) {
-							usb_poll_command();
-							wdt_pet();
-							BS->stall(10000);
-						}
-					} else if (usb_after) {
-						print("usb: the kernel is back; taking the controller again, for four minutes\n");
-						if (usb_after >= 3 && USB != NULL) USB->stop();
-						USB = NULL;
-						if (usb_start()) {
-							for (unsigned n = 0; n < 24000; n++) {    /* 240 s, unless a command ends it */
-								usb_poll_command();
-								wdt_pet();
-								BS->stall(10000);
-							}
-						} else {
-							print("usb: the controller did not come back; the screen has the log\n");
-						}
-					}
-					screen_quiet = 0;   /* the kernel is gone: the screen is ours again */
-					if (ST->con_out == NULL && real_con_out != NULL) {
-						ST->con_out = real_con_out;
-					}
-					print("usb: the kernel is back; cold resetting the machine\n");
-					{
-						/*
-						 * Only the interesting lines, the first ones and the last ones: the screen
-						 * scrolls, so a dump that runs to the end hides the boot messages, and the
-						 * boot messages are what say whether the GPU was kept and GL loaded.
-						 */
-						static const char *const wanted[] = {
-							"hakios-gl", "hakios: the server", "hakios: no GPU", "hakios: gl=",
-							"language:", "hakios: running",
-							"HakiosGPU", "frames in", "frame time", "from one frame to the next",
-							"cpu 5s", "focaltech: gesture", "touch screen ready", "adreno: gpu:",
-							"THE 3D CORE", "exited with", "is sent signal", "hakios: running", "census: ", "no program",
-							"battery: ", "buttons: ",
-						};
-						/*
-						 * logwords=a,b,c in the kernel's command line replaces the list: the
-						 * run's own question decides what the screen shows.
-						 */
-						static char logwords[400];
-						static const char *from_boot[32];
-						unsigned nwords = 0;
-						const char *const *words = wanted;
-
-						{
-							const char *w = kmdline;
-
-							while (*w != 0) {
-								if ((w == kmdline || w[-1] == ' ') && starts_with(w, "logwords=")) {
-									const char *v = w + 9;
-									unsigned n = 0;
-
-									while (*v != 0 && *v != ' ' && n + 1 < sizeof(logwords)) {
-										logwords[n++] = *v == '+' ? ' ' : *v;   /* '+' is a space: the command line has no room for one */
-										v++;
-									}
-									logwords[n] = 0;
-									if (n != 0) {
-										from_boot[nwords++] = logwords;
-										for (unsigned k = 1; k < n && nwords < 32; k++) {
-											if (logwords[k] == ',') {
-												logwords[k] = 0;
-												from_boot[nwords++] = logwords + k + 1;
-											}
-										}
-										words = (const char *const *)from_boot;
-									}
-									break;
-								}
-								while (*w != 0 && *w != ' ') {
-									w++;
-								}
-								while (*w == ' ') {
-									w++;
-								}
-							}
-						}
-						static uint32_t at_line[4096];
-						const char *klog = (const char *)loader_ctx[CTX_LOG_PA];
-						uint64_t klog_len = loader_ctx[CTX_LOG_LEN];
-						/* The head has to reach the boot lines: a busy run writes megabytes, and a
-						 * one-megabyte window would begin long after them. Eight megabytes cover a
-						 * whole boot and leave the buffer's own limits alone. */
-						uint64_t start = klog_len > (8u << 20) ? klog_len - (8u << 20) : 0;
-						uint64_t at = start, lines = 0, head, tail, i, w;
-
-						print("\n== THE KERNEL LOG: INTERESTING LINES, FIRST AND LAST ==\n");
-						if (klog != NULL && klog_len > 0) {
-							while (at < klog_len) {
-								uint64_t end = at, n = 0;
-								int keep = 0;
-								char line[224];
-
-								while (end < klog_len && klog[end] != '\n') {
-									if (n < sizeof(line) - 1) {
-										line[n++] = klog[end];
-									}
-									for (w = 0; w < (nwords != 0 ? nwords : sizeof(wanted) / sizeof(wanted[0])) && !keep; w++) {
-										const char *word = nwords != 0 ? words[w] : wanted[w];
-										uint64_t len = 0, j, k;
-
-										while (word[len] != 0) {
-											len++;
-										}
-										for (j = 0; j + len <= n; j++) {
-											for (k = 0; k < len && line[j + k] == word[k]; k++) {
-											}
-											if (k == len) {
-												keep = 1;
-												break;
-											}
-										}
-									}
-									end++;
-								}
-								if (keep && lines < sizeof(at_line) / sizeof(at_line[0])) {
-									at_line[lines++] = (uint32_t)at;
-								}
-								at = end + 1;
-							}
-						}
-						if (lines == 0) {
-							/* Nothing matched: the buffer is not what we think it is.
-							 * Show the tail raw so the screen is never blank. */
-							uint64_t from = klog_len > 3000 ? klog_len - 3000 : 0;
-
-							print("== no line matched: the last %d bytes, raw ==\n", (int)(klog_len - from));
-							for (i = from; i < klog_len; i++) {
-								char c = klog[i];
-
-								put_char((c >= 32 && c < 127) || c == '\n' ? c : '.');
-							}
-							put_char('\n');
-						}
-
-						/* The screen holds about a hundred and ninety lines: show the
-						 * whole sequence while it fits, and only then fold the middle. */
-						head = lines > 150 ? 100 : lines;
-						tail = lines > 150 ? 50 : 0;
-						for (i = 0; i < head + tail; i++) {
-							uint64_t line_at = at_line[i < head ? i : lines - tail + (i - head)];
-							uint64_t n = 0;
-
-							if (i == head) {
-								print("== ... %d lines in between ... ==\n", (int)(lines - head - tail));
-							}
-							while (line_at + n < klog_len && klog[line_at + n] != '\n' && n < 220) {
-								put_char(klog[line_at + n]);
-								n++;
-							}
-							put_char('\n');
-							BS->stall(20000);
-							wdt_pet();
-						}
-						print("== %d interesting lines of the kernel log, of %d bytes ==\n", lines, klog_len - start);
-					}
-					print("\n== END OF LOG: the machine cold resets now ==\n");
-					/*
-					 * Stay here so the host can take the log over the cable ("oem log", then
-					 * "oem done" when it has all of it). The commands are answered from the
-					 * same gadget that survived the run; usb_poll_command() is what "oem run
-					 * park" already does in this state, and it is what makes the waiting
-					 * window useful instead of a screen to photograph.
-					 */
-					print("== the machine holds the log for %d seconds; \"oem done\" resets now ==\n",
-					    loader_wait);
-					for (unsigned k = 0; k < loader_wait && !reset_now; k++) {
-						for (unsigned j = 0; j < 100; j++) {     /* 100 x 10 ms = 1 s */
-							wdt_pet();
-							usb_poll_command();
-							if (reset_now) {
-								break;
-							}
-							BS->stall(10000);
-						}
-					}
-					ST->rt->reset_system(0 /* EfiResetCold */, 0, 0, NULL);
-				}
-			}
+			start_payload(have_cp, cp);
 		} else if (starts_with(cmd, "oem done")) {
 			/* The host has what it came for: reset instead of sitting out the window. */
 			reset_now = 1;
@@ -4850,8 +4934,10 @@ fb_command(char *cmd)
 				splash_choice = (splash_choice + 2) % 3;
 				splash_redraw();
 			} else if (starts_with(arg, "select")) {
-				/* the same choice the power key makes */
-				menu_select();
+				/* the same choice the power key makes; a run it starts answers for itself */
+				if (menu_select(1)) {
+					return;
+				}
 			} else {
 				splash_redraw();
 			}

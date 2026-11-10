@@ -2,7 +2,9 @@
 
 The menu on the boot screen is real: it moves, it is chosen, the choice acts, and
 since 11 November 2026 it answers the phone's own keys — volume up and volume down
-move the highlight, power chooses. The host keeps its commands as a fallback.
+move the highlight, power chooses. Choosing `启动 HackiOS` runs the payload the
+loader holds, so a boot needs no host once the image is in memory. The host keeps
+its commands as a fallback.
 
 All of it is in `xnuloader/loader.c`, in the loader's command loop, and a round of
 testing costs `./xl reload` (about 20 s) plus a framebuffer grab — **no kernel
@@ -14,7 +16,7 @@ upload**.
 |---|---|
 | volume up / `fastboot oem menu up` | `splash_choice = (splash_choice + 2) % 3`, redraw |
 | volume down / `oem menu down` | `splash_choice = (splash_choice + 1) % 3`, redraw |
-| power / `oem menu select` on item 0 (`启动 HackiOS`) | status back to `等待主机连接` |
+| power / `oem menu select` on item 0 (`启动 HackiOS`) | runs the payload: `启动 HackiOS` on the status line, then the kernel; `没有可启动的镜像` if there is no kernel, `先上传 system.apfs` if the cmdline wants `rd=md0` and no root image is in memory |
 | `oem menu select` on item 1 (`诊断`) | prints `diagnostics: display WxH at base, stride, log N bytes, stage P` and shows `诊断` |
 | `oem menu select` on item 2 (`重启到安卓`) | `EfiResetCold` after 0.4 s |
 
@@ -28,21 +30,71 @@ Each press is also written to the loader's log as `keys: volume up`,
 `keys: volume down` or `keys: power`, so a press can be verified from the host with
 `./xl log` even when the screen is not being watched.
 
+## The choice runs the payload
+
+Item 0 is not a decoration any more: it is the same run `oem run` makes. The body of
+that branch was cut out into `start_payload(have_cp, cp)` (`xnuloader/loader.c:4210`)
+and both callers use it — one function, so a key, a host command and the loader's own
+recovery cannot drift apart.
+
+Three rules hold it together:
+
+* **A refusal is better than a panic.** `menu_select()` parses the payload quietly,
+  asks the cmdline whether it wants a root image (`rd=md0`), and refuses with
+  `没有可启动的镜像` or `先上传 system.apfs` instead of starting a kernel that would
+  die in `exec /sbin/launchd`.
+* **A key press is never answered.** The host's command stream must not receive an
+  unsolicited `OKAY`. So `menu_select(from_host)` answers by itself when the host
+  asked, and returns nonzero so the `oem menu` branch does not answer again.
+* **The answer goes out before the run starts.** `start_payload()` may take the USB
+  controller away (or the kernel may reset), and a reply written after that never
+  leaves. Before this, `fastboot oem menu select` sat waiting and then said
+  `usb_read failed` — while the run it asked for had already started.
+
+A run chosen by a key sets `run_park = 0` (it ends in a cold reset, like the host's
+run); a run chosen by the host leaves `run_park` alone, so `XL_PARK=1` still parks the
+loader. Either way, when the kernel returns the loader dumps the kernel log, holds it
+for `loader_wait` (120 s) and then resets; `oem done` resets immediately.
+
+Verified on the device (11 November 2026, mars):
+
+```
+fastboot stage run-payload.bin          OKAY [  1.054s]
+fastboot oem menu select               OKAY [  0.054s]
+...
+resident image at pa fc000000 size 94d94000: it is the root (md0), the payload ramdisk is md1
+kernel returned: log at f7ae89c0, 486336 bytes
+=== init: process 1, started as /redwood/sbin/init ===
+Darwin 22.5.0 iPhone10,3
+```
+
+That is a whole boot, from a choice made on the menu, with the host only watching:
+486 KB of kernel log, init, launchd, SpringBoard's libraries inserted.
+
+What the menu cannot do is conjure an image: a fresh loader holds no payload, so the
+session needs `xl ramdisk userland/system.apfs` (2381 MB, 73 s) and a staged payload
+first. The payload's own ramdisk is `md1`; a payload that carries only `root.apfs`
+and no resident image panics in `exec /sbin/launchd`, which is how this was learned.
+
 ## Where the code is
 
 | anchor | what it is |
 |---|---|
-| `xnuloader/loader.c:3924` | the whole keys block: arbiter, `spmi_read`, debounce, polling |
-| `xnuloader/loader.c:4009` | `spmi_read(channel, reg, bytes, count)` — one SPMI register read |
-| `xnuloader/loader.c:4043` | `arb_channel(id, channels)` — which arbiter channel a PMIC peripheral is on |
-| `xnuloader/loader.c:4084` | `key_identify()` — the peripheral's type/subtype must be what the keys are |
-| `xnuloader/loader.c:4106` | `keys_start()` — once, after the splash, before the payload is parsed |
-| `xnuloader/loader.c:4197` | `key_look()` — the debounce |
-| `xnuloader/loader.c:4221` | `keys_poll()` — one look at both PMIC peripherals |
-| `xnuloader/loader.c:4256` | `keys_service()` — at most 20 looks a second, then the menu acts |
-| `xnuloader/loader.c:4324` | the call in `usb_wait()`, guarded by `keys_live` |
-| `xnuloader/loader.c:5038`, `:5050` | `keys_live` is set only around the waits for a command |
-| `xnuloader/loader.c:5698` | `keys_start()` in `efi_main` |
+| `xnuloader/loader.c:4011` | `spmi_read(channel, reg, bytes, count)` — one SPMI register read |
+| `xnuloader/loader.c:4045` | `arb_channel(id, channels)` — which arbiter channel a PMIC peripheral is on |
+| `xnuloader/loader.c:4086` | `key_identify()` — the peripheral's type/subtype must be what the keys are |
+| `xnuloader/loader.c:4108` | `keys_start()` — once, after the splash, before the payload is parsed |
+| `xnuloader/loader.c:4530` | `key_look()` — the debounce |
+| `xnuloader/loader.c:4554` | `keys_poll()` — one look at both PMIC peripherals |
+| `xnuloader/loader.c:4589` | `keys_service()` — at most 20 looks a second, then the menu acts |
+| `xnuloader/loader.c:4658` | the call in `usb_wait()`, guarded by `keys_live` |
+| `xnuloader/loader.c:5129`, `:5141` | `keys_live` is set only around the waits for a command |
+| `xnuloader/loader.c:5930` | `keys_start()` in `efi_main` |
+| `xnuloader/loader.c:4470` | `menu_select(from_host)` — what a choice does |
+| `xnuloader/loader.c:4210` | `start_payload(have_cp, cp)` — the run itself, shared with `oem run` |
+| `xnuloader/loader.c:4179` | `text_has()` — does the payload's cmdline ask for a root image |
+
+Line numbers drift with every edit; grep the function name rather than trusting them.
 
 The mechanism is the kernel's, cut down: `drivers/input/hakios.buttons.c`.
 

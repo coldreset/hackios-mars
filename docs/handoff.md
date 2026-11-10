@@ -42,8 +42,10 @@ disappears from USB. The working one is `07b428b7…`.
   works; gestures depend on the identity strings (`xnuloader/mkidentity.py`).
 - **Boot menu**: drawn and functional — `fastboot oem menu up|down|select`,
   three items, the choice actually acts (`b435c27`). The phone's own keys drive it
-  too: the loader reads them over SPMI (volume up/down move, power chooses). See
-  `docs/boot-menu.md`.
+  too: the loader reads them over SPMI (volume up/down move, power chooses). The
+  first item now *boots*: it runs the payload the loader holds through the same
+  `start_payload()` the host's `oem run` uses, verified to init and launchd
+  (`486336` bytes of kernel log). See `docs/boot-menu.md`.
 - **Keys**: the kernel reads all three (power, volume up, volume down) over
   SPMI; volume up reaches backboardd as consumer usage `0xE9` (`2ac4a2b`). The
   loader does the same two reads itself, with no PMIC driver of its own.
@@ -66,6 +68,11 @@ disappears from USB. The working one is `07b428b7…`.
   `CollectionsPoster` is never launched.
 - **Chinese UI**: `zh-Hans.lproj` does not exist in the image; needs resources
   from an IPSW.
+- **Boot without a PC**: the menu boots what a *host* staged. Nothing reads a
+  payload or a system image from flash, so every session needs `xl reload` plus
+  `xl ramdisk userland/system.apfs` (2381 MB, 73 s). The thyme port's design is the
+  reference: a 4 GiB `darwin` partition carved off `data`, holding payload, system
+  image and the `/private/var` store, read by the loader itself.
 - **Metal**: `metal=3` gives backboardd a device but 24 calls are unimplemented;
   the GL path is what draws today.
 
@@ -78,6 +85,10 @@ disappears from USB. The working one is `07b428b7…`.
    code does not disassemble (entry point is not code, Thumb `push` density is
    0.06 %, strings are mixed into executable segments). Needs the vendor's
    loader, or a different delivery mechanism.
+4. **Boot without a PC** — put the payload and the 2.4 GB system image in flash
+   and have the loader read them, then the boot menu is a boot menu and not a
+   staging screen. Follows the thyme layout; also the prerequisite for saving
+   `/private/var` between runs.
 
 ## How to work on this without wasting money
 
@@ -95,10 +106,15 @@ disappears from USB. The working one is `07b428b7…`.
   wrapper around `fastboot.exe`, which cannot write to `/mnt/d/...`.
 - **A screenshot is not evidence that the phone's panel shows anything.** The
   framebuffer is written through a cached mapping; only `splash_present()`
-  (`xnuloader/loader.c:5597`) writes it back to the memory the display controller
+  (in `xnuloader/loader.c`) writes it back to the memory the display controller
   scans, and a grab reads back through that same cache. The boot menu passed
   "verification" this way for days while the panel was showing 花屏. For anything
   on the screen, look at the phone.
+- **While a kernel runs, `./xl state` says `fastboot`** — the gadget enumerates and
+  answers nothing (a `getvar` there fails with `AdbWriteEndpointSync failed`). It
+  says `loader` again only after the kernel returns; then the log is held for
+  `loader_wait` (120 s), and `./xl log` takes it. `oem done` resets immediately.
+  Do not read "fastboot" as "the run failed": the run is in progress.
 - Never build with `make kernel` outside `/opt/hackios/hackios`, and always copy
   `drivers/**` into `xnu-src/xnu-8796.121.2/bsd/dev/` afterwards — the kernel is
   compiled from `xnu-src`, not from `drivers`.
