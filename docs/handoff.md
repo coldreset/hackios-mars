@@ -105,3 +105,23 @@ disappears from USB. The working one is `07b428b7…`.
 - Avoid nested quoting through `wsl.exe bash -lc "…"`: write a `.sh` or `.py`
   file and run it, or PowerShell will eat the `$( )`, the quotes and the pipes.
 - After a run the phone sometimes has to be revived with 15 s on the power key.
+
+## Repositories worth checking for progress
+
+The user asked for these to be watched: when one of our own lines makes no
+visible progress for two or three rounds, ask before going out to look, then
+check these.
+
+| repository | why |
+|---|---|
+| `https://github.com/Liquidation0619/hakios-thyme-mi10s` | closest sibling: Xiaomi 10S, same XNU 8796.121.2 / Darwin 22.5 / iOS 16.5, QCA6390 over PCIe/MHI/QRTR/QMI, touch, Adreno 650 on freedreno, persistence |
+| `https://github.com/DBC1349/hackios-mi10ultra` | Mi 10 Ultra, the base thyme was forked from; Adreno 650 + `var_store`/`ufs_write` |
+| `https://github.com/Chengdong-Yu/pong-wifi` | Nothing Phone 2, **QCA6490 on XNU**: PCIe/SMMU/MHI/QMI all up, dies in firmware RDDM |
+| `https://github.com/daimile2/renoir_xnu_bluethooth` | Mi 11 Lite, same QCA6490, Bluetooth over GENI UART works |
+| `https://github.com/UniXNU` | organisation: `Adreno740`, `AdrenoMetal`, `AirNir`, `GopFramebuffer`, `ArmSmmu4K`, `AdrenoPM4`, `AdrenoFirmware`, `RamBlock` |
+| `https://github.com/oosexgang/hakios-sm7325` | the upstream this tree came from (POCO X5 Pro, redwood) |
+
+Their documentation reads directly from
+`https://cdn.jsdelivr.net/gh/UniXNU/UniXNU@main/docs/...`, and the Mesa patches
+from `.../patches/mesa/turnip-darwin-kmd.patch`; `raw.githubusercontent.com`
+and plain `git clone` are blocked from this machine, jsdelivr is not.
