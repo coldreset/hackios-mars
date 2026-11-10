@@ -5584,6 +5584,23 @@ splash_menu(int top, const char *const *items, int count)
 	}
 }
 
+/*
+ * The panel is fed by the display controller, which reads memory and knows nothing of this
+ * core's cache: a pixel written through the cached mapping is not on the screen until its
+ * line has been written back. Without this the panel keeps showing what ABL left in the
+ * buffer, with the lines the cache happened to evict scattered over it — the boot screen
+ * looks like it never loaded, while a "screenshot" (read back through the same cache) is
+ * perfect. That is the trap that hid this: the first version of the menu was checked that
+ * way, so it was never actually seen on the phone.
+ */
+static void
+splash_present(void)
+{
+	if (SCREEN.base != 0 && SCREEN.stride != 0 && SCREEN.height != 0) {
+		clean_dcache(SCREEN.base, SCREEN.base + (uint64_t)SCREEN.stride * SCREEN.height);
+	}
+}
+
 static void
 splash_draw(int progress)
 {
@@ -5615,6 +5632,7 @@ splash_draw(int progress)
 		real_con_out = ST->con_out;   /* parked: the display is the boot screen's */
 		ST->con_out = NULL;
 	}
+	splash_present();
 }
 
 static void
@@ -5641,6 +5659,7 @@ splash_status(const char *line)
 		splash_state[i] = 0;
 	}
 	splash_utf8_center((int)(SCREEN.height * 50 / 100), line, 2, 1, SPLASH_ORANGE);
+	splash_present();
 }
 efi_status EFIAPI
 efi_main(efi_handle image, efi_system_table *st)

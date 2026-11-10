@@ -128,6 +128,39 @@ evidence behind.
 `get_staged` given a Windows path does not work from WSL: the fastboot here is a
 wrapper around `fastboot.exe`, so stage to `/tmp` and copy from there.
 
+## The panel, the cache, and why a screenshot lied
+
+For a while the boot screen was 花屏 on the phone while `xl screenshot` returned a
+perfect menu. Both were true, and the reason is worth keeping:
+
+The loader draws the menu into the framebuffer through the firmware's **cached**
+mapping, and nothing wrote those lines back to DRAM. The display controller reads
+DRAM, so the panel showed what ABL had left in the buffer with the few lines the
+cache happened to evict scattered over it — a screen that looks like it never
+loaded. A screenshot is read back through the very same cache, so it returned the
+picture the loader thought it had. Correct in memory, garbage on glass.
+
+`xnuloader/loader.c:5597` `splash_present()` now writes the whole framebuffer back
+(`dc cvac` over `SCREEN.stride * SCREEN.height`) at the end of `splash_draw()`
+(`:5605`) and of `splash_status()`, which is to say on every change of the screen:
+the first draw, each redraw before a command, each key press, each status line.
+18.4 MB of lines is a few milliseconds, and only when the screen changes.
+
+Two lessons:
+
+- **A screenshot is not evidence that the panel shows anything.** Until this was
+  found, the menu had been "verified" that way: it had never actually been seen on
+  the phone. Look at the phone.
+- Any new code that writes pixels goes through `splash_draw()`/`splash_status()`,
+  or has to call `splash_present()` itself. Nothing else in the loader touches the
+  framebuffer.
+
+What still paints over the splash is u-boot's own `printf` console (the
+`[oosexgang] host: upload / sending N KiB / 20%` lines): the firmware writes the
+same buffer during a fastboot transfer. The loader repaints at the top of the next
+`usb_command_loop` iteration, so those lines flicker during a transfer and are gone
+after it. That is the firmware's, not the menu's.
+
 ## What is verified
 
 Verified on the device (11 November 2026), on mars: the arbiter answers (version
@@ -147,3 +180,14 @@ The highlight went to `诊断` on the first, back to `启动 HackiOS` on the sec
 the third left the status at `等待主机连接` — the three lines say the menu followed
 all three keys. The host's `oem menu up|down|select` was still checked in the same
 session: it moves and selects as before.
+
+The screen itself was looked at, twice: 花屏 before `splash_present()` existed, the
+menu — ring, title, three items, hint, status — after it, and still correct after
+two redraws driven from the host.
+
+The ring's arc (`splash_progress`, 130° when the loader starts) is decorative: no
+progress is fed into it. The `download:` handler (`xnuloader/loader.c:4453`) has
+`total` and `got` in its receive loop (`:4485`–`:4502`), so a live arc would be a
+few lines there — draw the new arc segment and present just the ring's bounding box,
+because a full-screen write-back per update (18 MB) is not affordable at transfer
+speed.

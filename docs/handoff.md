@@ -93,6 +93,12 @@ disappears from USB. The working one is `07b428b7…`.
   from another run.
 - `fastboot get_staged` must be given a `/tmp` path: the fastboot in WSL is a
   wrapper around `fastboot.exe`, which cannot write to `/mnt/d/...`.
+- **A screenshot is not evidence that the phone's panel shows anything.** The
+  framebuffer is written through a cached mapping; only `splash_present()`
+  (`xnuloader/loader.c:5597`) writes it back to the memory the display controller
+  scans, and a grab reads back through that same cache. The boot menu passed
+  "verification" this way for days while the panel was showing 花屏. For anything
+  on the screen, look at the phone.
 - Never build with `make kernel` outside `/opt/hackios/hackios`, and always copy
   `drivers/**` into `xnu-src/xnu-8796.121.2/bsd/dev/` afterwards — the kernel is
   compiled from `xnu-src`, not from `drivers`.
