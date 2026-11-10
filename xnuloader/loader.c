@@ -3920,6 +3920,367 @@ usb_start(void)
 	return 1;
 }
 
+/* ------------------------------------------------------------------------ */
+/* The keys: power, volume up and volume down, read over SPMI               */
+
+/*
+ * The menu is on the screen while the loader waits for the host, so the phone's own
+ * keys must be able to drive it. The loader has no PMIC driver; this is the part of the
+ * kernel's buttons driver that is needed to see a key (drivers/input/hakios.buttons.c),
+ * cut down to two reads. Neither key is a pin of the SoC: they are inputs of two PMICs,
+ * which sit on the SPMI bus. The way to that bus is the SoC's PMIC arbiter, which keeps
+ * one "observer" register block per peripheral for this system: a read is the command
+ * word written there, and the answer read back from the two registers after it.
+ *
+ *   power        KPDPWR_N of the power-on block of the PMK8350   (slave 0, peripheral 0x13)
+ *   volume down  RESIN_N   of the same block
+ *   volume up    GPIO6 of the PM7325, pulled up; the key pulls it low (slave 1, peripheral 0x8d)
+ *
+ * Only reads are issued. The PMICs make the phone's supplies, and the firmware leaves
+ * these inputs as the keys need them: a write is not needed and is not made.
+ *
+ * The loader is one thread and nothing else uses the bus while it waits, so there is no
+ * lock, as there is in the kernel: a read that does not answer within 2 ms is counted,
+ * and after a hundred of them the keys are given up rather than hang the boot.
+ */
+#define ARB_CORE_PHYS      0x0c440000ULL    /* the version, and which peripheral each channel is */
+#define ARB_CNFG_PHYS      0x0c40a000ULL    /* which system may write through each channel */
+#define ARB_OBSERVER_PHYS  0x0e600000ULL    /* the command and the answer of a transfer */
+#define ARB_SYSTEM         0               /* this system's observers: the device tree's "qcom,ee" */
+#define ARB_VERSION        0x000
+#define ARB_FEATURES       0x004            /* [10:0] the number of channels */
+#define ARB_VERSION_5      0x50000000u
+#define ARB_VERSION_7      0x70000000u
+#define ARB_MAX_CHANNELS   512
+#define ARB_CHANNEL(n)     (0x900 + 4 * (n))    /* core: [19:8] slave and peripheral of channel n */
+#define ARB_OWNER(n)       (0x700 + 4 * (n))    /* cnfg: [2:0] the system that may write through it */
+#define ARB_OBSERVER       0x80                 /* bytes per channel in this system's observer row */
+#define ARB_NO_CHANNEL     ((unsigned)-1)
+
+#define OBSERVER_COMMAND   0x00
+#define OBSERVER_STATUS    0x08
+#define OBSERVER_DATA0     0x18                 /* the bytes read, the first in the lowest byte */
+#define OBSERVER_DATA1     0x1c
+#define SPMI_DONE          0x1
+#define SPMI_FAILURE       0x2
+#define SPMI_DENIED        0x4
+#define SPMI_DROPPED       0x8
+#define SPMI_READ          (1u << 27)           /* extended register read long: [11:4] reg, [2:0] bytes - 1 */
+#define SPMI_TIMEOUT_US    2000                 /* a read takes some tens of microseconds */
+
+#define PON_ID             0x013            /* slave << 8 | peripheral: the PMK8350's power-on block */
+#define PIN_ID             0x18d            /* slave << 8 | peripheral: GPIO6 of the PM7325 */
+#define REG_TYPE           0x04
+#define REG_SUBTYPE        0x05
+#define REG_RT_STATUS      0x10             /* the inputs as they are now */
+#define PON_TYPE           0x01
+#define PON_SUBTYPE_HLOS   0x09
+#define PON_KPDPWR         0x80             /* in the real-time status: 1 while the key is held */
+#define PON_RESIN          0x40
+#define GPIO_TYPE          0x10
+#define GPIO_SUBTYPE_LO    0x10             /* 0x10 to 0x13: one layout */
+#define GPIO_SUBTYPE_HI    0x13
+#define GPIO_LEVEL         0x01             /* in the status: 1 high (released), 0 low (held) */
+
+enum {
+	KEY_NONE,
+	KEY_UP,
+	KEY_DOWN,
+	KEY_CONFIRM,
+};
+
+static uint32_t
+arb_rd(uint64_t address)
+{
+	return *(volatile uint32_t *)(uintptr_t)address;
+}
+
+static void
+arb_wr(uint64_t address, uint32_t value)
+{
+	*(volatile uint32_t *)(uintptr_t)address = value;
+}
+
+/*
+ * Read `count` (1 to 8) registers of the peripheral on `channel`, from register `reg` on.
+ * Returns NULL, or what went wrong.
+ */
+static const char *
+spmi_read(unsigned channel, uint8_t reg, uint8_t *bytes, uint32_t count)
+{
+	uint64_t at = ARB_OBSERVER_PHYS + 0x10000ULL * ARB_SYSTEM + (uint64_t)ARB_OBSERVER * channel;
+	uint64_t freq = READ_SYSREG(CNTFRQ_EL0), began = READ_SYSREG(CNTVCT_EL0);
+	uint32_t status, data[2];
+
+	arb_wr(at + OBSERVER_COMMAND, SPMI_READ | (uint32_t)reg << 4 | (count - 1));
+	do {
+		status = arb_rd(at + OBSERVER_STATUS);
+	} while ((status & SPMI_DONE) == 0 &&
+	    (READ_SYSREG(CNTVCT_EL0) - began) * 1000000ULL < (uint64_t)SPMI_TIMEOUT_US * freq);
+	data[0] = arb_rd(at + OBSERVER_DATA0);
+	data[1] = count > 4 ? arb_rd(at + OBSERVER_DATA1) : 0;
+
+	if ((status & SPMI_DONE) == 0) {
+		return "no answer from the arbiter";
+	}
+	if (status & SPMI_DENIED) {
+		return "the arbiter refuses";
+	}
+	if (status & SPMI_FAILURE) {
+		return "the transfer failed";
+	}
+	if (status & SPMI_DROPPED) {
+		return "the transfer was dropped";
+	}
+	for (uint32_t i = 0; i < count; i++) {
+		bytes[i] = (uint8_t)(data[i / 4] >> (8 * (i % 4)));
+	}
+	return NULL;
+}
+
+/* Which channel is that peripheral's: the first, unless one of them is ours to write through. */
+static unsigned
+arb_channel(uint16_t id, unsigned channels)
+{
+	unsigned found = ARB_NO_CHANNEL;
+
+	for (unsigned n = 0; n < channels; n++) {
+		uint32_t map = arb_rd(ARB_CORE_PHYS + ARB_CHANNEL(n));
+
+		if (map == 0 || ((map >> 8) & 0xfff) != id) {
+			continue;
+		}
+		if (found == ARB_NO_CHANNEL || (arb_rd(ARB_CNFG_PHYS + ARB_OWNER(n)) & 7) == ARB_SYSTEM) {
+			found = n;
+		}
+	}
+	return found;
+}
+
+static struct {
+	const char *name;
+	uint16_t id;
+	unsigned channel;
+	int ok;                 /* found, and what its type register says it is */
+} pon_dev = { .name = "the power-on block", .id = PON_ID }, pin_dev = { .name = "GPIO6", .id = PIN_ID };
+
+static struct key_input {
+	const char *name;
+	int event;              /* what a press of it means to the menu */
+	int usable;
+	int live;               /* it has been seen released, so a press can be believed */
+	int last, down;
+} power_key = { .name = "power", .event = KEY_CONFIRM },
+  volup_key = { .name = "volume up", .event = KEY_UP },
+  voldown_key = { .name = "volume down", .event = KEY_DOWN };
+
+static int keys_usable;                 /* at least one of the three can be read */
+static unsigned keys_failures;          /* reads that did not answer */
+static uint64_t keys_last_look;         /* CNTVCT of the last look */
+static int keys_live;                   /* the boot menu is up, waiting for a key */
+
+/* Does the peripheral on `channel` say it is what the registers above are those of? */
+static int
+key_identify(const char *name, unsigned channel, uint8_t type, uint8_t subtype_lo, uint8_t subtype_hi)
+{
+	const char *problem;
+	uint8_t is[2];
+
+	problem = spmi_read(channel, REG_TYPE, is, 2);
+	if (problem != NULL) {
+		print("keys: %s: %s\n", name, problem);
+		return 0;
+	}
+	if (is[0] != type || is[1] < subtype_lo || is[1] > subtype_hi) {
+		print("keys: %s says type %x, subtype %x: not what the keys are, left alone\n", name, is[0], is[1]);
+		return 0;
+	}
+	return 1;
+}
+
+/*
+ * Find the two peripherals once, before the menu is shown: the arbiter's version, their
+ * channels, what they say they are, and which keys read as held now.
+ */
+static void
+keys_start(void)
+{
+	uint32_t version, channels;
+	uint8_t status;
+
+	if (PLAT != &platform_redwood && PLAT != &platform_mars) {
+		return;                 /* no PMIC arbiter where this runs (QEMU) */
+	}
+	version = arb_rd(ARB_CORE_PHYS + ARB_VERSION);
+	channels = arb_rd(ARB_CORE_PHYS + ARB_FEATURES) & 0x7ff;
+	if (version < ARB_VERSION_5 || version >= ARB_VERSION_7) {
+		print("keys: the PMIC arbiter is version %x, which this loader does not know: "
+		    "the menu stays on the host's commands\n", version);
+		return;
+	}
+	if (channels == 0 || channels > ARB_MAX_CHANNELS) {
+		channels = ARB_MAX_CHANNELS;
+	}
+	print("keys: PMIC arbiter version %x, %d channels\n", version, channels);
+
+	pon_dev.channel = arb_channel(pon_dev.id, channels);
+	pin_dev.channel = arb_channel(pin_dev.id, channels);
+	if (pon_dev.channel == ARB_NO_CHANNEL) {
+		print("keys: no channel is %s (slave %d, peripheral %x)\n", pon_dev.name, pon_dev.id >> 8, pon_dev.id & 0xff);
+	} else {
+		pon_dev.ok = key_identify(pon_dev.name, pon_dev.channel, PON_TYPE, PON_SUBTYPE_HLOS, PON_SUBTYPE_HLOS);
+	}
+	if (pin_dev.channel == ARB_NO_CHANNEL) {
+		print("keys: no channel is %s (slave %d, peripheral %x)\n", pin_dev.name, pin_dev.id >> 8, pin_dev.id & 0xff);
+	} else {
+		pin_dev.ok = key_identify(pin_dev.name, pin_dev.channel, GPIO_TYPE, GPIO_SUBTYPE_LO, GPIO_SUBTYPE_HI);
+	}
+
+	/* What they say now: a key read as held from the start is not believed until it is seen released. */
+	if (pon_dev.ok) {
+		if (spmi_read(pon_dev.channel, REG_RT_STATUS, &status, 1) == NULL) {
+			power_key.usable = voldown_key.usable = 1;
+			power_key.last = (status & PON_KPDPWR) != 0;
+			voldown_key.last = (status & PON_RESIN) != 0;
+		} else {
+			pon_dev.ok = 0;
+		}
+	}
+	if (pin_dev.ok) {
+		if (spmi_read(pin_dev.channel, REG_RT_STATUS, &status, 1) == NULL) {
+			volup_key.usable = 1;
+			volup_key.last = (status & GPIO_LEVEL) == 0;
+		} else {
+			pin_dev.ok = 0;
+		}
+	}
+	power_key.live = power_key.usable && !power_key.last;
+	volup_key.live = volup_key.usable && !volup_key.last;
+	voldown_key.live = voldown_key.usable && !voldown_key.last;
+
+	keys_usable = power_key.usable || volup_key.usable || voldown_key.usable;
+	keys_last_look = READ_SYSREG(CNTVCT_EL0);
+	if (!keys_usable) {
+		print("keys: none of the three can be read: the menu stays on the host's commands\n");
+		return;
+	}
+	print("keys: %s%s%s on channels %d and %d: volume up and down move the menu, power chooses\n",
+	    power_key.usable ? "power " : "", volup_key.usable ? "volume up " : "", voldown_key.usable ? "volume down" : "",
+	    pon_dev.channel, pin_dev.channel);
+}
+
+/* The same key menu the host drives with "oem menu select". */
+static void
+menu_select(void)
+{
+	if (splash_choice == 1) {
+		print("diagnostics: display %dx%d at %x, stride %d, log %d bytes, stage %d\n",
+		    SCREEN.width, SCREEN.height, SCREEN.base, SCREEN.stride, staged_len, splash_progress);
+		splash_status("诊断");
+	} else if (splash_choice == 2) {
+		splash_status("重启到安卓");
+		splash_redraw();
+		BS->stall(400000);
+		ST->rt->reset_system(0 /* EfiResetCold */, 0, 0, NULL);
+	} else {
+		splash_status("等待主机连接");
+	}
+	splash_redraw();
+}
+
+/*
+ * One look at one key: a press is believed when two looks in a row say so, and only after
+ * the key has been seen released (a pin that is not what it was taken for must not become
+ * a key held down for the whole session). Returns the menu event of this look, if any.
+ */
+static int
+key_look(struct key_input *key, int pressed)
+{
+	int steady = (pressed == key->last);
+
+	key->last = pressed;
+	if (!key->usable || !steady) {
+		return KEY_NONE;
+	}
+	if (!key->live) {
+		if (!pressed) {
+			key->live = 1;
+			print("keys: %s is released now: it works from here on\n", key->name);
+		}
+		return KEY_NONE;
+	}
+	if (pressed == key->down) {
+		return KEY_NONE;
+	}
+	key->down = pressed;
+	return pressed ? key->event : KEY_NONE;
+}
+
+/* One look at both peripherals. */
+static int
+keys_poll(void)
+{
+	uint8_t status;
+	int event = KEY_NONE, e;
+
+	if (pon_dev.ok) {
+		if (spmi_read(pon_dev.channel, REG_RT_STATUS, &status, 1) == NULL) {
+			if ((e = key_look(&power_key, (status & PON_KPDPWR) != 0)) != KEY_NONE) {
+				event = e;
+			}
+			if ((e = key_look(&voldown_key, (status & PON_RESIN) != 0)) != KEY_NONE) {
+				event = e;
+			}
+		} else {
+			keys_failures++;
+		}
+	}
+	if (pin_dev.ok) {
+		if (spmi_read(pin_dev.channel, REG_RT_STATUS, &status, 1) == NULL) {
+			if ((e = key_look(&volup_key, (status & GPIO_LEVEL) == 0)) != KEY_NONE) {
+				event = e;
+			}
+		} else {
+			keys_failures++;
+		}
+	}
+	if (keys_failures > 100) {
+		keys_usable = 0;
+		print("keys: the arbiter has not answered %d times: the menu stays on the host's commands\n", keys_failures);
+	}
+	return event;
+}
+
+/* Called from the wait loop: at most twenty looks a second, and only when the menu is up. */
+static void
+keys_service(void)
+{
+	uint64_t freq = READ_SYSREG(CNTFRQ_EL0), now = READ_SYSREG(CNTVCT_EL0);
+	int event;
+
+	/*
+	 * Not while a kernel runs: it is on another core, its own buttons driver uses the
+	 * arbiter (and the loader has no lock to share with it), and the screen is its own.
+	 */
+	if (!keys_usable || run_active || now - keys_last_look < freq / 20) {
+		return;
+	}
+	keys_last_look = now;
+	event = keys_poll();
+	if (event != KEY_NONE) {
+		print("keys: %s\n", event == KEY_UP ? "volume up" : event == KEY_DOWN ? "volume down" : "power");
+	}
+	if (event == KEY_UP) {
+		splash_choice = (splash_choice + 2) % 3;
+		splash_redraw();
+	} else if (event == KEY_DOWN) {
+		splash_choice = (splash_choice + 1) % 3;
+		splash_redraw();
+	} else if (event == KEY_CONFIRM) {
+		menu_select();
+	}
+}
+
 /*
  * Pump controller events until a transfer on `endpoint` finishes.
  * Returns the byte count, or -1 if the transfer was cancelled or the cable
@@ -3959,6 +4320,9 @@ usb_wait(uint8_t endpoint)
 		}
 		if (msg == UsbDeviceEventTransferNotification && data.transfer.endpoint_index == endpoint) {
 			return data.transfer.status == UsbDeviceTransferStatusCompleteOK ? (int64_t)data.transfer.bytes_completed : -1;
+		}
+		if (keys_live) {
+			keys_service();         /* the menu is up: a key may be pressed while we wait */
 		}
 		if (READ_SYSREG(CNTVCT_EL0) - last_pet > freq) {
 			last_pet = READ_SYSREG(CNTVCT_EL0);
@@ -4476,24 +4840,16 @@ fb_command(char *cmd)
 
 			if (starts_with(arg, "down")) {
 				splash_choice = (splash_choice + 1) % 3;
+				splash_redraw();
 			} else if (starts_with(arg, "up")) {
 				splash_choice = (splash_choice + 2) % 3;
+				splash_redraw();
 			} else if (starts_with(arg, "select")) {
-				if (splash_choice == 1) {
-					print("diagnostics: display %dx%d at %x, stride %u, log %u bytes, stage %d\n",
-					    SCREEN.width, SCREEN.height, SCREEN.base, SCREEN.stride,
-					    staged_len, splash_progress);
-					splash_status("诊断");
-				} else if (splash_choice == 2) {
-					splash_status("重启到安卓");
-					splash_redraw();
-					BS->stall(400000);
-					ST->rt->reset_system(0 /* EfiResetCold */, 0, 0, NULL);
-				} else {
-					splash_status("等待主机连接");
-				}
+				/* the same choice the power key makes */
+				menu_select();
+			} else {
+				splash_redraw();
 			}
-			splash_redraw();
 			fb_reply("OKAY", "menu");
 		} else if (starts_with(cmd, "oem log")) {
 			/*
@@ -4679,13 +5035,21 @@ usb_command_loop(void)
 		int64_t n;
 
 		if (!usb_connected) {
+			keys_live = 1;
 			usb_wait(0xff); /* returns on the next cable state change */
+			keys_live = 0;
 			continue;
 		}
 		if (screen_quiet) {
 			splash_redraw();   /* put the boot screen back over whatever was printed */
 		}
+		/*
+		 * The keys are watched only while the loader waits for a command: a key pressed
+		 * half-way through a download must not reset the phone under the host.
+		 */
+		keys_live = 1;
 		n = usb_rx(usb_rx_buf, 511);
+		keys_live = 0;
 		if (n <= 0) {
 			continue;
 		}
@@ -5331,6 +5695,7 @@ efi_main(efi_handle image, efi_system_table *st)
 
 	install_exception_hook();
 	wdt_arm();
+	keys_start();           /* the phone's own keys, once the menu is on the screen */
 
 	int have_payload = parse_payload(&pi, 0);
 	if (have_payload && pi.usb_mode && usb_start()) {

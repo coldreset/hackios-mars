@@ -41,9 +41,12 @@ disappears from USB. The working one is `07b428b7…`.
 - **Touch**: ST FingerTip FTM5 over SPI (`drivers/input/hakios.focaltech.c`),
   works; gestures depend on the identity strings (`xnuloader/mkidentity.py`).
 - **Boot menu**: drawn and functional — `fastboot oem menu up|down|select`,
-  three items, the choice actually acts (`b435c27`). See `docs/boot-menu.md`.
+  three items, the choice actually acts (`b435c27`). The phone's own keys drive it
+  too: the loader reads them over SPMI (volume up/down move, power chooses). See
+  `docs/boot-menu.md`.
 - **Keys**: the kernel reads all three (power, volume up, volume down) over
-  SPMI; volume up reaches backboardd as consumer usage `0xE9` (`2ac4a2b`).
+  SPMI; volume up reaches backboardd as consumer usage `0xE9` (`2ac4a2b`). The
+  loader does the same two reads itself, with no PMIC driver of its own.
 - **Wi-Fi up to the board-data step**: PCIe, MHI, QRTR, QMI, the memory
   handshake (firmware answers `result=0`), the regulatory database downloads in
   four acknowledged pieces.
@@ -65,19 +68,12 @@ disappears from USB. The working one is `07b428b7…`.
   from an IPSW.
 - **Metal**: `metal=3` gives backboardd a device but 24 calls are unimplemented;
   the GL path is what draws today.
-- **Boot menu keys**: the loader has no SPMI. This u-boot build has
-  `drivers/spmi/spmi-msm.c` in the tree but no SPMI options in
-  `u-boot/build-mars/.config` and no PMIC driver at all.
 
 ## Next steps, in the order that pays off
 
-1. **Keys drive the boot menu** — `docs/boot-menu.md` lists the exact anchors in
-   `drivers/input/hakios.buttons.c` to port (`spmi_read` at `:148`, the PON block
-   at `:135`, the status registers at `:320`/`:330`). Testing is cheap: the menu
-   lives in the loader, so a round is `./xl reload` plus a framebuffer grab.
-2. **Wallpaper crash** — find why `CollectionsPoster` is not launched.
-3. **Chinese resources** — needs an IPSW the user does not have; park it.
-4. **Wi-Fi** — blocked on understanding why the firmware stops after four
+1. **Wallpaper crash** — find why `CollectionsPoster` is not launched.
+2. **Chinese resources** — needs an IPSW the user does not have; park it.
+3. **Wi-Fi** — blocked on understanding why the firmware stops after four
    messages. Static analysis of `amss.bin` failed: it is an ELF32/ARM image whose
    code does not disassemble (entry point is not code, Thumb `push` density is
    0.06 %, strings are mixed into executable segments). Needs the vendor's

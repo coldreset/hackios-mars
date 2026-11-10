@@ -1,74 +1,149 @@
-# Boot menu: where it stands, and how to drive it by the phone's own keys
+# Boot menu: the phone's own keys drive it
 
-The menu on the boot screen is not a picture any more. It moves, it is chosen,
-and the choice does something (`b435c27`, verified on the device by reading the
-framebuffer back over USB).
+The menu on the boot screen is real: it moves, it is chosen, the choice acts, and
+since 11 November 2026 it answers the phone's own keys — volume up and volume down
+move the highlight, power chooses. The host keeps its commands as a fallback.
 
-What is missing is the last step: the physical keys. This note is the handoff
-for that step, so it does not have to be rediscovered.
+All of it is in `xnuloader/loader.c`, in the loader's command loop, and a round of
+testing costs `./xl reload` (about 20 s) plus a framebuffer grab — **no kernel
+upload**.
 
-## What the menu does today
+## What drives the menu
 
-Host commands, handled in `xnuloader/loader.c` in the `oem menu` branch of the
-command loop:
-
-| command | effect |
+| input | effect |
 |---|---|
-| `fastboot oem menu up` / `down` | moves `splash_choice` through 3 items and redraws |
-| `oem menu select` on item 1 (`诊断`) | prints `diagnostics: display WxH at base, stride, log N bytes, stage P` |
+| volume up / `fastboot oem menu up` | `splash_choice = (splash_choice + 2) % 3`, redraw |
+| volume down / `oem menu down` | `splash_choice = (splash_choice + 1) % 3`, redraw |
+| power / `oem menu select` on item 0 (`启动 HackiOS`) | status back to `等待主机连接` |
+| `oem menu select` on item 1 (`诊断`) | prints `diagnostics: display WxH at base, stride, log N bytes, stage P` and shows `诊断` |
 | `oem menu select` on item 2 (`重启到安卓`) | `EfiResetCold` after 0.4 s |
-| `oem menu select` on item 0 (`启动 HackiOS`) | back to `等待主机连接` |
 
-Drawing is `splash_draw()` → `splash_menu()`; the state is `static int splash_choice`
-(declared next to the `splash_status` prototype so the command loop can see it).
-Status text must only use glyphs present in `xnuloader/cjk.h` — anything else
-renders as gaps.
+Both paths end in the same two places: `splash_choice` for movement, and
+`menu_select()` (`xnuloader/loader.c:4174`) for the choice, so a key and a host
+command cannot drift apart. Drawing is `splash_draw()` → `splash_menu()`; status
+text must only use glyphs present in `xnuloader/cjk.h` — anything else renders as
+gaps.
 
-## Why the keys need work
+Each press is also written to the loader's log as `keys: volume up`,
+`keys: volume down` or `keys: power`, so a press can be verified from the host with
+`./xl log` even when the screen is not being watched.
 
-`xnuloader/loader.c` has no SPMI and no PMIC code. This u-boot build has
-`drivers/spmi/spmi-msm.c` in the tree but no SPMI options in
-`u-boot/build-mars/.config`, no `drivers/pmic` content, and no `pm8xxx`/`qpnp`
-driver at all. The loader is a UEFI application on top of u-boot, so it cannot
-reach the controller through u-boot either.
-
-The protocol, however, is already solved inside the kernel:
+## Where the code is
 
 | anchor | what it is |
 |---|---|
-| `drivers/input/hakios.buttons.c:127` | all transfers serialise through `hakios_spmi_lock()` / `hakios_spmi_unlock()` (defined in `drivers/core/hakios.platform.c`) |
-| `drivers/input/hakios.buttons.c:135` | `static struct peripheral pon = { .name = "the PMK8350's power-on block", .id = 0x013 };` — registers `0x1300` of slave 0 |
-| `drivers/input/hakios.buttons.c:148` | `spmi_read(struct peripheral *p, uint8_t reg, uint8_t *bytes, uint32_t count)` — the function to port |
-| `drivers/input/hakios.buttons.c:320` | power key: `REG_RT_STATUS` of the PON block |
-| `drivers/input/hakios.buttons.c:330` | volume keys: same register of the PM7325 GPIO block |
-| `drivers/input/hakios.buttons.c:367` | `pon_inputs()` reads `0x1310`–`0x1319` (status + interrupt setup) |
+| `xnuloader/loader.c:3924` | the whole keys block: arbiter, `spmi_read`, debounce, polling |
+| `xnuloader/loader.c:4009` | `spmi_read(channel, reg, bytes, count)` — one SPMI register read |
+| `xnuloader/loader.c:4043` | `arb_channel(id, channels)` — which arbiter channel a PMIC peripheral is on |
+| `xnuloader/loader.c:4084` | `key_identify()` — the peripheral's type/subtype must be what the keys are |
+| `xnuloader/loader.c:4106` | `keys_start()` — once, after the splash, before the payload is parsed |
+| `xnuloader/loader.c:4197` | `key_look()` — the debounce |
+| `xnuloader/loader.c:4221` | `keys_poll()` — one look at both PMIC peripherals |
+| `xnuloader/loader.c:4256` | `keys_service()` — at most 20 looks a second, then the menu acts |
+| `xnuloader/loader.c:4324` | the call in `usb_wait()`, guarded by `keys_live` |
+| `xnuloader/loader.c:5038`, `:5050` | `keys_live` is set only around the waits for a command |
+| `xnuloader/loader.c:5698` | `keys_start()` in `efi_main` |
 
-The device tree node is `qcom,spmi@c440000`; on mars the PON block is the
-PMK8350 and the volume keys hang off the PM7325's GPIOs.
+The mechanism is the kernel's, cut down: `drivers/input/hakios.buttons.c`.
 
-## The order to do it in
+## How the reads work
 
-1. Add `spmi_read()` to `xnuloader/loader.c`, copying `hakios.buttons.c:148`;
-   replace the kernel's lock with a poll of the controller's busy bit, since the
-   loader is single-threaded and there is nothing to serialise against.
-2. Add `keys_poll()` returning none / up / down / confirm; read the two
-   `REG_RT_STATUS` registers every 50 ms and debounce the same way the kernel
-   does.
-3. Call `keys_poll()` from the wait loop and feed the result into the existing
-   `splash_choice` machinery — no new drawing code is needed.
-4. Keep `oem menu` as the host fallback.
+Neither key is a pin of the SoC. Both are inputs of PMICs on the SPMI bus, and the
+way to that bus is the SoC's PMIC arbiter at `qcom,spmi@c440000`:
 
-## How to test it cheaply
+- `0x0c440000` — the arbiter's own registers: version at `+0x000` (`0x50020000` on
+  mars), channel count at `+0x004` (`512`), and for channel *n*, `+0x900 + 4n` says
+  which slave and peripheral it is ([19:8]).
+- `0x0c40a000` — which execution environment may write through each channel;
+  `+0x700 + 4n` ([2:0]).
+- `0x0e600000` + `0x10000 × 0` + `0x80 × channel` — this system's observer block:
+  command at `+0x00`, status at `+0x08`, the data read at `+0x18`/`+0x1c`.
 
-The menu lives in the loader, so a round costs `./xl reload` (about 20 s) and a
-framebuffer grab — **no 2.3 GB upload**:
+A read is the command word `(1 << 27) | reg << 4 | (count - 1)` written to the
+command register, then a poll of the status register until bit 0 (`DONE`) is set,
+then the two data words, deepest byte first. `DENIED` (bit 2), `FAILURE` (bit 1) and
+`DROPPED` (bit 3) are reported as failures, not as key states.
+
+The keys:
+
+| key | peripheral | register | bit |
+|---|---|---|---|
+| power | PMK8350 power-on block, slave 0 peripheral `0x13` (channel 83 on mars) | `0x10` (`REG_RT_STATUS`) | `0x80` (`KPDPWR`), set while held |
+| volume down | same block | `0x10` | `0x40` (`RESIN`), set while held |
+| volume up | PM7325 GPIO6, slave 1 peripheral `0x8d` (channel 117 on mars) | `0x10` | `0x01` (`LEVEL`), **clear** while held |
+
+Only reads are issued, at init and then while the loader waits. The PMICs make the
+phone's supplies, and the firmware leaves these inputs as the keys need them; the
+loader does not write to them.
+
+## Rules it follows (each one learned the hard way in the kernel)
+
+- **20 looks a second**, not 50: a hand is not faster, and every look is two bus
+  transactions. `freq / 20` of `CNTVCT` is the interval.
+- **A press needs two identical looks in a row** (`key_look()`), and is acted on
+  when it becomes pressed, not while it stays pressed.
+- **A key held from boot is not believed.** If a key reads as held when
+  `keys_start()` runs, it is ignored until it has been seen released, and the
+  release is logged (`keys: … is released now: it works from here on`). This
+  matters when the phone is started with a finger already on volume down to reach
+  fastboot.
+- **2 ms per read, then the read is a failure**, not a hang: a failed read leaves
+  the other key working; more than a hundred failures and the keys are given up for
+  the session with a line in the log, rather than a menu that stutters.
+- **Keys are watched only while the loader waits for a command** — the idle
+  `usb_rx` and the wait for the cable. Not while a command runs, so a key pressed
+  half-way through a download cannot reset the phone under the host.
+- **Not while a kernel runs** (`run_active`): the kernel is on another core, its own
+  buttons driver owns the arbiter, the loader has no lock to share with it, and the
+  screen belongs to the kernel.
+- **No lock at all**: the loader is one thread and nothing else uses the bus while
+  it waits for the host.
+- `keys_start()` returns silently on QEMU (`PLAT` is neither `redwood` nor `mars`),
+  where there is no arbiter to read.
+
+## How to test it
 
 ```
-./xl reload
-fastboot oem menu down          # or press the key
-fastboot oem screenshot
-fastboot get_staged /tmp/s.bin  # write to /tmp, copy to Windows afterwards
+./xl reload                     # ~20-25 s, ends with the menu on the screen
+./xl log                        # "keys: PMIC arbiter version …" and the two channels
+# press volume down, then volume up, then power
+./xl log                        # "keys: volume down", "keys: volume up", "keys: power"
+./xl screenshot logs/menu.png   # the highlight follows the presses
+fastboot oem menu down          # the host still works
 ```
+
+The startup lines to expect on mars, from the device:
+
+```
+keys: PMIC arbiter version 50020000, 512 channels
+keys: power volume up volume down on channels 83 and 117: volume up and down move the menu, power chooses
+```
+
+If one of the two peripherals is not found, or its type/subtype is not what the
+keys are, the loader says which and carries on with whatever it can read; when
+nothing can be read it says so and the menu stays on the host's commands. All of
+these are one line each in the log, so a phone that behaves oddly leaves the
+evidence behind.
 
 `get_staged` given a Windows path does not work from WSL: the fastboot here is a
 wrapper around `fastboot.exe`, so stage to `/tmp` and copy from there.
+
+## What is verified
+
+Verified on the device (11 November 2026), on mars: the arbiter answers (version
+`0x50020000`, 512 channels), the PON block is on channel 83 and the PM7325 GPIO on
+channel 117, both identify as what the keys are, all three keys read as usable, and
+no read failed in minutes of 20 Hz polling.
+
+Then a person pressed each key once. The log, in the order the presses were made:
+
+```
+keys: volume down
+keys: volume up
+keys: power
+```
+
+The highlight went to `诊断` on the first, back to `启动 HackiOS` on the second, and
+the third left the status at `等待主机连接` — the three lines say the menu followed
+all three keys. The host's `oem menu up|down|select` was still checked in the same
+session: it moves and selects as before.
