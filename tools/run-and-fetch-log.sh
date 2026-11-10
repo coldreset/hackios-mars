@@ -8,12 +8,12 @@ if [ "$1" != "noflash" ]; then
   ./xl ramdisk userland/system.apfs 2>&1 | tail -1
   xnuloader/mkpayload.py -o /tmp/usb-payload.bin \
     kernel=hakios-kernel ramdisk=userland/root.apfs \
-    --cmdline "debug=0x8 cpus=8 rd=md0 touchscreen=1 buttons=1 logwords=button loader_return_after=150 loader_wait=600" >/dev/null
+    --cmdline "debug=0x8 cpus=8 rd=md0 logwords=button,panic loader_return_after=150 loader_wait=600" >/dev/null
   fastboot stage /tmp/usb-payload.bin >/dev/null 2>&1
   fastboot oem run >/dev/null 2>&1
 fi
 len=0
-for i in $(seq 1 150); do
+for i in $(seq 1 420); do
   r=$(timeout 8 fastboot getvar result 2>/dev/null | tr -d '\r' | tr '\n' ' ')
   case "$r" in
     *returned*)
@@ -21,7 +21,8 @@ for i in $(seq 1 150); do
       echo "result: $r"
       break;;
   esac
-  sleep 2
+  [ -n "$r" ] && echo "last seen: $r"
+  sleep 1
 done
 echo "loader says $len bytes"
 : > /tmp/klog.bin

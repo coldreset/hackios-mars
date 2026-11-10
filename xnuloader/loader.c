@@ -12,6 +12,8 @@
 #include "efi.h"
 #include "identity.h"         /* who Darwin shall think we are: from the iPhone's own device tree (mkidentity.py) */
 
+static void usb_restart_after_kernel(void);
+
 /* ------------------------------------------------------------------------ */
 /* Fixed conventions shared with the boot shim, the packer and the kernel   */
 
@@ -172,6 +174,7 @@ static int splash_progress = 130;   /* how far round the ring the last draw went
 static char splash_state[80];       /* the status line, kept so a repaint can draw it again */
 static void splash_draw(int progress);
 static void splash_status(const char *line);
+static int splash_choice;   /* which menu item is lit */
 static void splash_redraw(void);
 static efi_text_output *real_con_out;   /* the console, parked while the boot screen owns the display */
 /*
@@ -3819,6 +3822,7 @@ run_kernel(int have_checkpoint, uint64_t checkpoint)
 		}
 	}
 	write_logs(klog, klog_len);
+	usb_restart_after_kernel();
 	return 1;
 }
 
@@ -4464,6 +4468,33 @@ fb_command(char *cmd)
 			/* the firmware's memory map into the log (then "oem log" and fetch it) */
 			print_memory_map();
 			fb_reply("OKAY", "");
+		} else if (starts_with(cmd, "oem menu")) {
+			/* The menu is drawn, so let it be driven: the host can move the
+			   highlight and choose, and the choice does something. */
+			const char *arg = cmd + 8;
+			while (*arg == ' ') arg++;
+
+			if (starts_with(arg, "down")) {
+				splash_choice = (splash_choice + 1) % 3;
+			} else if (starts_with(arg, "up")) {
+				splash_choice = (splash_choice + 2) % 3;
+			} else if (starts_with(arg, "select")) {
+				if (splash_choice == 1) {
+					print("diagnostics: display %dx%d at %x, stride %u, log %u bytes, stage %d\n",
+					    SCREEN.width, SCREEN.height, SCREEN.base, SCREEN.stride,
+					    staged_len, splash_progress);
+					splash_status("诊断");
+				} else if (splash_choice == 2) {
+					splash_status("重启到安卓");
+					splash_redraw();
+					BS->stall(400000);
+					ST->rt->reset_system(0 /* EfiResetCold */, 0, 0, NULL);
+				} else {
+					splash_status("等待主机连接");
+				}
+			}
+			splash_redraw();
+			fb_reply("OKAY", "menu");
 		} else if (starts_with(cmd, "oem log")) {
 			/*
 			 * "oem log [hex offset]": the stock fastboot's get_staged stops at 32767 bytes, so the
@@ -5164,7 +5195,6 @@ splash_utf8_center(int y, const char *text, int scale, int tracking, uint32_t co
 /*
  * progress is how much of the ring is lit, in degrees.
  */
-static int splash_choice;
 
 static void
 splash_menu(int top, const char *const *items, int count)
@@ -5345,4 +5375,17 @@ efi_main(efi_handle image, efi_system_table *st)
 	}
 	reboot();
 	return 0;
+}
+
+/* The kernel owned the controller. Take it back, otherwise the log window is
+   open but nothing can reach it and the host reads nothing at all. */
+static void
+usb_restart_after_kernel(void)
+{
+	USB = NULL;
+	if (!usb_start()) {
+		print("usb: could not take the controller back\n");
+	} else {
+		print("usb: the log window has the controller again\n");
+	}
 }
