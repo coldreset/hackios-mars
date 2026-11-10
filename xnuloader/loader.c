@@ -174,7 +174,7 @@ static int splash_progress = 130;   /* how far round the ring the last draw went
 static char splash_state[80];       /* the status line, kept so a repaint can draw it again */
 static void splash_draw(int progress);
 static void splash_status(const char *line);
-static void splash_ring_restart(void);
+static void splash_ring_restart(uint64_t total);
 static void splash_ring_show(uint64_t got, uint64_t total);
 static int splash_choice;   /* which menu item is lit */
 static void splash_redraw(void);
@@ -4483,7 +4483,7 @@ fb_command(char *cmd)
 			uint32_t magic_held = 0;
 			int magic_taken = 0;
 			fb_reply_data(total);
-			splash_ring_restart();   /* the ring is this transfer's now */
+			splash_ring_restart(total);   /* the ring is this transfer's now */
 			usb_data_timeout = 20;
 			while (got < total) {
 				uint64_t want = total - got > USB_CHUNK ? USB_CHUNK : total - got;
@@ -5632,9 +5632,65 @@ splash_ring_place(int *cx, int *cy, int *radius)
 	*radius = (int)(LOGO_SIZE * 675 / 1000);   /* the ring frames the mark, whatever its size */
 }
 
-/* A transfer is starting: the ring goes back to nothing lit. */
+/* decimal, no padding: the ring's label is the only caller */
+static int
+splash_decimal(char *out, uint64_t value)
+{
+	char tmp[24];
+	int i = 0, n;
+	do {
+		tmp[i++] = (char)('0' + (int)(value % 10));
+		value /= 10;
+	} while (value);
+	n = i;
+	while (i) {
+		out[n - i] = tmp[i - 1];
+		i--;
+	}
+	return n;
+}
+
+/*
+ * Under the ring, while a transfer is running: "42%  998 / 2381 MB".  The line has a place of
+ * its own so the ring and the status line stay as they are, and it is cleared before it is
+ * drawn because a percentage changes width.
+ */
 static void
-splash_ring_restart(void)
+splash_transfer_text(uint64_t got, uint64_t total)
+{
+	int cx, cy, radius, y, p = 0;
+	char line[64];
+
+	if (SCREEN.base == 0 || SCREEN.width < 200 || SCREEN.height < 200 || total == 0) {
+		return;
+	}
+	splash_ring_place(&cx, &cy, &radius);
+	y = cy + radius + 24;
+	if (y + 16 * 2 > (int)SCREEN.height) {
+		return;
+	}
+	splash_block(0, y - 6, (int)SCREEN.width, 16 * 2 + 12, SPLASH_BG);
+
+	p += splash_decimal(line + p, (uint64_t)(got * 100 / total));
+	line[p++] = '%';
+	line[p++] = ' ';
+	line[p++] = ' ';
+	p += splash_decimal(line + p, got >> 20);
+	line[p++] = ' ';
+	line[p++] = '/';
+	line[p++] = ' ';
+	p += splash_decimal(line + p, total >> 20);
+	line[p++] = ' ';
+	line[p++] = 'M';
+	line[p++] = 'B';
+	line[p] = 0;
+	splash_utf8_center(y, line, 2, 1, SPLASH_ORANGE);
+	splash_present_rows(y - 6, y + 16 * 2 + 6);
+}
+
+/* A transfer is starting: the ring goes back to nothing lit, and the label to zero. */
+static void
+splash_ring_restart(uint64_t total)
 {
 	if (SCREEN.base == 0 || SCREEN.width < 200 || SCREEN.height < 200) {
 		return;
@@ -5644,12 +5700,13 @@ splash_ring_restart(void)
 	splash_arc(cx, cy, radius, 6, 360, 0xff33333au);
 	splash_progress = 0;
 	splash_present_rows(cy - radius - 8, cy + radius + 8);
+	splash_transfer_text(0, total);
 }
 
 /*
  * The ring as a download arrives: how far round it is lit is how much of the transfer is in.
- * Only the rows the ring lives in are written back, so an update costs about a megabyte
- * instead of the screen's eighteen, and the arc is redrawn a step at a time.
+ * Only the rows the ring and its label live in are written back, so an update costs about a
+ * megabyte instead of the screen's eighteen, and the arc is redrawn a step at a time.
  */
 static void
 splash_ring_show(uint64_t got, uint64_t total)
@@ -5669,6 +5726,7 @@ splash_ring_show(uint64_t got, uint64_t total)
 	splash_progress = degrees;
 	splash_arc(cx, cy, radius, 6, degrees, SPLASH_ORANGE);
 	splash_present_rows(cy - radius - 8, cy + radius + 8);
+	splash_transfer_text(got, total);
 }
 
 static void

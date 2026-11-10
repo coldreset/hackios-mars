@@ -183,9 +183,9 @@ session: it moves and selects as before.
 
 The screen itself was looked at, twice: 花屏 before `splash_present()` existed, the
 menu — ring, title, three items, hint, status — after it, and still correct after
-two redraws driven from the host. The ring was watched through a real transfer:
-2381 MB of ramdisk with the arc growing a step at a time to a full circle, upload
-still 72 s at 33 MB/s.
+two redraws driven from the host. The ring and its label were watched through two
+real transfers of 2381 MB, the arc growing a step at a time to a full circle and
+the line under it counting `0%` to `100%`; the upload stayed at 72 s, 33 MB/s.
 
 ## The ring is the transfer
 
@@ -194,10 +194,16 @@ follows it instead of sitting at a decorative 130°:
 
 | anchor | what it does |
 |---|---|
-| `xnuloader/loader.c:5637` | `splash_ring_restart()` — before the first byte, the ring goes back to nothing lit |
-| `xnuloader/loader.c:5655` | `splash_ring_show(got, total)` — `degrees = got * 360 / total`, drawn when it moves 3°, so 120 steps for a transfer |
-| `xnuloader/loader.c:5602` | `splash_present_rows()` — only the rows the ring lives in are written back, about a megabyte, not the screen's eighteen |
+| `xnuloader/loader.c:5693` | `splash_ring_restart(total)` — before the first byte, the ring goes back to nothing lit and the label to `0%` |
+| `xnuloader/loader.c:5712` | `splash_ring_show(got, total)` — `degrees = got * 360 / total`, drawn when it moves 3°, so 120 steps for a transfer |
+| `xnuloader/loader.c:5659` | `splash_transfer_text(got, total)` — `42%  998 / 2381 MB`, centred under the ring (`cy + radius + 24`), on a cleared strip so a shorter number does not leave the old one behind |
+| `xnuloader/loader.c:5602` | `splash_present_rows()` — only the rows the ring and its label live in are written back, about a megabyte, not the screen's eighteen |
 | `xnuloader/loader.c:4486`, `:4505`, `:4509` | the three calls in `download:`, the last one `show(total, total)`: a full ring says the transfer arrived whole |
+
+The label is the status line's neighbour, not a replacement: the ring and the status
+(`等待主机连接`) stay where they were, which is why the label got its own strip under
+the ring. It is gone again as soon as the transfer ends, because the repaint before
+the next command fills the screen.
 
 A transfer that breaks leaves the ring short, which is the same news as the data
 timeout, and cheaper to read at a glance. The cost is not measurable: 2381 MB of
