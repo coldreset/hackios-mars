@@ -174,6 +174,8 @@ static int splash_progress = 130;   /* how far round the ring the last draw went
 static char splash_state[80];       /* the status line, kept so a repaint can draw it again */
 static void splash_draw(int progress);
 static void splash_status(const char *line);
+static void splash_ring_restart(void);
+static void splash_ring_show(uint64_t got, uint64_t total);
 static int splash_choice;   /* which menu item is lit */
 static void splash_redraw(void);
 static efi_text_output *real_con_out;   /* the console, parked while the boot screen owns the display */
@@ -4481,6 +4483,7 @@ fb_command(char *cmd)
 			uint32_t magic_held = 0;
 			int magic_taken = 0;
 			fb_reply_data(total);
+			splash_ring_restart();   /* the ring is this transfer's now */
 			usb_data_timeout = 20;
 			while (got < total) {
 				uint64_t want = total - got > USB_CHUNK ? USB_CHUNK : total - got;
@@ -4499,9 +4502,11 @@ fb_command(char *cmd)
 					magic_taken = 1;
 				}
 				got += (uint64_t)r;
+				splash_ring_show(got, total);
 			}
 			usb_data_timeout = 0;
 			if (got == total) {
+				splash_ring_show(total, total);   /* a full ring says the transfer arrived whole */
 				if (magic_taken) {
 					*(volatile uint32_t *)dest = magic_held;
 				}
@@ -5594,11 +5599,76 @@ splash_menu(int top, const char *const *items, int count)
  * way, so it was never actually seen on the phone.
  */
 static void
+splash_present_rows(int y0, int y1)
+{
+	if (SCREEN.base == 0 || SCREEN.stride == 0 || SCREEN.height == 0) {
+		return;
+	}
+	if (y0 < 0) {
+		y0 = 0;
+	}
+	if (y1 > (int)SCREEN.height) {
+		y1 = (int)SCREEN.height;
+	}
+	if (y1 <= y0) {
+		return;
+	}
+	clean_dcache(SCREEN.base + (uint64_t)y0 * SCREEN.stride,
+	    SCREEN.base + (uint64_t)y1 * SCREEN.stride);
+}
+
+static void
 splash_present(void)
 {
-	if (SCREEN.base != 0 && SCREEN.stride != 0 && SCREEN.height != 0) {
-		clean_dcache(SCREEN.base, SCREEN.base + (uint64_t)SCREEN.stride * SCREEN.height);
+	splash_present_rows(0, (int)SCREEN.height);
+}
+
+/* The ring's geometry, in one place: the first draw, a reset, and the progress updates. */
+static void
+splash_ring_place(int *cx, int *cy, int *radius)
+{
+	*cx = (int)SCREEN.width / 2;
+	*cy = (int)(SCREEN.height * 31 / 100);
+	*radius = (int)(LOGO_SIZE * 675 / 1000);   /* the ring frames the mark, whatever its size */
+}
+
+/* A transfer is starting: the ring goes back to nothing lit. */
+static void
+splash_ring_restart(void)
+{
+	if (SCREEN.base == 0 || SCREEN.width < 200 || SCREEN.height < 200) {
+		return;
 	}
+	int cx, cy, radius;
+	splash_ring_place(&cx, &cy, &radius);
+	splash_arc(cx, cy, radius, 6, 360, 0xff33333au);
+	splash_progress = 0;
+	splash_present_rows(cy - radius - 8, cy + radius + 8);
+}
+
+/*
+ * The ring as a download arrives: how far round it is lit is how much of the transfer is in.
+ * Only the rows the ring lives in are written back, so an update costs about a megabyte
+ * instead of the screen's eighteen, and the arc is redrawn a step at a time.
+ */
+static void
+splash_ring_show(uint64_t got, uint64_t total)
+{
+	if (total == 0 || SCREEN.base == 0 || SCREEN.width < 200 || SCREEN.height < 200) {
+		return;
+	}
+	int degrees = (int)((got * 360) / total);
+	if (degrees > 360) {
+		degrees = 360;
+	}
+	if (degrees <= splash_progress || (degrees < 360 && degrees - splash_progress < 3)) {
+		return;
+	}
+	int cx, cy, radius;
+	splash_ring_place(&cx, &cy, &radius);
+	splash_progress = degrees;
+	splash_arc(cx, cy, radius, 6, degrees, SPLASH_ORANGE);
+	splash_present_rows(cy - radius - 8, cy + radius + 8);
 }
 
 static void
@@ -5611,9 +5681,8 @@ splash_draw(int progress)
 	}
 	splash_fill(SPLASH_BG);
 
-	int cx = (int)SCREEN.width / 2;
-	int cy = (int)(SCREEN.height * 31 / 100);
-	int radius = (int)(LOGO_SIZE * 675 / 1000);   /* the ring frames the mark, whatever its size */
+	int cx, cy, radius;
+	splash_ring_place(&cx, &cy, &radius);
 	splash_progress = progress;
 
 	splash_arc(cx, cy, radius, 6, 360, 0xff33333au);

@@ -183,11 +183,26 @@ session: it moves and selects as before.
 
 The screen itself was looked at, twice: 花屏 before `splash_present()` existed, the
 menu — ring, title, three items, hint, status — after it, and still correct after
-two redraws driven from the host.
+two redraws driven from the host. The ring was watched through a real transfer:
+2381 MB of ramdisk with the arc growing a step at a time to a full circle, upload
+still 72 s at 33 MB/s.
 
-The ring's arc (`splash_progress`, 130° when the loader starts) is decorative: no
-progress is fed into it. The `download:` handler (`xnuloader/loader.c:4453`) has
-`total` and `got` in its receive loop (`:4485`–`:4502`), so a live arc would be a
-few lines there — draw the new arc segment and present just the ring's bounding box,
-because a full-screen write-back per update (18 MB) is not affordable at transfer
-speed.
+## The ring is the transfer
+
+`download:` is how a kernel, the payload and the ramdisk arrive, and the ring now
+follows it instead of sitting at a decorative 130°:
+
+| anchor | what it does |
+|---|---|
+| `xnuloader/loader.c:5637` | `splash_ring_restart()` — before the first byte, the ring goes back to nothing lit |
+| `xnuloader/loader.c:5655` | `splash_ring_show(got, total)` — `degrees = got * 360 / total`, drawn when it moves 3°, so 120 steps for a transfer |
+| `xnuloader/loader.c:5602` | `splash_present_rows()` — only the rows the ring lives in are written back, about a megabyte, not the screen's eighteen |
+| `xnuloader/loader.c:4486`, `:4505`, `:4509` | the three calls in `download:`, the last one `show(total, total)`: a full ring says the transfer arrived whole |
+
+A transfer that breaks leaves the ring short, which is the same news as the data
+timeout, and cheaper to read at a glance. The cost is not measurable: 2381 MB of
+ramdisk went up in 72 s (33 MB/s), the same as before the ring moved.
+
+During a transfer u-boot's own progress text sits over the splash's top-left
+corner (see above); the ring's small repaints do not touch it, the full repaint
+after the command does.
