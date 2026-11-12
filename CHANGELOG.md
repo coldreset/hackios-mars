@@ -16,6 +16,11 @@ changes to it; the scripts named fetch the release and put the changes on.
 - the build tools: Apple's [libdispatch](https://github.com/apple-oss-distributions/libdispatch), [libpthread](https://github.com/apple-oss-distributions/libpthread) and [AvailabilityVersions](https://github.com/apple-oss-distributions/AvailabilityVersions), [bootstrap_cmds](https://github.com/markmentovai/bootstrap_cmds), [unifdef](https://github.com/fanf2/unifdef), the [macOS 13.3 SDK](https://github.com/joseluisq/macosx-sdks) and the [iPhoneOS 16.5 SDK](https://github.com/theos/sdks) -- `xnu-deps/setup.sh`
 - not fetched by anything here: the Darwin 16.5 user space, which you lay out from your own IPSW (`sysimage/`), and the phone's own firmware, pulled from its Android (`fw-*`)
 
+## 2026-11-13
+
+- touch (mars, ST FTM5 on `qupv3_se11_spi`): the input pipeline now posts samples to the backboard; taps, drags and the home / app-switcher swipe work (`CONFIG_HAKIOS_FOCALTECH`, `touchscreen=1`)
+- gpu (mars, Adreno 660): `gpu=1` starts the 3D core and registers the `HakiosGPU` service; `adreno_nomeasure=1` skips the unusable GCC debug clock counter on SM8350, all 21 bring-up steps pass, and CoreAnimation draws on the GPU (no software-renderer fallback)
+
 ## 2026-10-30
 
 - repositories: `main` is the branch of `hakios-xnu-kernel` -- what was `hakios` and then `u-boot`; `hakios` is gone, `git clone` needs no `-b`

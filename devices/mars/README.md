@@ -61,7 +61,7 @@ adb reboot bootloader
 ./xl enter                           # the UEFI loader into RAM
 ./xl ramdisk userland/system.apfs    # 2.3 GB resident system image, about 75 s
 XL_RAMDISK=userland/root.apfs XL_SECS=240 \
-XL_CMDLINE="debug=0x8 cpus=8 rd=md0 touchscreen=1 cpufreq=1" ./xl run
+XL_CMDLINE="debug=0x8 cpus=8 rd=md0 touchscreen=1 cpufreq=1 gpu=1 adreno_nomeasure=1" ./xl run
 ```
 
 Boot arguments that matter on this phone:
@@ -73,6 +73,7 @@ Boot arguments that matter on this phone:
 | `touchscreen=1` | the touch driver does nothing without it |
 | `touch_reset_ms=N` | how long the controller is given after reset (default 200 ms) |
 | `touch_bitbang=1` | drive the pads by hand instead of through the serial engine |
+| `gpu=1` | starts the Adreno 3D core and registers the `HakiosGPU` service; without it CoreAnimation keeps the software renderer |
 | `adreno_nomeasure=1` | SM8350 has no usable GCC debug counter to check the GPU clock |
 | `quiet=1` | suppress periodic counters so the tail of the kernel log stays readable |
 | `touch_watch=1` | start the touch watchdog: a line every 5 s with the stage it is in, and the periodic counters |
