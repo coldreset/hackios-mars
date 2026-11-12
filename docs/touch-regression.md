@@ -26,6 +26,23 @@ have two each. Every log of 11 November carries `no GPU to draw with` once; the 
 4 November (`141031`, `114910`, `114338`, `112850`, `112141`, `111059`) carry it not at
 all. So the GPU service went missing during 11 November, before the touch did.
 
+## Three runs, side by side — and why "the backlight" is not the whole story
+
+| run | `displayState: off` | our virtual touch service made | `create touch stream` | touch |
+|---|---|---|---|---|
+| `logs/031748-run.log` 03:17 | none | yes (`hakios: input: touch screen service`) | none logged | worked |
+| `logs/034809-run.log` 03:48 | two | **no** — the input thread never got that far | yes | dead |
+| `logs/050641-run.log` 05:06 | two | no | yes | dead |
+| `logs/060439-run.log` 06:04 (with the backlight hooks) | **none** | yes | none | dead |
+
+The 06:04 run settles it: with `-[SBBacklightController screenIsOn]` answering `YES`, the
+`displayState: off` publication disappears — and the phone still takes nothing. So the
+digitizer state is not sufficient either. What is left is at least two failure modes: the
+injection's input thread sometimes never creates the virtual touch service (03:48, 05:06),
+and when it does (06:04) no touch reaches anyone. Both are consistent with a startup race:
+boot got slower when the interface became Chinese and the renderer fell back to software,
+and backboardd now scans for a digitizer before our service exists.
+
 ## What was tried, and did not help
 
 1. **The two probe jobs.** `com.hakios.languagetest.plist` and `com.hakios.fonttest.plist`
@@ -33,39 +50,42 @@ all. So the GPU service went missing during 11 November, before the touch did.
 2. **SpringBoard's opinion of the backlight.** Hooks on `-[SBBacklightController screenIsOn]`
    (answer `YES`) and `-[SBBacklightController backlightLevel]` (answer `1.0`), which is the
    only state SpringBoard can be reading, since nothing in this tree ever sets a backlight
-   (`grep -rli backlight drivers include userland xnuloader` finds nothing). A round with
-   those hooks in: the phone still would not take a touch. Reverted.
+   (`grep -rli backlight drivers include userland xnuloader` finds nothing). The publication
+   went away, the touch did not come back. Reverted.
 
-## The blocker, before anything else
+## The next experiment — one change, one round
 
-**The loader's log cannot be read any more.** From about 05:16 on, `oem log <offset>`
-answers pieces of the right *length* whose *content* is all zeros, so `./xl log` and the
-log that `xl run` saves at the end both come back 0 bytes. Every fact above came from a log
-fetched before that moment; the two rounds after it left no evidence at all.
+`userland/src/inject.c:930` sleeps three seconds before it creates the virtual HID services:
 
-This is worth fixing as its own bug, and the shape of it is familiar: the kernel writes the
-log at a physical address (`kernel returned: log at f7ae89c0, …` in the loader's own output)
-and the loader reads it back through its own cached mapping. That is the same class of
-mistake as the framebuffer, which was invisible for the same reason (`docs/boot-menu.md`,
-"The panel, the cache, and why a screenshot lied"): the length is right because it comes
-from the kernel's return value, and the bytes are zeros because nobody cleaned the lines.
+```c
+    sleep(3);   /* let backboardd get as far as starting its event server */
+```
 
-## What to do next, in order
+Change it to `sleep(1)`, rebuild the boot volume only (`cd userland && GL=1 ./build.sh`,
+about a minute), and run one round. A person has to look at the phone: a screenshot during
+a run is impossible, and the log is only a witness (did `touch screen service` appear, did
+`create touch stream`, was there a `displayState` publication) — not the verdict.
 
-1. Make the log readable again — clean or invalidate the loader's view of the returned
-   region before `oem log` serves it, or read the same boot over a serial console and
-   compare. Do not spend another phone round on touch until this works: without it a round
-   answers nothing.
-2. With a readable log, find out why `HakiosGPU` stopped being published. The driver source
-   did not change (`git log -- drivers` is quiet), so the difference is in what the kernel
-   does at boot: compare the boot arguments and the firmware path
-   (`/redwood/fw/a660_zap.b00/.b01/.b02/.mdt/.elf` are all in the image).
-3. If the GPU is innocent, take the digitizer race seriously. `userland/src/inject.c:930`
-   sleeps three seconds before it creates the virtual HID services, and
-   `wait_for_als_arrival()` (`:559-566`, installed by `brightness_fixes()`) is the only
-   thing that ever made backboardd wait for them; it is switched off, and `:1226` says why:
-   "brightness_fixes() is not used for now: with it backboardd no longer took our touch".
-   One round with the wait re-enabled and one with `sleep(0)` would tell them apart.
+If that fails, in order:
+
+1. The other direction: turn `brightness_fixes()` back on (`userland/src/inject.c:569`,
+   which installs `wait_for_als_arrival`, `:560`); `:1226` records why it was switched off —
+   "with it backboardd no longer took our touch" — so read that comment before believing it.
+2. Find out whether the Chinese work is the cause at all: go back to `9c83878` (no Chinese,
+   no wallpaper, touch known good), rebuild the system image (~10 minutes) and run a round.
+
+## The blocker that is behind all of this
+
+**The loader's log cannot be read reliably.** Between 05:16 and 06:04, `oem log <offset>`
+answered pieces of the right *length* whose *content* was all zeros, so `./xl log` and the
+log `xl run` saves at the end both came back 0 bytes; the 06:14 round was readable again.
+Two rounds in that window left no evidence at all.
+
+The shape is familiar: the kernel writes the log at a physical address (`kernel returned:
+log at f7ae89c0, …`) and the loader reads it back through its own cached mapping. That is
+the same class of mistake as the framebuffer, which was invisible for the same reason
+(`docs/boot-menu.md`, "The panel, the cache, and why a screenshot lied"). Worth fixing on
+its own: a round that answers nothing is the most expensive kind.
 
 ## What still works, and is committed
 
