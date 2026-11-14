@@ -34,7 +34,7 @@ Every driver the kernel can be built with. `CONFIG_HAKIOS_<NAME>=y` in a defconf
 
 | Driver | Files | Requires | Boot arguments | mars | qemu | redwood | |
 |---|---|---|---|---|---|---|
-| **`HAKIOS_BT`**<br>the Bluetooth half of the WCN6750: step one, a read-only look at its three pins (bt=1) | `hakios.bt.c` |  | `bt=`, `bt_again=` |  |  | built | |
+| **`HAKIOS_BT`**<br>the Bluetooth half of the WCN6750: step one, a read-only look at its three pins (bt=1), step two the supplies and the reset line (bt=2). The supply vote it needs is the PCIe radio driver's | `hakios.bt.c` | `HAKIOS_WIFI_PCIE` | `bt=`, `bt_again=` | built |  | built | |
 
 ## camera
 

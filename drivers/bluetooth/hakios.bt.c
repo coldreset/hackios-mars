@@ -5,9 +5,9 @@
  * bt_wcn6750, compatible qcom,wcn6750-bt; the Wi-Fi half is drivers/wifi/hakios.wifi.c). What the device tree says
  * about the Bluetooth half, and what this file takes from it (numbers, not text):
  *
- *   qcom,bt-reset-gpio     GPIO 85    the Bluetooth half's reset / enable line
- *   qcom,bt-sw-ctrl-gpio   GPIO 86    the line that tells the radio's switch which half has the antenna
- *   qcom,wl-reset-gpio     GPIO 84    the Wi-Fi half's reset line, listed here too: the chip comes up as a whole
+ *   qcom,bt-reset-gpio     GPIO 65    the Bluetooth half's reset / enable line
+ *   qcom,bt-sw-ctrl-gpio   GPIO 153   the line that tells the radio's switch which half has the antenna
+ *   qcom,wl-reset-gpio     GPIO 64    the Wi-Fi half's reset line, listed here too: the chip comes up as a whole
  *   the supplies (qcom,bt-vdd-*-supply, each with a -config of minimum and maximum microvolts; read out of the
  *   device tree by script, not by eye), the same for both halves:
  *       io 1800000..2000000    aon, dig, rfacmn, rfa-0p8 824000..1120000    rfa1 1872000..2040000
@@ -34,16 +34,21 @@
  * with a boot-arg level the way haptic=N and wifi_step=N did: the next one is bt=2 (supplies and reset line, seen on the
  * pins), after this one has been run and its output compared with a phone that is running Android.
  *
- * Status: COMPILED ONLY. Not run in QEMU (it has no such TLMM, and bt=1 must not be given there: a load from an address it
- * does not map faults) and not run on the phone.
+ * Status: levels 1 and 2 have been run on the phone (mars, 14 November 2026). Level 2 votes the six supplies on
+ * (smpb10 1800, ldoe7 2800, smpe2 950, smpb11 950, smpc1 1880, smpb12 1350 mV, all accepted) and drives the Bluetooth
+ * half's reset line: gpio65 before, an input reading 1; after, an output driving high. gpio64 (the Wi-Fi half) and
+ * gpio153 (the switch) are left as they were. Not given in QEMU (no such TLMM: a load from an address it does not map
+ * faults).
  *
  * Boot-args:
  *   bt=1           the look
+ *   bt=2           the look, then the supplies and the reset line (the Wi-Fi half is left off)
  *   bt_again=<s>   the second look this many seconds later (0: no second look; 30)
  */
 #include <stdint.h>
 #include <kern/clock.h>
 #include <kern/startup.h>
+#include <kern/thread.h>
 #include <kern/thread_call.h>
 #include <libkern/libkern.h>
 #include <mach/mach_types.h>
@@ -75,25 +80,52 @@ say(const char *format, ...)
 #define GPIO_CFG(n)             (tlmm + 0x1000UL * (n))         /* [1:0] pull, [5:2] function, [8:6] drive, [9] output */
 #define GPIO_IO(n)              (tlmm + 0x1000UL * (n) + 4)     /* bit 0 in, bit 1 out */
 #define CFG_OUTPUT              (1u << 9)
+#define BT_EN                   65      /* the Bluetooth half's reset / enable line */
 
 static vm_offset_t tlmm;
 static uint32_t again_seconds = 30;
 static thread_call_t again_call;
 
-/* The three pins of the device tree's bt_wcn6750 node. */
+/* The three pins of the phone's own bt_qca6490 node (mars: qcom,wl-reset-gpio = <&tlmm 0x40 0>,
+   qcom,bt-reset-gpio = <&tlmm 0x41 0>, qcom,bt-sw-ctrl-gpio = <&tlmm 0x99 0>; the same pins the Wi-Fi bring-up
+   reads for WLAN_EN, BT_EN and the switch, which is why its stage 9 refuses to run while either is enabled). */
 static const struct {
 	unsigned pin;
 	const char *what;
 } pins[] = {
-	{ 84, "qcom,wl-reset-gpio: the Wi-Fi half's reset" },
-	{ 85, "qcom,bt-reset-gpio: the Bluetooth half's reset" },
-	{ 86, "qcom,bt-sw-ctrl-gpio: the antenna switch" },
+	{ 64, "qcom,wl-reset-gpio: the Wi-Fi half's reset" },
+	{ 65, "qcom,bt-reset-gpio: the Bluetooth half's reset" },
+	{ 153, "qcom,bt-sw-ctrl-gpio: the antenna switch" },
+};
+
+/* The Bluetooth half's supplies (qcom,bt-vdd-*-supply in the tree: io, asd, rfa-0p8, aon+dig, rfa1, rfa2), by the
+   name of the RPMh resource each phandle lands on, in the order the Wi-Fi bring-up votes them (its stage 9). The chip
+   is one package, so these are the Wi-Fi half's supplies too; that vote is a sleepable one, so this runs on a thread. */
+extern bool hakiospcie_radio_supply_on(const char *name, unsigned millivolts);
+
+static const struct {
+	const char	*name;
+	unsigned	millivolts;
+} supplies[] = {
+	{ "smpb10", 1800 },	/* io */
+	{ "ldoe7", 2800 },	/* asd */
+	{ "smpe2", 950 },	/* rfa-0p8 */
+	{ "smpb11", 950 },	/* aon, dig */
+	{ "smpc1", 1880 },	/* rfa1 */
+	{ "smpb12", 1350 },	/* rfa2 */
 };
 
 static inline uint32_t
 rd(vm_offset_t address)
 {
 	return *(volatile uint32_t *)address;
+}
+
+static inline void
+wr(vm_offset_t address, uint32_t value)
+{
+	*(volatile uint32_t *)address = value;
+	__asm__ volatile("dsb sy" ::: "memory");
 }
 
 /* One look at the pins: what the TLMM says each is set to, and the level it reads. Nothing is written. */
@@ -112,6 +144,43 @@ static void
 look_again(__unused thread_call_param_t p0, __unused thread_call_param_t p1)
 {
 	look("again");
+}
+
+/* Level 2: the supplies, then the Bluetooth half's reset line, then the pins again. The chip's enable lines are read
+   first: a half that something else has already enabled is left alone. */
+static void
+power_thread(void *arg, __unused wait_result_t result)
+{
+	uint32_t wl_cfg = rd(GPIO_CFG(64)), wl_io = rd(GPIO_IO(64));
+	uint32_t bt_cfg = rd(GPIO_CFG(65)), bt_io = rd(GPIO_IO(65));
+	uint32_t cfg, io;
+
+	say("bt: level 2: the supplies, then the Bluetooth half's reset line\n");
+	if ((((wl_cfg | bt_cfg) & CFG_OUTPUT) != 0) && (((wl_io | bt_io) & 2) != 0)) {
+		say("bt: a radio half is already enabled (gpio64 or gpio65 drives high); not touching its power\n");
+		return;
+	}
+	for (unsigned i = 0; i < sizeof(supplies) / sizeof(supplies[0]); i++) {
+		bool on = hakiospcie_radio_supply_on(supplies[i].name, supplies[i].millivolts);
+
+		say("bt: supply %s at %u mV: %s\n", supplies[i].name, supplies[i].millivolts, on ? "on" : "refused");
+		if (!on) {
+			return;
+		}
+	}
+	cfg = rd(GPIO_CFG(BT_EN));
+	io = rd(GPIO_IO(BT_EN));
+	say("bt: bt_en (gpio%u) before: function %u, pull %u, %s, reads %u\n", BT_EN, (cfg >> 2) & 15, cfg & 3,
+	    (cfg & CFG_OUTPUT) ? (io & 2 ? "drives high" : "drives low") : "input", io & 1);
+	wr(GPIO_IO(BT_EN), io & ~2u);
+	wr(GPIO_CFG(BT_EN), (cfg & ~0x3ffu) | 0x303);	/* GPIO, pull-up, 10 mA, an output */
+	delay(20000);
+	wr(GPIO_IO(BT_EN), 2);
+	delay(50000);
+	cfg = rd(GPIO_CFG(BT_EN));
+	io = rd(GPIO_IO(BT_EN));
+	say("bt: bt_en (gpio%u) after: %s, reads %u\n", BT_EN, (io & 2) ? "drives high" : "drives low", io & 1);
+	look("after the supplies");
 }
 
 __startup_func
@@ -134,6 +203,15 @@ bt_init(void)
 	}
 	say("bt: level 1: a look, reading only (WCN6750; nothing is written)\n");
 	look("at start");
+	if (enabled >= 2) {
+		thread_t thread;
+
+		if (kernel_thread_start(power_thread, NULL, &thread) == KERN_SUCCESS) {
+			thread_deallocate(thread);
+		} else {
+			say("bt: could not start the power thread; the pins stay as they are\n");
+		}
+	}
 	if (again_seconds != 0) {
 		again_call = thread_call_allocate(look_again, NULL);
 		clock_interval_to_deadline(again_seconds, NSEC_PER_SEC, &deadline);
