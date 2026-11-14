@@ -161,6 +161,12 @@
 
 /* USB 2.0 as a device: U-Boot's fastboot; the SuperSpeed PHY is left as ABL left it */
 &usb_1 {
+	/*
+	 * No power domain and no reset: U-Boot's dwc3 asks the wrapper for them, and
+	 * this phone's U-Boot has no power-domain driver to answer
+	 * ("dwc3-generic-wrapper usb@a6f8800: power-domain driver not found"): the
+	 * probe failed with -19 and the loader never got a USB device controller.
+	 */
 	/delete-property/ power-domains;
 	/delete-property/ resets;
 	qcom,select-utmi-as-pipe-clk;
@@ -169,6 +175,16 @@
 	phys = <&usb_1_hsphy>;
 	phy-names = "usb2-phy";
 	status = "okay";
+};
+
+/*
+ * And no IOMMU on the controller itself: dev_iommu_enable() looks up the SMMU
+ * this node names (the phone's own tree gives <&apps_smmu 0x00 0x00>) and finds
+ * nothing bound to it, so the probe failed with -19 again.  A fastboot transfer
+ * needs no IOMMU.
+ */
+&usb_1_dwc3 {
+	/delete-property/ iommus;
 };
 
 &usb_1_hsphy {
