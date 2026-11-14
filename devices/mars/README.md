@@ -8,7 +8,7 @@ controller speaks **SPI ST FingerTip** rather than I2C.
 |---|---|
 | Vendor | Xiaomi |
 | SoC | `lahaina` (SM8350) |
-| Configuration | `python3 tools/hakios-config.py defconfig mars mini touch perf` |
+| Configuration | `python3 tools/hakios-config.py defconfig mars mini touch perf power` |
 | Boot | from RAM: `fastboot boot`; nothing is flashed, no partition is touched |
 | Maintainer | [coldreset](https://github.com/coldreset) (Yunlong Zheng) |
 
@@ -40,7 +40,7 @@ Everything else the kernel needs comes from `devices/mars/configs/mars.config` a
 ## Building
 
 ```sh
-python3 tools/hakios-config.py defconfig mars mini touch perf
+python3 tools/hakios-config.py defconfig mars mini touch perf power
 make kernel                      # about 3 minutes
 (cd xnuloader && ./mkidentity.sh /path/to/iPhone10,3_16.5_20F66_Restore.ipsw && ./build.sh)
 ```
