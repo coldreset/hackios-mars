@@ -170,7 +170,7 @@ str_eq(const char *a, const char *b)
  * the screen is left to the kernel (and to "oem screenshot").
  */
 static int screen_quiet;
-static int splash_progress = 130;   /* how far round the ring the last draw went */
+static int splash_progress;   /* how far round the ring the last draw went: 0 until a transfer lights it */
 static char splash_state[80];       /* the status line, kept so a repaint can draw it again */
 static void splash_draw(int progress);
 static void splash_status(const char *line);
@@ -5922,7 +5922,7 @@ efi_main(efi_handle image, efi_system_table *st)
 		print("display %d x %d at %x\n", (uint64_t)SCREEN.width, (uint64_t)SCREEN.height, SCREEN.base);
 	}
 	print("platform %s\n", PLAT->name);
-	splash_draw(130);
+	splash_draw(0);   /* nothing is in yet: the ring stays empty until a transfer arrives */
 	splash_status("等待主机连接");
 
 	install_exception_hook();
