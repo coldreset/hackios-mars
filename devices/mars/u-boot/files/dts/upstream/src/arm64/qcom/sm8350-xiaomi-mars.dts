@@ -22,6 +22,21 @@
 #include "pm8350c.dtsi"
 #include "pmk8350.dtsi"
 
+/* The Bluetooth half of the WCN6855 sits on QUPv3 wrapper 2, SE 4 (0x890000). The vendor's own tree keeps it
+   off; U-Boot is asked to bring it up so the chip can be spoken to before anything else runs. */
+&qupv3_id_2 {
+	/* U-Boot has no SMMU for this wrapper to point at: its own dev_iommu_enable() fails with -19 and
+	   the wrapper then never probes ("GENI-SE: GENI SE wrapper not found"), which leaves the Bluetooth
+	   UART inside it unreachable. Nothing here does DMA through an IOMMU. */
+	/delete-property/ iommus;
+	status = "okay";
+};
+
+&uart18 {
+	status = "okay";
+};
+
+
 /*
  * kodiak.dtsi's carve-outs are a Chromebook's; the phone's differ (below). Its rmtfs and ADSP RPC heap fall inside the
  * phone's CDSP image and pil_mem, which reserve them anyway.

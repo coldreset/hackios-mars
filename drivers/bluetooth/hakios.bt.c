@@ -293,6 +293,7 @@ power_thread(void *arg, __unused wait_result_t result)
 #define M_SEC_IRQ_EN            (1u << 31)
 #define UART_START_TX_OPCODE    (1u << 27)
 #define UART_START_READ_OPCODE  (1u << 27)
+#define M_CMD_PARAMS_SHFT       2 /* the length sits in M_CMD0 above the opcode */
 #define FIFO_WORDS_MSK          0x1ffffffu
 #define SE_UART_LOOPBACK_CFG    0x274
 #define UART_STOP_READ_OPCODE   (1u << 28)
@@ -415,7 +416,9 @@ uart_send_raw(const uint8_t *bytes, unsigned length)
 	   interrupt registers (which the abort sequence found unreadable) are left alone. */
 	wr(se + SE_TX_WATERMARK, 2);
 	wr(se + SE_TX_TRANS_LEN, length);
-	wr(se + SE_M_CMD0, UART_START_TX_OPCODE);
+	/* The command carries its length: M_CMD0 is (length << 2) | opcode, as U-Boot's
+	   geni_se_setup_m_cmd writes it. Without it the engine is asked to send nothing. */
+	wr(se + SE_M_CMD0, (length << M_CMD_PARAMS_SHFT) | UART_START_TX_OPCODE);
 	delay(1);
 	for (unsigned i = 0; i < length; i++) {
 		wr(se + SE_TX_FIFO(0), bytes[i]);
@@ -429,7 +432,7 @@ uart_send(const uint8_t *bytes, unsigned length)
 	for (unsigned i = 0; i < length; i++) {
 		wr(se + SE_TX_WATERMARK, 2);
 		wr(se + SE_TX_TRANS_LEN, 1);
-		wr(se + SE_M_CMD0, UART_START_TX_OPCODE);
+		wr(se + SE_M_CMD0, (1u << M_CMD_PARAMS_SHFT) | UART_START_TX_OPCODE);
 		if (!uart_wait(se, SE_M_IRQ_STATUS, M_TX_FIFO_WATERMARK_EN, M_TX_FIFO_WATERMARK_EN, 50)) {
 			return false;
 		}
@@ -458,6 +461,31 @@ uart_read(uint8_t *out, unsigned most, unsigned milliseconds)
 			status = rd(se + SE_RX_FIFO_STATUS) & FIFO_WORDS_MSK;
 		}
 		delay(10);
+	}
+	return got;
+}
+
+/* U-Boot's way of taking a byte (msm_serial_getc): give the read command, wait for the secondary sequencer to
+   say it has something (M_SEC_IRQ_EN), clear the two interrupt registers, and only then take what the fifo holds.
+   Reading the fifo without that wait is what returned the same eight words whether a chip was there or not. */
+static unsigned
+uart_read_irq(uint8_t *out, unsigned most, unsigned milliseconds)
+{
+	unsigned got = 0;
+
+	for (unsigned spent = 0; spent < milliseconds && got < most; spent += 5) {
+		uint32_t m_status, s_status;
+
+		if (!uart_wait(se, SE_M_IRQ_STATUS, M_SEC_IRQ_EN, M_SEC_IRQ_EN, 5)) {
+			continue;
+		}
+		m_status = rd(se + SE_M_IRQ_STATUS);
+		s_status = rd(se + SE_S_IRQ_STATUS);
+		wr(se + SE_M_IRQ_CLEAR, m_status);
+		wr(se + SE_S_IRQ_CLEAR, s_status);
+		while ((rd(se + SE_RX_FIFO_STATUS) & FIFO_WORDS_MSK) != 0 && got < most) {
+			out[got++] = (uint8_t)(rd(se + SE_RX_FIFO(0)) & 0xff);
+		}
 	}
 	return got;
 }
@@ -614,6 +642,787 @@ uart_after_power(void)
 			wait_ms(50);
 		}
 		say("bt: uart: 19. %u bytes from the chip; the rx line reads %u\n", seen, rd(GPIO_IO(71)) & 1);
+		return;
+	}
+	if (bt_dry == 34) {
+		/* The receiver, started the way U-Boot starts one -- and nothing else touched. The two runs of
+		   stage 33 showed that a write of all ones to the secondary side's clear register wedges the
+		   engine (the next read of the fifo status hangs the bus), so this stage only ever sets the
+		   bits it owns. The loopback decides it: if the engine cannot hear itself, the fault is the
+		   read command and not the chip. */
+		static const uint8_t pattern[5] = { 0xa5, 0x5a, 0x01, 0x02, 0x03 };
+		static const unsigned config[] = { 0x48, 0x4c, 0x25c, 0x260, 0x264, 0x268, 0x26c, 0x284, 0x288, 0x28c };
+		volatile uint8_t *console = (volatile uint8_t *)ml_io_map(0x98c000, 0x4000);
+		uint32_t words[32];
+		unsigned count = 0;
+
+		if (console == NULL) {
+			say("bt: uart: 34. the console engine could not be mapped\n");
+			return;
+		}
+		{
+			uint32_t tx = rd(GPIO_CFG(70)), rx = rd(GPIO_CFG(71));
+			wr(GPIO_CFG(70), (tx & ~0x3fu) | (1u << 2) | 3u);
+			wr(GPIO_CFG(71), (rx & ~0x3fu) | (1u << 2) | 0u);
+		}
+		uart_init();
+		for (unsigned i = 0; i < sizeof(config) / sizeof(config[0]); i++) {
+			wr(se + config[i], *(volatile uint32_t *)(console + config[i]));
+		}
+		say("bt: uart: 34. the console's configuration is in; loopback %#x\n", rd(se + SE_UART_LOOPBACK_CFG));
+
+		wr(se + SE_UART_LOOPBACK_CFG, rd(se + SE_UART_LOOPBACK_CFG) | 1u);
+
+		/* Only the bits we own: the two receive interrupts, set, never cleared wholesale. */
+		wr(se + SE_S_IRQ_EN, rd(se + SE_S_IRQ_EN) | S_RX_FIFO_WATERMARK_EN | S_RX_FIFO_LAST_EN);
+		wr(se + SE_M_IRQ_EN, rd(se + SE_M_IRQ_EN) | M_RX_FIFO_WATERMARK_EN | M_RX_FIFO_LAST_EN);
+		say("bt: uart: 34a s_irq_en %#x, m_irq_en %#x\n", rd(se + SE_S_IRQ_EN), rd(se + SE_M_IRQ_EN));
+
+		while ((rd(se + SE_RX_FIFO_STATUS) & FIFO_WORDS_MSK) != 0) {
+			(void)rd(se + SE_RX_FIFO(0));
+		}
+		say("bt: uart: 34b the fifo is empty; arming\n");
+		wr(se + SE_S_CMD0, UART_START_READ_OPCODE);
+		say("bt: uart: 34c armed; sending %u bytes into the loopback\n", (unsigned)sizeof(pattern));
+		uart_send_raw(pattern, sizeof(pattern));
+		say("bt: uart: 34d sent; looking for two seconds\n");
+
+		for (unsigned round = 0; round < 20; round++) {
+			while ((rd(se + SE_RX_FIFO_STATUS) & FIFO_WORDS_MSK) != 0 && count < 32) {
+				words[count++] = rd(se + SE_RX_FIFO(0));
+			}
+			if (count >= 2) {
+				break;
+			}
+			wait_ms(100);
+		}
+		say("bt: uart: 34. the loopback gave %u word(s); rx fifo %#x, m_irq %#x\n",
+		    count, rd(se + SE_RX_FIFO_STATUS), rd(se + SE_M_IRQ_STATUS));
+		for (unsigned i = 0; i < count; i++) {
+			say("bt: uart: 34. word %u: %08x (bytes %02x %02x %02x %02x)\n", i, words[i],
+			    words[i] & 0xff, (words[i] >> 8) & 0xff, (words[i] >> 16) & 0xff, (words[i] >> 24) & 0xff);
+		}
+		wr(se + SE_S_CMD0, UART_STOP_READ_OPCODE);
+		wr(se + SE_UART_LOOPBACK_CFG, rd(se + SE_UART_LOOPBACK_CFG) & ~1u);
+		return;
+	}
+	if (bt_dry == 37) {
+		/* The question itself, asked properly for the first time: the engine set up like the console,
+		   the chip powered and its reset line released, the pins muxed, and the version request sent
+		   with its length in the command (which every earlier attempt left out, so nothing left the
+		   fifo). No loopback: this is the chip's turn to answer. */
+		static const uint8_t version[5] = { 0x01, 0x00, 0xfc, 0x01, 0x19 };
+		static const unsigned config[] = { 0x48, 0x4c, 0x25c, 0x260, 0x264, 0x268, 0x26c, 0x284, 0x288, 0x28c };
+		volatile uint8_t *console = (volatile uint8_t *)ml_io_map(0x98c000, 0x4000);
+		unsigned seen = 0;
+
+		if (console != NULL) {
+			uart_init();
+			for (unsigned i = 0; i < sizeof(config) / sizeof(config[0]); i++) {
+				wr(se + config[i], *(volatile uint32_t *)(console + config[i]));
+			}
+		}
+		{
+			uint32_t tx = rd(GPIO_CFG(70)), rx = rd(GPIO_CFG(71));
+			wr(GPIO_CFG(70), (tx & ~0x3fu) | (1u << 2) | 3u);
+			wr(GPIO_CFG(71), (rx & ~0x3fu) | (1u << 2) | 0u);
+		}
+		wr(se + SE_UART_LOOPBACK_CFG, rd(se + SE_UART_LOOPBACK_CFG) & ~1u);
+		wr(se + SE_M_IRQ_EN, rd(se + SE_M_IRQ_EN) | M_TX_FIFO_WATERMARK_EN | M_CMD_DONE_EN | M_RX_FIFO_WATERMARK_EN | M_RX_FIFO_LAST_EN);
+		wr(se + SE_S_IRQ_EN, rd(se + SE_S_IRQ_EN) | S_RX_FIFO_WATERMARK_EN | S_RX_FIFO_LAST_EN);
+		while ((rd(se + SE_RX_FIFO_STATUS) & FIFO_WORDS_MSK) != 0) {
+			(void)rd(se + SE_RX_FIFO(0));
+		}
+		wr(se + SE_S_CMD0, UART_START_READ_OPCODE);
+		say("bt: uart: 37. armed; the rx line reads %u, sending five bytes to the chip\n", rd(GPIO_IO(71)) & 1);
+		if (!uart_send(version, sizeof(version))) {
+			say("bt: uart: 37. the send did not complete\n");
+		}
+		say("bt: uart: 37. sent; m_irq %#x, rx fifo %#x\n", rd(se + SE_M_IRQ_STATUS), rd(se + SE_RX_FIFO_STATUS));
+
+		for (unsigned round = 0; round < 40; round++) {
+			while ((rd(se + SE_RX_FIFO_STATUS) & FIFO_WORDS_MSK) != 0 && seen < 32) {
+				uint32_t w = rd(se + SE_RX_FIFO(0));
+
+				say("bt: uart: 37. byte %u: %02x (word %08x)\n", seen, w & 0xff, w);
+				seen++;
+			}
+			if (seen >= 5) {
+				break;
+			}
+			wait_ms(50);
+		}
+		say("bt: uart: 37. %u byte(s) from the chip; rx line %u\n", seen, rd(GPIO_IO(71)) & 1);
+		wr(se + SE_S_CMD0, UART_STOP_READ_OPCODE);
+		return;
+	}
+	if (bt_dry == 36) {
+		/* A register-by-register diff against the engine that works: the console's UART (0x98c000)
+		   is printing this text, so every register it differs in is a candidate for why our engine
+		   sends nothing. Read-only. The secondary's interrupt status (0x640) is skipped: reading it
+		   wedges the engine. */
+		static const unsigned config[] = { 0x48, 0x4c, 0x25c, 0x260, 0x264, 0x268, 0x26c, 0x284, 0x288, 0x28c };
+		volatile uint8_t *console = (volatile uint8_t *)ml_io_map(0x98c000, 0x4000);
+		unsigned differences = 0;
+
+		if (console == NULL) {
+			say("bt: uart: 36. the console engine could not be mapped\n");
+			return;
+		}
+		for (unsigned i = 0; i < sizeof(config) / sizeof(config[0]); i++) {
+			wr(se + config[i], *(volatile uint32_t *)(console + config[i]));
+		}
+		for (unsigned at = 0; at < 0x300; at += 4) {
+			uint32_t mine, theirs;
+
+			if (at == 0x640) {
+				continue;
+			}
+			mine = rd(se + at);
+			theirs = *(volatile uint32_t *)(console + at);
+			if (mine != theirs) {
+				say("bt: uart: 36. %#04x: ours %#x, the console's %#x\n", at, mine, theirs);
+				differences++;
+			}
+		}
+		say("bt: uart: 36. %u register(s) differ below 0x300; status ours %#x theirs %#x\n", differences,
+		    rd(se + 0x40), *(volatile uint32_t *)(console + 0x40));
+		return;
+	}
+	if (bt_dry == 35) {
+		/* The receiver as U-Boot reads one, and nothing else: arm, send, then wait for the master's
+		   SEC interrupt before touching the fifo, and clear only the bits this stage set. No abort
+		   and no wholesale clear -- both wedge this engine. The loopback says who is at fault: if
+		   the engine cannot hear its own five bytes, the fault is here and not at the chip. */
+		static const uint8_t pattern[5] = { 0x01, 0x00, 0xfc, 0x01, 0x19 };
+		static const unsigned config[] = { 0x48, 0x4c, 0x25c, 0x260, 0x264, 0x268, 0x26c, 0x284, 0x288, 0x28c };
+		volatile uint8_t *console = (volatile uint8_t *)ml_io_map(0x98c000, 0x4000);
+		const uint32_t ours = M_TX_FIFO_WATERMARK_EN | M_CMD_DONE_EN | M_RX_FIFO_WATERMARK_EN | M_RX_FIFO_LAST_EN;
+		uint32_t irq = 0;
+		unsigned seen = 0;
+
+		if (console != NULL) {
+			uart_init();
+			for (unsigned i = 0; i < sizeof(config) / sizeof(config[0]); i++) {
+				wr(se + config[i], *(volatile uint32_t *)(console + config[i]));
+			}
+		}
+		{
+			uint32_t tx = rd(GPIO_CFG(70)), rx = rd(GPIO_CFG(71));
+			wr(GPIO_CFG(70), (tx & ~0x3fu) | (1u << 2) | 3u);
+			wr(GPIO_CFG(71), (rx & ~0x3fu) | (1u << 2) | 0u);
+		}
+		wr(se + SE_UART_LOOPBACK_CFG, rd(se + SE_UART_LOOPBACK_CFG) | 1u);
+		wr(se + SE_M_IRQ_EN, rd(se + SE_M_IRQ_EN) | ours);
+		wr(se + SE_S_IRQ_EN, rd(se + SE_S_IRQ_EN) | S_RX_FIFO_WATERMARK_EN | S_RX_FIFO_LAST_EN);
+		say("bt: uart: 35. loopback %#x, m_irq_en %#x\n", rd(se + SE_UART_LOOPBACK_CFG), rd(se + SE_M_IRQ_EN));
+
+		while ((rd(se + SE_RX_FIFO_STATUS) & FIFO_WORDS_MSK) != 0) {
+			(void)rd(se + SE_RX_FIFO(0));
+		}
+		wr(se + SE_S_CMD0, UART_START_READ_OPCODE);
+		say("bt: uart: 35. armed; sending\n");
+		(void)uart_send(pattern, sizeof(pattern));
+
+		/* The wait U-Boot's getc does first: the master's SEC interrupt announces a fifo. */
+		for (unsigned i = 0; i < 200; i++) {
+			irq = rd(se + SE_M_IRQ_STATUS);
+			if ((irq & M_SEC_IRQ_EN) != 0) {
+				break;
+			}
+			wait_ms(10);
+		}
+		say("bt: uart: 35. the master's interrupt state %#x\n", irq);
+		if ((irq & ours) != 0) {
+			wr(se + SE_M_IRQ_CLEAR, irq & ours);
+		}
+		while ((rd(se + SE_RX_FIFO_STATUS) & FIFO_WORDS_MSK) != 0 && seen < 32) {
+			uint32_t w = rd(se + SE_RX_FIFO(0));
+
+			say("bt: uart: 35. word %u: %08x (bytes %02x %02x %02x %02x)\n", seen, w,
+			    w & 0xff, (w >> 8) & 0xff, (w >> 16) & 0xff, (w >> 24) & 0xff);
+			seen++;
+		}
+		say("bt: uart: 35. %u word(s) back; rx fifo %#x\n", seen, rd(se + SE_RX_FIFO_STATUS));
+		wr(se + SE_S_CMD0, UART_STOP_READ_OPCODE);
+		wr(se + SE_UART_LOOPBACK_CFG, rd(se + SE_UART_LOOPBACK_CFG) & ~1u);
+		return;
+	}
+	if (bt_dry == 33) {
+		/* Everything the engine can be given short of a new board: the mainline's own reset timing
+		   (BT_EN down fifty milliseconds, up fifty), the console's configuration, a real abort and a
+		   cleared interrupt before the receiver is armed, and then a long look -- two seconds, with the
+		   read command's own first word noted rather than mistaken for the chip's answer. */
+		static const uint8_t version[5] = { 0x01, 0x00, 0xfc, 0x01, 0x19 };
+		static const uint8_t edl[5] = { 0x01, 0x00, 0xfc, 0x01, 0x05 };
+		static const unsigned config[] = { 0x48, 0x4c, 0x25c, 0x260, 0x264, 0x268, 0x26c, 0x284, 0x288, 0x28c };
+		volatile uint8_t *console = (volatile uint8_t *)ml_io_map(0x98c000, 0x4000);
+		uint32_t words[64];
+		unsigned count = 0;
+		uint32_t cfg = rd(GPIO_CFG(BT_EN)), io = rd(GPIO_IO(BT_EN));
+
+		if (console == NULL) {
+			say("bt: uart: 33. the console engine could not be mapped\n");
+			return;
+		}
+
+		/* The mainline's reset: low fifty milliseconds, high fifty. */
+		wr(GPIO_IO(BT_EN), io & ~2u);
+		wr(GPIO_CFG(BT_EN), (cfg & ~0x3ffu) | 0x303);
+		wait_ms(50);
+		wr(GPIO_IO(BT_EN), 2);
+		wait_ms(50);
+		say("bt: uart: 33. the chip was reset with fifty milliseconds down and fifty up; the line reads %u\n",
+		    rd(GPIO_IO(BT_EN)) & 1);
+
+		/* The console's configuration into this engine. */
+		{
+			uint32_t tx = rd(GPIO_CFG(70)), rx = rd(GPIO_CFG(71));
+			wr(GPIO_CFG(70), (tx & ~0x3fu) | (1u << 2) | 3u);
+			wr(GPIO_CFG(71), (rx & ~0x3fu) | (1u << 2) | 0u);
+		}
+		uart_init();
+		for (unsigned i = 0; i < sizeof(config) / sizeof(config[0]); i++) {
+			wr(se + config[i], *(volatile uint32_t *)(console + config[i]));
+		}
+		wr(se + SE_UART_LOOPBACK_CFG, rd(se + SE_UART_LOOPBACK_CFG) & ~1u);
+
+		/* A real abort, and the interrupts cleared before anything is armed. Writes only: reading the
+		   secondary side's status hangs this engine. */
+		/* The send waits on the watermark and the command-end bits in M_IRQ_STATUS, so those two stay
+		   enabled: with the mask cleared the wait never sees them. */
+		wr(se + SE_M_IRQ_EN, M_TX_FIFO_WATERMARK_EN | M_CMD_DONE_EN);
+		/* No abort: an abort leaves this engine in a state where even SE_RX_FIFO_STATUS hangs the
+		   bus (stage 21 and the run of 06:11 both ended there). The interrupt status is cleared by
+		   writing its clear register, which is safe. */
+		wr(se + SE_M_IRQ_CLEAR, 0xffffffffu);
+		wr(se + SE_S_IRQ_CLEAR, 0xffffffffu);
+		say("bt: uart: 33. aborted and cleared; m_irq %#x, rx fifo %#x\n",
+		    rd(se + SE_M_IRQ_STATUS), rd(se + SE_RX_FIFO_STATUS));
+
+		/* Arm the receiver, then ask, then look for two seconds. The raw send writes the fifo and
+		   does not wait on an interrupt: after the abort the command-end bit does not come. */
+		say("bt: uart: 33a arming the receiver\n");
+		wr(se + SE_S_CMD0, UART_START_READ_OPCODE);
+		say("bt: uart: 33b armed; sending the version request\n");
+		uart_send_raw(version, sizeof(version));
+		say("bt: uart: 33c sent; looking\n");
+		for (unsigned round = 0; round < 20; round++) {
+			while ((rd(se + SE_RX_FIFO_STATUS) & FIFO_WORDS_MSK) != 0 && count < 64) {
+				words[count++] = rd(se + SE_RX_FIFO(0));
+			}
+			if (count >= 4) {
+				break;
+			}
+			wait_ms(100);
+		}
+		say("bt: uart: 33. the version request gave %u word(s); the rx line reads %u\n",
+		    count, rd(GPIO_IO(71)) & 1);
+		for (unsigned i = 0; i < count; i++) {
+			say("bt: uart: 33. word %u: %08x\n", i, words[i]);
+		}
+
+		/* If that produced nothing beyond the read command's own word, the vendor's EDL reset. */
+		if (count <= 1) {
+			while ((rd(se + SE_RX_FIFO_STATUS) & FIFO_WORDS_MSK) != 0) {
+				(void)rd(se + SE_RX_FIFO(0));
+			}
+			count = 0;
+			uart_send_raw(edl, sizeof(edl));
+			for (unsigned round = 0; round < 20; round++) {
+				while ((rd(se + SE_RX_FIFO_STATUS) & FIFO_WORDS_MSK) != 0 && count < 64) {
+					words[count++] = rd(se + SE_RX_FIFO(0));
+				}
+				if (count >= 4) {
+					break;
+				}
+				wait_ms(100);
+			}
+			say("bt: uart: 33. the EDL reset gave %u word(s); the rx line reads %u\n",
+			    count, rd(GPIO_IO(71)) & 1);
+			for (unsigned i = 0; i < count; i++) {
+				say("bt: uart: 33. edl word %u: %08x\n", i, words[i]);
+			}
+		}
+		wr(se + SE_S_CMD0, UART_STOP_READ_OPCODE);
+		return;
+	}
+	if (bt_dry == 28) {
+		/* The engine now carries the console's own configuration (stage 26). No loopback: this is the real
+		   question -- does the chip answer the vendor version request 0xfc00/0x19 with this framing? */
+		static const uint8_t version[5] = { 0x01, 0x00, 0xfc, 0x01, 0x19 };
+		static const unsigned config[] = { 0x48, 0x4c, 0x25c, 0x260, 0x264, 0x268, 0x26c, 0x284, 0x288, 0x28c };
+		volatile uint8_t *console = (volatile uint8_t *)ml_io_map(0x98c000, 0x4000);
+		uint32_t words[32];
+		unsigned count = 0;
+		uint32_t tx = rd(GPIO_CFG(70)), rx = rd(GPIO_CFG(71));
+
+		if (console == NULL) {
+			say("bt: uart: 28. the console engine could not be mapped\n");
+			return;
+		}
+		wr(GPIO_CFG(70), (tx & ~0x3fu) | (1u << 2) | 3u);
+		wr(GPIO_CFG(71), (rx & ~0x3fu) | (1u << 2) | 0u);
+		uart_init();
+		for (unsigned i = 0; i < sizeof(config) / sizeof(config[0]); i++) {
+			wr(se + config[i], *(volatile uint32_t *)(console + config[i]));
+		}
+		wr(se + SE_UART_LOOPBACK_CFG, rd(se + SE_UART_LOOPBACK_CFG) & ~1u);
+		wr(se + SE_S_CMD0, UART_START_READ_OPCODE);
+		say("bt: uart: 28. the engine carries the console's configuration; asking the chip's version\n");
+		if (!uart_send(version, sizeof(version))) {
+			say("bt: uart: 28. the engine would not take the request\n");
+		}
+		for (unsigned round = 0; round < 100 && count < 32; round++) {
+			while ((rd(se + SE_RX_FIFO_STATUS) & FIFO_WORDS_MSK) != 0 && count < 32) {
+				words[count++] = rd(se + SE_RX_FIFO(0));
+			}
+			if ((rd(se + SE_M_IRQ_STATUS) & M_SEC_IRQ_EN) != 0) {
+				wr(se + SE_M_IRQ_CLEAR, M_SEC_IRQ_EN);
+			}
+			if (count != 0) {
+				break;
+			}
+		}
+		say("bt: uart: 28. the chip gave %u word(s); the rx line reads %u\n", count, rd(GPIO_IO(71)) & 1);
+		for (unsigned i = 0; i < count; i++) {
+			say("bt: uart: 28. word %u: %08x (bytes %02x %02x %02x %02x)\n", i, words[i],
+			    words[i] & 0xff, (words[i] >> 8) & 0xff, (words[i] >> 16) & 0xff, (words[i] >> 24) & 0xff);
+		}
+		return;
+	}
+	if (bt_dry == 27) {
+		/* Stage 26 copied the console's engine and got one word back for eight bytes sent one command at a time.
+		   This one sends them as a single eight-byte command -- the way U-Boot's puts() does -- so the fifo should
+		   hand back two packed words of the bytes that went in. */
+		static const uint8_t pattern[8] = { 0xde, 0xad, 0xbe, 0xef, 0x01, 0x02, 0x03, 0x04 };
+		static const unsigned config[] = { 0x48, 0x4c, 0x25c, 0x260, 0x264, 0x268, 0x26c, 0x284, 0x288, 0x28c };
+		volatile uint8_t *console = (volatile uint8_t *)ml_io_map(0x98c000, 0x4000);
+		uint32_t words[16];
+		unsigned count = 0;
+		uint32_t tx = rd(GPIO_CFG(70)), rx = rd(GPIO_CFG(71));
+
+		if (console == NULL) {
+			say("bt: uart: 27. the console engine could not be mapped\n");
+			return;
+		}
+		wr(GPIO_CFG(70), (tx & ~0x3fu) | (1u << 2) | 3u);
+		wr(GPIO_CFG(71), (rx & ~0x3fu) | (1u << 2) | 0u);
+		uart_init();
+		for (unsigned i = 0; i < sizeof(config) / sizeof(config[0]); i++) {
+			wr(se + config[i], *(volatile uint32_t *)(console + config[i]));
+		}
+		wr(se + SE_UART_LOOPBACK_CFG, rd(se + SE_UART_LOOPBACK_CFG) | 1u);
+		wr(se + SE_S_CMD0, UART_START_READ_OPCODE);
+		uart_send_raw(pattern, sizeof(pattern));
+		say("bt: uart: 27. after the send: m %#x, s %#x, fifo %#x\n",
+		    rd(se + SE_M_CMD0), rd(se + SE_S_CMD0), rd(se + SE_RX_FIFO_STATUS));
+		for (unsigned round = 0; round < 40 && count < 16; round++) {
+			while ((rd(se + SE_RX_FIFO_STATUS) & FIFO_WORDS_MSK) != 0 && count < 16) {
+				words[count++] = rd(se + SE_RX_FIFO(0));
+			}
+			if (round == 3) {
+				say("bt: uart: 27. round 3: m_irq %#x, fifo %#x\n",
+				    rd(se + SE_M_IRQ_STATUS), rd(se + SE_RX_FIFO_STATUS));
+			}
+		}
+		say("bt: uart: 27. the loopback gave %u word(s)\n", count);
+		for (unsigned i = 0; i < count; i++) {
+			say("bt: uart: 27. word %u: %08x (bytes %02x %02x %02x %02x)\n", i, words[i],
+			    words[i] & 0xff, (words[i] >> 8) & 0xff, (words[i] >> 16) & 0xff, (words[i] >> 24) & 0xff);
+		}
+		wr(se + SE_UART_LOOPBACK_CFG, rd(se + SE_UART_LOOPBACK_CFG) & ~1u);
+		return;
+	}
+	if (bt_dry == 26) {
+		/* Stage 25 said which registers differ from the console's engine, whose framing is known to work.
+		   So: make ours look like that one -- its divider (4, which is 115,200 baud at sixteen samples a bit, not
+		   thirty-two) and its packing -- then ask the loopback for the eight bytes that went in. */
+		static const uint8_t pattern[8] = { 0xde, 0xad, 0xbe, 0xef, 0x01, 0x02, 0x03, 0x04 };
+		static const unsigned config[] = { 0x48, 0x4c, 0x25c, 0x260, 0x264, 0x268, 0x26c, 0x284, 0x288, 0x28c };
+		volatile uint8_t *console = (volatile uint8_t *)ml_io_map(0x98c000, 0x4000);
+		uint32_t words[16];
+		unsigned count = 0;
+		uint32_t tx = rd(GPIO_CFG(70)), rx = rd(GPIO_CFG(71));
+
+		if (console == NULL) {
+			say("bt: uart: 26. the console engine could not be mapped\n");
+			return;
+		}
+		wr(GPIO_CFG(70), (tx & ~0x3fu) | (1u << 2) | 3u);
+		wr(GPIO_CFG(71), (rx & ~0x3fu) | (1u << 2) | 0u);
+		uart_init();
+		for (unsigned i = 0; i < sizeof(config) / sizeof(config[0]); i++) {
+			uint32_t value = *(volatile uint32_t *)(console + config[i]);
+
+			wr(se + config[i], value);
+			say("bt: uart: 26. %#04x: %#x (taken from the console's engine, now reads %#x)\n",
+			    config[i], value, rd(se + config[i]));
+		}
+		wr(se + SE_UART_LOOPBACK_CFG, rd(se + SE_UART_LOOPBACK_CFG) | 1u);
+		wr(se + SE_S_CMD0, UART_START_READ_OPCODE);
+		if (!uart_send(pattern, sizeof(pattern))) {
+			say("bt: uart: 26. the engine would not take them\n");
+		}
+		for (unsigned round = 0; round < 40 && count < 16; round++) {
+			while ((rd(se + SE_RX_FIFO_STATUS) & FIFO_WORDS_MSK) != 0 && count < 16) {
+				words[count++] = rd(se + SE_RX_FIFO(0));
+			}
+		}
+		say("bt: uart: 26. the loopback gave %u word(s)\n", count);
+		for (unsigned i = 0; i < count; i++) {
+			say("bt: uart: 26. word %u: %08x (bytes %02x %02x %02x %02x)\n", i, words[i],
+			    words[i] & 0xff, (words[i] >> 8) & 0xff, (words[i] >> 16) & 0xff, (words[i] >> 24) & 0xff);
+		}
+		wr(se + SE_UART_LOOPBACK_CFG, rd(se + SE_UART_LOOPBACK_CFG) & ~1u);
+		return;
+	}
+	if (bt_dry == 32) {
+		/* The same loopback, but with time in it: at 115,200 baud eight bytes take 700 microseconds to leave, and
+		   stage 31 read the fifo in the microseconds after the command -- before anything could arrive. */
+		static const uint8_t pattern[8] = { 0xde, 0xad, 0xbe, 0xef, 0x01, 0x02, 0x03, 0x04 };
+		static const unsigned config[] = { 0x48, 0x4c, 0x25c, 0x260, 0x264, 0x268, 0x26c, 0x284, 0x288, 0x28c };
+		volatile uint8_t *console = (volatile uint8_t *)ml_io_map(0x98c000, 0x4000);
+		uint32_t words[16];
+		unsigned count = 0;
+		uint32_t tx = rd(GPIO_CFG(70)), rx = rd(GPIO_CFG(71));
+
+		if (console == NULL) {
+			say("bt: uart: 32. the console engine could not be mapped\n");
+			return;
+		}
+		wr(GPIO_CFG(70), (tx & ~0x3fu) | (1u << 2) | 3u);
+		wr(GPIO_CFG(71), (rx & ~0x3fu) | (1u << 2) | 0u);
+		uart_init();
+		for (unsigned i = 0; i < sizeof(config) / sizeof(config[0]); i++) {
+			wr(se + config[i], *(volatile uint32_t *)(console + config[i]));
+		}
+		wr(se + SE_UART_LOOPBACK_CFG, rd(se + SE_UART_LOOPBACK_CFG) | 1u);
+		wr(se + SE_S_CMD0, UART_START_READ_OPCODE);
+		if (!uart_send(pattern, sizeof(pattern))) {
+			say("bt: uart: 32. the engine would not take them\n");
+		}
+		for (unsigned round = 0; round < 40 && count < 16; round++) {
+			while ((rd(se + SE_RX_FIFO_STATUS) & FIFO_WORDS_MSK) != 0 && count < 16) {
+				words[count++] = rd(se + SE_RX_FIFO(0));
+			}
+			if (count != 0) {
+				break;
+			}
+			wait_ms(5);
+		}
+		say("bt: uart: 32. after waiting, the loopback gave %u word(s)\n", count);
+		for (unsigned i = 0; i < count; i++) {
+			say("bt: uart: 32. word %u: %08x (bytes %02x %02x %02x %02x)\n", i, words[i],
+			    words[i] & 0xff, (words[i] >> 8) & 0xff, (words[i] >> 16) & 0xff, (words[i] >> 24) & 0xff);
+		}
+		wr(se + SE_UART_LOOPBACK_CFG, rd(se + SE_UART_LOOPBACK_CFG) & ~1u);
+		return;
+	}
+	if (bt_dry == 31) {
+		/* Length against what comes back: one, two, three, four and five bytes through the loopback, each with its
+		   own read. If the word follows the bytes it is packing; if it is the same word every time, the fifo is not
+		   seeing the data at all. */
+		static const unsigned config[] = { 0x48, 0x4c, 0x25c, 0x260, 0x264, 0x268, 0x26c, 0x284, 0x288, 0x28c };
+		static const uint8_t seed = 0x11;
+		volatile uint8_t *console = (volatile uint8_t *)ml_io_map(0x98c000, 0x4000);
+		uint32_t tx = rd(GPIO_CFG(70)), rx = rd(GPIO_CFG(71));
+
+		if (console == NULL) {
+			say("bt: uart: 31. the console engine could not be mapped\n");
+			return;
+		}
+		wr(GPIO_CFG(70), (tx & ~0x3fu) | (1u << 2) | 3u);
+		wr(GPIO_CFG(71), (rx & ~0x3fu) | (1u << 2) | 0u);
+		uart_init();
+		for (unsigned i = 0; i < sizeof(config) / sizeof(config[0]); i++) {
+			wr(se + config[i], *(volatile uint32_t *)(console + config[i]));
+		}
+		wr(se + SE_UART_LOOPBACK_CFG, rd(se + SE_UART_LOOPBACK_CFG) | 1u);
+		for (unsigned length = 1; length <= 5; length++) {
+			uint8_t bytes[8];
+			uint32_t words[8];
+			unsigned count = 0;
+
+			for (unsigned i = 0; i < length; i++) {
+				bytes[i] = (uint8_t)(seed + i);
+			}
+			while ((rd(se + SE_RX_FIFO_STATUS) & FIFO_WORDS_MSK) != 0) {
+				(void)rd(se + SE_RX_FIFO(0));
+			}
+			wr(se + SE_S_CMD0, UART_START_READ_OPCODE);
+			if (!uart_send(bytes, length)) {
+				say("bt: uart: 31. %u byte(s): the engine would not take them\n", length);
+			}
+			for (unsigned round = 0; round < 20 && count < 8; round++) {
+				while ((rd(se + SE_RX_FIFO_STATUS) & FIFO_WORDS_MSK) != 0 && count < 8) {
+					words[count++] = rd(se + SE_RX_FIFO(0));
+				}
+			}
+			say("bt: uart: 31. %u byte(s) in, %u word(s) out:", length, count);
+			for (unsigned i = 0; i < count; i++) {
+				say(" %08x", words[i]);
+			}
+			say("%s\n", count ? "" : " (nothing)");
+		}
+		wr(se + SE_UART_LOOPBACK_CFG, rd(se + SE_UART_LOOPBACK_CFG) & ~1u);
+		return;
+	}
+	if (bt_dry == 30) {
+		/* Does this engine carry the QUP firmware the working console's engine carries? SE_GENI_FW_REVISION
+		   (0x1000) is the answer, and 0x258 says whether the engine is in DMA mode. A serial engine with no
+		   firmware has the fifo but not the sequencer that frames what goes through it. */
+		volatile uint8_t *console = (volatile uint8_t *)ml_io_map(0x98c000, 0x4000);
+
+		if (console == NULL) {
+			say("bt: uart: 30. the console engine could not be mapped\n");
+			return;
+		}
+		say("bt: uart: 30. firmware revision: ours %#x / %#x, the console's %#x / %#x\n",
+		    rd(se + 0x1000), rd(se + 0x1004),
+		    *(volatile uint32_t *)(console + 0x1000), *(volatile uint32_t *)(console + 0x1004));
+		say("bt: uart: 30. dma mode: ours %#x, the console's %#x; dma if en: ours %#x, the console's %#x\n",
+		    rd(se + 0x258), *(volatile uint32_t *)(console + 0x258),
+		    rd(se + 0x2004), *(volatile uint32_t *)(console + 0x2004));
+		say("bt: uart: 30. fifo interface disabled: ours %#x, the console's %#x; clk ctrl: ours %#x, theirs %#x\n",
+		    rd(se + 0x2008), *(volatile uint32_t *)(console + 0x2008),
+		    rd(se + 0x2000), *(volatile uint32_t *)(console + 0x2000));
+		return;
+	}
+	if (bt_dry == 29) {
+		/* Stage 25 said which registers differ from the console's engine, whose framing is known to work.
+		   So: make ours look like that one -- its divider (4, which is 115,200 baud at sixteen samples a bit, not
+		   thirty-two) and its packing -- then ask the loopback for the eight bytes that went in. */
+		static const uint8_t pattern[8] = { 0xde, 0xad, 0xbe, 0xef, 0x01, 0x02, 0x03, 0x04 };
+		static const unsigned config[] = { 0x48, 0x4c, 0x25c, 0x260, 0x264, 0x268, 0x26c, 0x284, 0x288, 0x28c, 0x614, 0x644 };
+		volatile uint8_t *console = (volatile uint8_t *)ml_io_map(0x98c000, 0x4000);
+		uint32_t words[16];
+		unsigned count = 0;
+		uint32_t tx = rd(GPIO_CFG(70)), rx = rd(GPIO_CFG(71));
+
+		if (console == NULL) {
+			say("bt: uart: 29. the console engine could not be mapped\n");
+			return;
+		}
+		wr(GPIO_CFG(70), (tx & ~0x3fu) | (1u << 2) | 3u);
+		wr(GPIO_CFG(71), (rx & ~0x3fu) | (1u << 2) | 0u);
+		uart_init();
+		for (unsigned i = 0; i < sizeof(config) / sizeof(config[0]); i++) {
+			uint32_t value = *(volatile uint32_t *)(console + config[i]);
+
+			wr(se + config[i], value);
+			say("bt: uart: 29. %#04x: %#x (taken from the console's engine, now reads %#x)\n",
+			    config[i], value, rd(se + config[i]));
+		}
+		wr(se + SE_UART_LOOPBACK_CFG, rd(se + SE_UART_LOOPBACK_CFG) | 1u);
+		wr(se + SE_S_CMD0, UART_START_READ_OPCODE);
+		if (!uart_send(pattern, sizeof(pattern))) {
+			say("bt: uart: 29. the engine would not take them\n");
+		}
+		for (unsigned round = 0; round < 40 && count < 16; round++) {
+			while ((rd(se + SE_RX_FIFO_STATUS) & FIFO_WORDS_MSK) != 0 && count < 16) {
+				words[count++] = rd(se + SE_RX_FIFO(0));
+			}
+		}
+		say("bt: uart: 29. the loopback gave %u word(s)\n", count);
+		for (unsigned i = 0; i < count; i++) {
+			say("bt: uart: 29. word %u: %08x (bytes %02x %02x %02x %02x)\n", i, words[i],
+			    words[i] & 0xff, (words[i] >> 8) & 0xff, (words[i] >> 16) & 0xff, (words[i] >> 24) & 0xff);
+		}
+		wr(se + SE_UART_LOOPBACK_CFG, rd(se + SE_UART_LOOPBACK_CFG) & ~1u);
+		return;
+	}
+	if (bt_dry == 25) {
+		/* The console's engine (0x98c000, the one U-Boot prints on and the one whose framing is known to work)
+		   against ours (0x890000): whatever differs is a candidate for what is missing. */
+		static const unsigned offsets[] = {
+			0x00, 0x04, 0x08, 0x0c, 0x10, 0x14, 0x18, 0x1c, 0x20, 0x24, 0x28, 0x2c, 0x30, 0x34, 0x38, 0x3c,
+			0x40, 0x44, 0x48, 0x4c, 0x50, 0x60, 0x64, 0x68, 0x6c, 0x70, 0x80, 0x84, 0x88, 0x8c, 0x90, 0x94,
+			0x200, 0x204, 0x208, 0x20c, 0x210, 0x214, 0x218, 0x21c, 0x220, 0x224, 0x228, 0x22c,
+			0x230, 0x234, 0x238, 0x23c, 0x240, 0x244, 0x248, 0x24c, 0x250, 0x254, 0x258, 0x25c,
+			0x260, 0x264, 0x268, 0x26c, 0x270, 0x274, 0x27c, 0x280, 0x284, 0x288, 0x28c, 0x290,
+		};
+		volatile uint8_t *console = (volatile uint8_t *)ml_io_map(0x98c000, 0x4000);
+		unsigned differences = 0;
+
+		if (console == NULL) {
+			say("bt: uart: 25. the console engine could not be mapped\n");
+			return;
+		}
+		for (unsigned i = 0; i < sizeof(offsets) / sizeof(offsets[0]); i++) {
+			uint32_t mine = rd(se + offsets[i]);
+			uint32_t theirs = *(volatile uint32_t *)(console + offsets[i]);
+
+			if (mine != theirs) {
+				say("bt: uart: 25. %#04x: ours %#x, the console's %#x\n", offsets[i], mine, theirs);
+				differences++;
+			}
+		}
+		say("bt: uart: 25. %u of the registers differ\n", differences);
+		return;
+	}
+	if (bt_dry == 24) {
+		/* Words, not bytes: the fifo's width says how many bytes ride in one word, and the loopback should hand
+		   back exactly the eight bytes that went in. */
+		static const uint8_t pattern[8] = { 0xde, 0xad, 0xbe, 0xef, 0x01, 0x02, 0x03, 0x04 };
+		uint32_t words[16];
+		unsigned count = 0;
+		uint32_t tx = rd(GPIO_CFG(70)), rx = rd(GPIO_CFG(71));
+
+		wr(GPIO_CFG(70), (tx & ~0x3fu) | (1u << 2) | 3u);
+		wr(GPIO_CFG(71), (rx & ~0x3fu) | (1u << 2) | 0u);
+		uart_divisor(7372800, 115200);
+		uart_init();
+		wr(se + SE_UART_LOOPBACK_CFG, rd(se + SE_UART_LOOPBACK_CFG) | 1u);
+		wr(se + SE_S_CMD0, UART_START_READ_OPCODE);
+		say("bt: uart: 24. hw params %#x, rx packing %#x/%#x, rx word len %#x\n",
+		    rd(se + SE_STATUS), rd(se + SE_RX_PACKING_CFG0), rd(se + SE_RX_PACKING_CFG1),
+		    rd(se + SE_RX_WORD_LEN));
+		if (!uart_send(pattern, sizeof(pattern))) {
+			say("bt: uart: 24. the engine would not take them\n");
+		}
+		for (unsigned round = 0; round < 40 && count < 16; round++) {
+			while ((rd(se + SE_RX_FIFO_STATUS) & FIFO_WORDS_MSK) != 0 && count < 16) {
+				words[count++] = rd(se + SE_RX_FIFO(0));
+			}
+		}
+		say("bt: uart: 24. the loopback gave %u word(s)\n", count);
+		for (unsigned i = 0; i < count; i++) {
+			say("bt: uart: 24. word %u: %08x (bytes %02x %02x %02x %02x)\n", i, words[i],
+			    words[i] & 0xff, (words[i] >> 8) & 0xff, (words[i] >> 16) & 0xff, (words[i] >> 24) & 0xff);
+		}
+		wr(se + SE_UART_LOOPBACK_CFG, rd(se + SE_UART_LOOPBACK_CFG) & ~1u);
+		return;
+	}
+	if (bt_dry == 23) {
+		/* Stage 22 polled for the receiver without ever telling it to receive: the read command was missing, so
+		   an empty fifo was all it could see. This one gives S_CMD0 the read opcode first (writing it is proved),
+		   then watches M_IRQ with the loopback on. */
+		static const uint8_t version[5] = { 0x01, 0x00, 0xfc, 0x01, 0x19 };
+		uint8_t back[32];
+		unsigned got = 0;
+		uint32_t tx = rd(GPIO_CFG(70)), rx = rd(GPIO_CFG(71));
+
+		wr(GPIO_CFG(70), (tx & ~0x3fu) | (1u << 2) | 3u);
+		wr(GPIO_CFG(71), (rx & ~0x3fu) | (1u << 2) | 0u);
+		uart_divisor(7372800, 115200);
+		uart_init();
+		wr(se + SE_UART_LOOPBACK_CFG, rd(se + SE_UART_LOOPBACK_CFG) | 1u);
+		wr(se + SE_S_CMD0, UART_START_READ_OPCODE);
+		say("bt: uart: 23. read command given, m %#x, s %#x\n", rd(se + SE_M_CMD0), rd(se + SE_S_CMD0));
+		if (!uart_send(version, sizeof(version))) {
+			say("bt: uart: 23. the engine would not take them\n");
+		}
+		for (unsigned round = 0; round < 40 && got < sizeof(back); round++) {
+			uint32_t m = rd(se + SE_M_IRQ_STATUS);
+
+			if (round < 4) {
+				say("bt: uart: 23. round %u: m_irq %#x, rx fifo %#x\n", round, m,
+				    rd(se + SE_RX_FIFO_STATUS));
+			}
+			if ((m & M_SEC_IRQ_EN) != 0) {
+				wr(se + SE_M_IRQ_CLEAR, M_SEC_IRQ_EN);
+			}
+			while ((rd(se + SE_RX_FIFO_STATUS) & FIFO_WORDS_MSK) != 0 && got < sizeof(back)) {
+				back[got++] = (uint8_t)(rd(se + SE_RX_FIFO(0)) & 0xff);
+			}
+		}
+		say("bt: uart: 23. the fifo gave %u byte(s):", got);
+		for (unsigned i = 0; i < got; i++) {
+			say(" %02x", back[i]);
+		}
+		say("%s\n", got ? "" : " (nothing)");
+		wr(se + SE_UART_LOOPBACK_CFG, rd(se + SE_UART_LOOPBACK_CFG) & ~1u);
+		return;
+	}
+	if (bt_dry == 22) {
+		/* Stage 21 stopped the bus somewhere; the one register in it that had never been read is S_IRQ_STATUS
+		   (0x640, the secondary sequencer's). This one reads only the main block and the fifo: wait for the
+		   secondary's interrupt through M_IRQ_STATUS, clear it there, take the fifo. */
+		static const uint8_t version[5] = { 0x01, 0x00, 0xfc, 0x01, 0x19 };
+		uint8_t back[32];
+		unsigned got = 0, waits = 0;
+		uint32_t tx = rd(GPIO_CFG(70)), rx = rd(GPIO_CFG(71));
+
+		wr(GPIO_CFG(70), (tx & ~0x3fu) | (1u << 2) | 3u);
+		wr(GPIO_CFG(71), (rx & ~0x3fu) | (1u << 2) | 0u);
+		uart_divisor(7372800, 115200);
+		uart_init();
+		wr(se + SE_UART_LOOPBACK_CFG, rd(se + SE_UART_LOOPBACK_CFG) | 1u);
+		say("bt: uart: 22. loopback on; looped back %u\n", (rd(se + SE_UART_LOOPBACK_CFG) & 1u));
+		if (!uart_send(version, sizeof(version))) {
+			say("bt: uart: 22. the engine would not take them\n");
+		}
+		say("bt: uart: 22. after the send: m_irq %#x, status %#x, rx fifo %#x\n",
+		    rd(se + SE_M_IRQ_STATUS), rd(se + SE_STATUS), rd(se + SE_RX_FIFO_STATUS));
+		for (unsigned round = 0; round < 40 && got < sizeof(back); round++) {
+			if ((rd(se + SE_M_IRQ_STATUS) & M_SEC_IRQ_EN) == 0) {
+				waits++;
+				continue;
+			}
+			wr(se + SE_M_IRQ_CLEAR, M_SEC_IRQ_EN);
+			while ((rd(se + SE_RX_FIFO_STATUS) & FIFO_WORDS_MSK) != 0 && got < sizeof(back)) {
+				back[got++] = (uint8_t)(rd(se + SE_RX_FIFO(0)) & 0xff);
+			}
+		}
+		say("bt: uart: 22. %u rounds waited, the fifo gave %u byte(s):", waits, got);
+		for (unsigned i = 0; i < got; i++) {
+			say(" %02x", back[i]);
+		}
+		say("%s\n", got ? "" : " (nothing)");
+		if (got == sizeof(version) && back[0] == version[0] && back[1] == version[1]) {
+			say("bt: uart: 22. the loopback gave back what was sent\n");
+		}
+		wr(se + SE_UART_LOOPBACK_CFG, rd(se + SE_UART_LOOPBACK_CFG) & ~1u);
+		return;
+	}
+	if (bt_dry == 21) {
+		/* The loopback first: what goes in must come out. Only then is the chip asked anything. */
+		static const uint8_t version[5] = { 0x01, 0x00, 0xfc, 0x01, 0x19 };
+		uint8_t back[32];
+		unsigned got;
+		uint32_t tx = rd(GPIO_CFG(70)), rx = rd(GPIO_CFG(71));
+
+		wr(GPIO_CFG(70), (tx & ~0x3fu) | (1u << 2) | 3u);
+		wr(GPIO_CFG(71), (rx & ~0x3fu) | (1u << 2) | 0u);
+		uart_divisor(7372800, 115200);
+		uart_init();
+		wr(se + SE_UART_LOOPBACK_CFG, rd(se + SE_UART_LOOPBACK_CFG) | 1u);
+		say("bt: uart: 21. loopback on, sending five bytes the way U-Boot would\n");
+		if (!uart_send(version, sizeof(version))) {
+			say("bt: uart: 21. the engine would not take them\n");
+		}
+		got = uart_read_irq(back, sizeof(back), 300);
+		say("bt: uart: 21. the loopback gave %u byte(s):", got);
+		for (unsigned i = 0; i < got; i++) {
+			say(" %02x", back[i]);
+		}
+		say("%s\n", got ? "" : " (nothing)");
+		wr(se + SE_UART_LOOPBACK_CFG, rd(se + SE_UART_LOOPBACK_CFG) & ~1u);
+		{
+			bool same = got == sizeof(version);
+
+			for (unsigned i = 0; i < got && same; i++) {
+				same = back[i] == version[i];
+			}
+			say("bt: uart: 21. the loopback %s\n", same ? "gave back exactly what was sent"
+			    : "did not give back what was sent");
+			if (!same) {
+				say("bt: uart: 21. so it is the engine, not the chip, that is in the way\n");
+				return;
+			}
+		}
+		say("bt: uart: 21. now the same five bytes to the chip, read the same way\n");
+		if (!uart_send(version, sizeof(version))) {
+			say("bt: uart: 21. the engine would not take the version request\n");
+			return;
+		}
+		got = uart_read_irq(back, sizeof(back), 1000);
+		say("bt: uart: 21. the chip answered %u byte(s):", got);
+		for (unsigned i = 0; i < got; i++) {
+			say(" %02x", back[i]);
+		}
+		say("%s\n", got ? "" : " (nothing)");
 		return;
 	}
 	if (bt_dry == 18) {
