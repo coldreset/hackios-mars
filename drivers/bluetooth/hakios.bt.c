@@ -211,6 +211,27 @@ power_thread(void *arg, __unused wait_result_t result)
  * The divisor the engine itself uses is (serial clock / (baud * 32)). Which serial clock is running is not written
  * down anywhere we can read, so level 3 does not guess: it reads the divisor that is already in the engine, and if
  * there is none, tries the rates a QUP engine is usually given.
+ *
+ *
+ * What has been proved on the phone (mars, 14 November 2026), and what has not:
+ *
+ *   - The engine's clocks: the wrapper's gates are 0x10f (core, s-ahb, m-ahb, core-2x, se4) and the divider at
+ *     GCC+0x1e4d0 takes 0x100106 / 384 / 15625 / ~384, which is 7,372,800 Hz -- 115,200 baud with the engine's
+ *     own divide by two. (The first reading of that register went to GCC+0x21e4d0, past the end of the map, and
+ *     stopped the bus: the addresses in the tables already carry the block's base.)
+ *   - The pads: gpio70 (tx) and gpio71 (rx) sit in function 1, which is qup18 on these pins -- the pins are counted
+ *     from the gpio function in the device tree's PINGROUP(), so qup18 is the first alternative, not the second.
+ *     Without that mux the engine shifts into nothing.
+ *   - Scaling out: the main sequencer's command completes (the watermark and the end-of-command waits both answer),
+ *     so the four reset bytes do leave the engine.
+ *   - Scaling in: nothing has been heard from the chip. A read started with no data yields the same eight words
+ *     every time -- 0, 0, 0, 0, 0xf0, 0, 0, 0xf0 -- with the chip on the other end, with the engine in its own
+ *     loopback, and with the wire idle, so those eight words are the instrument's, not the chip's. Earlier readings
+ *     of them as "the chip answered" were wrong.
+ *
+ * The next step is therefore not another baud rate: either the chip wants the vendor handshake (the ROM patch,
+ * 0xfc00 and its friends) before it answers HCI at all, or it is not running -- its 32 kHz sleep clock is not one
+ * of the rails this driver votes on, and the device tree does not say where it comes from.
  */
 #define SE_PHYS                 0x890000UL
 #define SE_SIZE                 0x4000UL
@@ -271,6 +292,8 @@ power_thread(void *arg, __unused wait_result_t result)
 #define UART_START_TX_OPCODE    (1u << 27)
 #define UART_START_READ_OPCODE  (1u << 27)
 #define FIFO_WORDS_MSK          0x1ffffffu
+#define SE_UART_LOOPBACK_CFG    0x274
+#define UART_STOP_READ_OPCODE   (1u << 28)
 #define UART_PACKING_CFG0       0xfu
 
 /* GCC's QUPV3 wrapper 2: core, both AHB clocks, the 2x core and SE 4, all in one register */
@@ -548,6 +571,149 @@ uart_after_power(void)
 		say("bt: uart: 10. reading the command side with source %u\n", bt_src);
 		say("bt: uart: 10. the master's interrupt state reads %#x, the slave's %#x\n",
 		    rd(se + SE_M_IRQ_STATUS), rd(se + SE_S_IRQ_STATUS));
+		return;
+	}
+	if (bt_dry == 19) {
+		static const uint8_t reset[4] = { 0x01, 0x03, 0x0c, 0x00 };
+		uint32_t tx = rd(GPIO_CFG(70)), rx = rd(GPIO_CFG(71));
+		wr(GPIO_CFG(70), (tx & ~0x3fu) | (1u << 2) | 3u);
+		wr(GPIO_CFG(71), (rx & ~0x3fu) | (1u << 2) | 0u);
+		uart_divisor(7372800, 115200);
+		uart_init();
+		/* The interrupt mask U-Boot sets before it sends: the watermark and the command's end. */
+		wr(se + SE_M_IRQ_EN, rd(se + SE_M_IRQ_EN) | M_TX_FIFO_WATERMARK_EN | M_CMD_DONE_EN);
+		wr(se + SE_UART_LOOPBACK_CFG, rd(se + SE_UART_LOOPBACK_CFG) | 1u);
+		for (unsigned i = 0; i < 32 && (rd(se + SE_RX_FIFO_STATUS) & FIFO_WORDS_MSK) != 0; i++) {
+			(void)rd(se + SE_RX_FIFO(0));
+		}
+		bool sent = uart_send(reset, sizeof(reset));
+		say("bt: uart: 19. loopback %#x; the send says %u\n", rd(se + SE_UART_LOOPBACK_CFG), sent);
+		wr(se + SE_S_CMD0, UART_START_READ_OPCODE);
+		wait_ms(50);
+		unsigned words = rd(se + SE_RX_FIFO_STATUS) & FIFO_WORDS_MSK;
+		say("bt: uart: 19. the loopback gave %u words\n", words);
+		for (unsigned i = 0; i < words && i < 16; i++) {
+			say("bt: uart: 19. word %u: %#x\n", i, rd(se + SE_RX_FIFO(0)));
+		}
+		wr(se + SE_S_CMD0, UART_STOP_READ_OPCODE);
+		wr(se + SE_UART_LOOPBACK_CFG, rd(se + SE_UART_LOOPBACK_CFG) & ~1u);
+		for (unsigned i = 0; i < 32 && (rd(se + SE_RX_FIFO_STATUS) & FIFO_WORDS_MSK) != 0; i++) {
+			(void)rd(se + SE_RX_FIFO(0));
+		}
+		sent = uart_send(reset, sizeof(reset));
+		say("bt: uart: 19. to the chip the send says %u\n", sent);
+		wr(se + SE_S_CMD0, UART_START_READ_OPCODE);
+		unsigned seen = 0;
+		for (unsigned round = 0; round < 10; round++) {
+			unsigned have = rd(se + SE_RX_FIFO_STATUS) & FIFO_WORDS_MSK;
+			while (have-- != 0 && seen < 16) {
+				say("bt: uart: 19. byte %u: %#x\n", seen++, rd(se + SE_RX_FIFO(0)) & 0xff);
+			}
+			wait_ms(50);
+		}
+		say("bt: uart: 19. %u bytes from the chip; the rx line reads %u\n", seen, rd(GPIO_IO(71)) & 1);
+		return;
+	}
+	if (bt_dry == 18) {
+		static const uint8_t reset[4] = { 0x01, 0x03, 0x0c, 0x00 };
+		uint32_t tx = rd(GPIO_CFG(70)), rx = rd(GPIO_CFG(71));
+		wr(GPIO_CFG(70), (tx & ~0x3fu) | (1u << 2) | 3u);
+		wr(GPIO_CFG(71), (rx & ~0x3fu) | (1u << 2) | 0u);
+		uart_divisor(7372800, 115200);
+		uart_init();
+		/* The engine, talking to itself: if the four bytes come back the divisor and the engine are right,
+		   and whatever is wrong is outside the chip. */
+		wr(se + SE_UART_LOOPBACK_CFG, rd(se + SE_UART_LOOPBACK_CFG) | 1u);
+		say("bt: uart: 18. loopback %#x, status %#x, m %#x, s %#x\n",
+		    rd(se + SE_UART_LOOPBACK_CFG), rd(se + SE_STATUS), rd(se + SE_M_CMD0), rd(se + SE_S_CMD0));
+		for (unsigned i = 0; i < 32 && (rd(se + SE_RX_FIFO_STATUS) & FIFO_WORDS_MSK) != 0; i++) {
+			(void)rd(se + SE_RX_FIFO(0));
+		}
+		uart_send_raw(reset, sizeof(reset));
+		wr(se + SE_S_CMD0, UART_START_READ_OPCODE);
+		wait_ms(50);
+		unsigned words = rd(se + SE_RX_FIFO_STATUS) & FIFO_WORDS_MSK;
+		say("bt: uart: 18. the loopback gave %u words\n", words);
+		for (unsigned i = 0; i < words && i < 16; i++) {
+			say("bt: uart: 18. word %u: %#x\n", i, rd(se + SE_RX_FIFO(0)));
+		}
+		wr(se + SE_S_CMD0, UART_STOP_READ_OPCODE);
+		wr(se + SE_UART_LOOPBACK_CFG, rd(se + SE_UART_LOOPBACK_CFG) & ~1u);
+		/* and now, without the loopback, the same four bytes to the chip. */
+		uart_send_raw(reset, sizeof(reset));
+		wr(se + SE_S_CMD0, UART_START_READ_OPCODE);
+		unsigned seen = 0;
+		for (unsigned round = 0; round < 10; round++) {
+			unsigned have = rd(se + SE_RX_FIFO_STATUS) & FIFO_WORDS_MSK;
+			while (have-- != 0 && seen < 16) {
+				say("bt: uart: 18. byte %u: %#x\n", seen++, rd(se + SE_RX_FIFO(0)) & 0xff);
+			}
+			wait_ms(50);
+		}
+		say("bt: uart: 18. %u bytes from the chip; the rx line reads %u\n", seen, rd(GPIO_IO(71)) & 1);
+		return;
+	}
+	if (bt_dry == 17) {
+		static const uint8_t reset[4] = { 0x01, 0x03, 0x0c, 0x00 };
+		unsigned seen = 0;
+		uint32_t tx = rd(GPIO_CFG(70)), rx = rd(GPIO_CFG(71));
+		/* The phone's device tree, in the state the UART is used in: the tx pad pulls up, the rx pad does not
+		   pull at all, both drive 2 mA. */
+		wr(GPIO_CFG(70), (tx & ~0x3fu) | (1u << 2) | 3u | (0u << 6));
+		wr(GPIO_CFG(71), (rx & ~0x3fu) | (1u << 2) | 0u | (0u << 6));
+		wait_ms(2);
+		say("bt: uart: 17. tx pad %#x -> %#x, rx pad %#x -> %#x; the lines read %u and %u\n",
+		    tx, rd(GPIO_CFG(70)), rx, rd(GPIO_CFG(71)), rd(GPIO_IO(70)) & 1, rd(GPIO_IO(71)) & 1);
+		uart_divisor(7372800, 115200);
+		uart_init();
+		for (unsigned i = 0; i < 32 && (rd(se + SE_RX_FIFO_STATUS) & FIFO_WORDS_MSK) != 0; i++) {
+			(void)rd(se + SE_RX_FIFO(0));
+		}
+		uart_send_raw(reset, sizeof(reset));
+		wr(se + SE_S_CMD0, UART_START_READ_OPCODE);
+		for (unsigned round = 0; round < 20; round++) {
+			unsigned words = rd(se + SE_RX_FIFO_STATUS) & FIFO_WORDS_MSK;
+			while (words-- != 0 && seen < 16) {
+				uint32_t word = rd(se + SE_RX_FIFO(0));
+				say("bt: uart: 17. byte %u: %#x\n", seen++, word & 0xff);
+			}
+			wait_ms(50);
+		}
+		say("bt: uart: 17. %u bytes in 1 s; the rx line reads %u\n", seen, rd(GPIO_IO(71)) & 1);
+		return;
+	}
+	if (bt_dry == 16) {
+		static const uint8_t reset[4] = { 0x01, 0x03, 0x0c, 0x00 };
+		for (unsigned pin = 70; pin <= 71; pin++) {
+			uint32_t cfg = rd(GPIO_CFG(pin));
+			wr(GPIO_CFG(pin), (cfg & ~0x3cu) | (1u << 2));
+		}
+		uart_init();
+		/* The engine's clock is not known to be the 7.3728 MHz the programming asks for, so the divisor is
+		   swept: whichever one gives back 04 0e ... is the one that makes 115200. */
+		for (unsigned div = 1; div <= 12; div++) {
+			uint8_t answer[12];
+			unsigned got = 0;
+			uint32_t cfg = SER_CLK_EN | (div << 4);
+
+			wr(se + SE_SER_M_CLK_CFG, cfg);
+			wr(se + SE_SER_S_CLK_CFG, cfg);
+			/* whatever is left over from the last round */
+			for (unsigned i = 0; i < 32 && (rd(se + SE_RX_FIFO_STATUS) & FIFO_WORDS_MSK) != 0; i++) {
+				(void)rd(se + SE_RX_FIFO(0));
+			}
+			uart_send_raw(reset, sizeof(reset));
+			wr(se + SE_S_CMD0, UART_START_READ_OPCODE);
+			wait_ms(60);
+			while (got < sizeof(answer) && (rd(se + SE_RX_FIFO_STATUS) & FIFO_WORDS_MSK) != 0) {
+				answer[got++] = (uint8_t)(rd(se + SE_RX_FIFO(0)) & 0xff);
+			}
+			say("bt: uart: 16. divider %u: %u bytes", div, got);
+			for (unsigned i = 0; i < got; i++) {
+				say(" %02x", answer[i]);
+			}
+			say("\n");
+		}
 		return;
 	}
 	if (bt_dry == 15) {
