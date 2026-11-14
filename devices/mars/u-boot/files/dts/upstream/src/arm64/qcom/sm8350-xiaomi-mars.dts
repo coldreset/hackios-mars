@@ -98,6 +98,7 @@
  * image's own addresses start at 0x87300000 and its span is 57 MB. Upstream's 33 MB end at 0x88200000,
  * 8 MB short of pil_slpi_mem where this file moves it -- memory the kernel would hand out and the
  * image would then overwrite -- so the vendor's own 41 MB, which ends where the slpi's region begins.
+ * The image is 57 MB, so its last 16 MB lie in the slpi's region, which this boot does not load either.
  */
 &pil_adsp_mem {
 	reg = <0x0 0x86100000 0x0 0x2900000>;

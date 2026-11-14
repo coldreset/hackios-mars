@@ -2,7 +2,7 @@
 # HakiOS common defconfig: every setting there is, with what it does.
 # Made by tools/hakios-config.py listing common -o <this file>; the values are the ones that file sets, and tests/CI check that it names every symbol.
 #
-# 374 symbols in 18 groups; 35 are set, 26 of them drivers built in.
+# 406 symbols in 18 groups; 36 are set, 27 of them drivers built in.
 #
 
 #
@@ -19,7 +19,7 @@
 CONFIG_FIRMWARE="device"
 
 #
-# Drivers built in (26)
+# Drivers built in (27)
 #
 
 # the audio DSP started and linked (adsp=1, adsp_step=N); the battery's state comes through it too. Needs the DSP's ... [hakios.adsp.c]
@@ -99,6 +99,9 @@ CONFIG_HAKIOS_VIRTIO_BLK=y
 
 # Wi-Fi of the WCN6750 (wifi=1, wifi_step=N): the DSP that runs the radio's firmware, Linux's ath11k (its object, made ... [hakios.wifi.c, hakios.wlfw.c, hakios.lx.c, hakios.sta.c, hakios.apple80211.c, hakios.wlan.cpp; requires CONFIG_HAKIOS_QMI]
 CONFIG_HAKIOS_WIFI=y
+
+# Wi-Fi of the QCA6490 on PCIe (wifipcie=1): the links the OnePlus 9 port of the same SoC has [hakios.wifi_pcie.c, hakios.radio_pcie.c, hakios.lx_pcie.c; requires CONFIG_HAKIOS_QMI]
+CONFIG_HAKIOS_WIFI_PCIE=y
 
 #
 # CPU, memory and boot (21)
@@ -338,7 +341,7 @@ CONFIG_TOUCHSCREEN=y
 # CONFIG_VIRTIO_INPUT is not set
 
 #
-# GPU and display (75)
+# GPU and display (80)
 #
 
 # rendering on Adreno (an image built with GL=1; the GPU's firmware from your phone) [needs fw-gpu/ from the phone]
@@ -425,6 +428,9 @@ CONFIG_GPU=y
 # read by MiniIOMobileFramebuffer.cpp (kernel)
 # CONFIG_FBWIDTH is not set
 
+# read by eagl.c (user space)
+# CONFIG_GLBIN is not set
+
 # the surface's memory, as before
 # CONFIG_GLBLIT is not set
 
@@ -457,6 +463,9 @@ CONFIG_GPU=y
 
 # read by eagl.c (user space)
 # CONFIG_GLPROF is not set
+
+# read by hakios.gpu.cpp (kernel)
+# CONFIG_GLQUIET is not set
 
 # read by eagl.c (user space)
 # CONFIG_GLSHADERS is not set
@@ -524,14 +533,23 @@ CONFIG_GPU=y
 # read by hakios.adreno.c (kernel)
 # CONFIG_GPU_EXACT is not set
 
+# read by hakios.adreno.c (kernel)
+# CONFIG_GPU_FLUSH is not set
+
 # read by hakios.gpu.cpp (kernel)
 # CONFIG_GPU_KEEP is not set
 
 # read by hakios.adreno.c (kernel)
 # CONFIG_GPU_LOG is not set
 
+# the 3D core is put back where step 20 and step 21 left it, and everything it had been given is given up, so that the ...
+# CONFIG_GPU_RECOVER is not set
+
 # only the program metal_test (userland/src/metal_test.m): the safe level, for seeing what Metal does with the device
 # CONFIG_METAL is not set
+
+# read by MiniIOMobileFramebuffer.cpp, hakios.focaltech.c (kernel)
+# CONFIG_QUIET is not set
 
 # read by MiniIOMobileFramebuffer.cpp (kernel)
 # CONFIG_REC_MB is not set
@@ -567,7 +585,7 @@ CONFIG_GPU=y
 # CONFIG_VBLUR is not set
 
 #
-# Audio and battery (32)
+# Audio and battery (33)
 #
 
 # the audio DSP; the battery level in the UI and charging state come through it [needs fw-audio/ from the phone]
@@ -596,6 +614,9 @@ CONFIG_SOUND=4
 
 # read by hakios.adsp.c (kernel)
 # CONFIG_ADSP_LISTEN is not set
+
+# read by hakios.adsp.c (kernel)
+# CONFIG_ADSP_MEMORY is not set
 
 # read by hakios.adsp.c (kernel)
 # CONFIG_ADSP_NEW is not set
@@ -1065,7 +1086,7 @@ CONFIG_MODEM_AGAIN=y
 # CONFIG_USTACKS_TNAME is not set
 
 #
-# Loader (4)
+# Loader (6)
 #
 
 # read by loader.c (loader)
@@ -1075,17 +1096,32 @@ CONFIG_MODEM_AGAIN=y
 # CONFIG_GAMUT is not set
 
 # read by loader.c (loader)
+# CONFIG_LOADER_WAIT is not set
+
+# read by loader.c (loader)
 # CONFIG_SERIAL is not set
 
 # read by loader.c (loader)
 # CONFIG_UFS_PROBE is not set
 
+# shut the controller down *before* the kernel runs
+# CONFIG_USB_AFTER is not set
+
 #
-# User space (36)
+# User space (59)
 #
+
+# read by kern_exit.c (kernel)
+# CONFIG__DISABLE_USER_FAULTS is not set
 
 # read by inject_sb.c (user space)
 # CONFIG_AUTOUNLOCK is not set
+
+# read by hakios.wifi_pcie.c (kernel)
+# CONFIG_BOARD_REPEAT_FIRST is not set
+
+# read by hakios.wifi_pcie.c (kernel)
+# CONFIG_BOARD_TOTAL_CONSTANT is not set
 
 # read by hakios.bt.c (kernel)
 # CONFIG_BT is not set
@@ -1111,6 +1147,9 @@ CONFIG_MODEM_AGAIN=y
 # read by hakios.focaltech.c (kernel)
 # CONFIG_CPU_BUSY is not set
 
+# read by kern_exit.c (kernel)
+# CONFIG_ENABLE_PROC_EXIT_LPEXIT_SPIN is not set
+
 # not even with a GPU; gl=1: also without one, by Mesa's software driver (slow; for working on eagl.c in QEMU)
 # CONFIG_GL is not set
 
@@ -1125,6 +1164,18 @@ CONFIG_MODEM_AGAIN=y
 
 # the renderer is made to answer that it has those functions after all
 # CONFIG_GLYES is not set
+
+# read by hakios.wifi_pcie.c (kernel)
+# CONFIG_HAKIOSPCIE_DMA_VERIFIED is not set
+
+# read by hakios.wifi_pcie.c (kernel)
+# CONFIG_HAKIOSPCIE_RUNTIME is not set
+
+# read by hakios.wifi_pcie.c (kernel)
+# CONFIG_HAKIOSPCIE_WIFI is not set
+
+# read by init.c (user space)
+# CONFIG_LANGUAGE is not set
 
 # read by HakiosMetalCA.m (user space)
 # CONFIG_METAL_ALL is not set
@@ -1153,11 +1204,14 @@ CONFIG_MODEM_AGAIN=y
 # read by inject.c (user space)
 # CONFIG_METAL_WATCH is not set
 
+# read by kern_exit.c (kernel)
+# CONFIG_PANIC_ON_ERROR_EXIT is not set
+
 # read by hakios.focaltech.c (kernel)
 # CONFIG_PROC_CPU is not set
 
-# read by hakios.focaltech.c (kernel)
-# CONFIG_QUIET is not set
+# read by kern_exit.c (kernel)
+# CONFIG_PROCEXIT is not set
 
 # the root is to be the Darwin root volume on /dev/DEV -- the phone's flash, read only
 # CONFIG_ROOT_APFS is not set
@@ -1181,16 +1235,58 @@ CONFIG_MODEM_AGAIN=y
 # CONFIG_TOUCH_RESET_MS is not set
 
 # read by hakios.focaltech.c (kernel)
+# CONFIG_TOUCH_SELFTEST is not set
+
+# read by hakios.focaltech.c (kernel)
 # CONFIG_TOUCH_TRACE is not set
 
 # read by hakios.focaltech.c (kernel)
-# CONFIG_TOUCH_TRAP is not set
+# CONFIG_TOUCH_WATCH is not set
 
 # read by hakios.focaltech.c (kernel)
 # CONFIG_TOUCH_WD_SE is not set
 
 # read by init.c (user space)
 # CONFIG_VAR_HFS is not set
+
+# hand ath11k only part of the board file, so its last piece carries end=1 and the radio sees a complete transfer
+# CONFIG_WIFI_BOARD_CAP is not set
+
+# read by hakios.wifi_pcie.c (kernel)
+# CONFIG_WIFI_BOARD_ELF is not set
+
+# read by hakios.wifi_pcie.c (kernel)
+# CONFIG_WIFI_BOARD_END is not set
+
+# read by hakios.wifi_pcie.c (kernel)
+# CONFIG_WIFI_BOARD_PACE is not set
+
+# read by hakios.wifi_pcie.c (kernel)
+# CONFIG_WIFI_BOARD_TYPE is not set
+
+# round the addresses in a memory reply down to this boundary
+# CONFIG_WIFI_MEM_ALIGN is not set
+
+# answer with a reply we compose, inside the window we mapped
+# CONFIG_WIFI_MEM_BUILD is not set
+
+# answer a memory request with an empty reply
+# CONFIG_WIFI_MEM_EMPTY is not set
+
+# name memory we really allocated, not a spot in the window
+# CONFIG_WIFI_MEM_REAL is not set
+
+# undo the eight bit shift in the sizes of a memory reply
+# CONFIG_WIFI_MEM_SHIFT is not set
+
+# the type field to write into each segment of a memory reply
+# CONFIG_WIFI_MEM_TYPE is not set
+
+# read by hakios.wifi_pcie.c (kernel)
+# CONFIG_WIFI_PING is not set
+
+# let the board data go first, to see whether the radio only takes one board file before it stops answering
+# CONFIG_WIFI_SKIP_REGDB is not set
 
 #
 # Extra arguments (1)

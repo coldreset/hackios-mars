@@ -996,7 +996,9 @@ step_survey(void)
  * region -- the one Qualcomm's TrustZone knows, pil_adsp_region@86100000 -- is not where the Lahaina
  * image's addresses start (0x87300000), so the region is told on the command line, adsp_memory=0x86100000,
  * and the segments are placed at the region plus their distance from the image's lowest one, the way
- * qcom_mdt_load() does it. The span must fit in ADSP_MEMORY_SIZE, the region's size (64 MB on both).
+ * qcom_mdt_load() does it. The span must fit in ADSP_MEMORY_SIZE, the 64 MB the driver maps; mars's own
+ * region is 41 MB and its image 57 MB, so its last 16 MB fall into the carve-out after it (the slpi's),
+ * which nothing loads in this boot.
  */
 static uint32_t adsp_memory = ADSP_MEMORY_DEFAULT;
 
