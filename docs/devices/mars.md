@@ -21,7 +21,7 @@
 | gpu | works | Adreno 660, all 21 bring-up steps; OpenGL ES through Mesa freedreno (gpu=1 adreno_nomeasure=1) |
 | storage | partly | the system image is resident in RAM; var_store / UFS writes not enabled |
 | buttons | partly | CONFIG_HAKIOS_BUTTONS reads the power and volume keys (presses, releases, hold times) but no event reaches backboardd yet; all three keys are read (power, volume up, volume down), volume up reaches backboardd as VolumeIncrement, and no volume bar appears because this port has no audio device |
-| battery | partly | runs, but the loader's shared page never says a charger or a voltage, so the percentage reads -1% |
+| battery | works | the audio DSP's battery manager over PMIC_RTR_ADSP_APPS (adsp=1, CONFIG_HAKIOS_ADSP): capacity, voltage, current, temperature, charge and the charger's state every 10 s |
 | thermal | no | the driver is in the tree, off in this device's config |
 | wifi | partly | QCA6490 over PCIe: bring-up stages 1-21 pass, ath11k starts, the firmware answers QMI; at stage 22 the memory reply is accepted (result 0) and the regulatory database downloads, but the board data cannot be delivered: the radio takes four messages of 6,144 bytes at most, one file per boot, and the vendor board data is 58 KB (docs/wifi-board-limit.md) |
 | audio | no | the driver is in the tree, off in this device's config |

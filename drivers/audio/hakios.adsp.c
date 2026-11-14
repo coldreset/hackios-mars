@@ -1,6 +1,7 @@
 /*
- * The audio DSP of the POCO X5 Pro (redwood), started, and spoken to: step 1 of sound. Every
- * address below belongs to this phone, and nothing here is touched unless a boot-arg asks for it.
+ * The audio DSP of the POCO X5 Pro (redwood) and of the Xiaomi 11 Pro (mars), started, and spoken to: step 1 of
+ * sound. The numbers below are the two phones' (see adsp_memory, for the one that differs); nothing here is
+ * touched unless a boot-arg asks for it.
  *
  * The SoC's audio (LPASS: its clocks, its I2S and SoundWire, the codec's macros) does not belong
  * to the application processor. It is the audio DSP's -- a Hexagon of its own inside LPASS,
@@ -21,7 +22,9 @@
  *     last words in item 423; GLINK's three items in our partition with it
  *   - its doorbells are IPCC client 3 (LPASS): signal 0 GLINK, signal 2 SMP2P
  *   - TrustZone knows it as image 1; its memory is 0x86700000, 64 MB (dt: qcom,lpass@3700000,
- *     reserved-memory adsp@86700000), every byte of which the image takes
+ *     reserved-memory adsp@86700000), every byte of which the image takes. On mars that region is its own,
+ *     pil_adsp_region@86100000, told with adsp_memory=0x86100000, and the image's own addresses are read as
+ *     distances from its lowest segment, the way qcom_mdt_load() places them
  *   - the always-on processor is told of it as "adsp"
  *   - the Wi-Fi DSP may be running at the same time (wifi=1): the mailbox to the always-on
  *     processor and the lock for allocating in the shared memory are the two things both use,
@@ -983,9 +986,19 @@ step_survey(void)
 
 /* ---- step 2: the firmware -------------------------------------------------------------------------- */
 
-#define ADSP_MEMORY             0x86700000u     /* dt: reserved-memory adsp@86700000, memory-region of qcom,lpass@3700000 */
+#define ADSP_MEMORY_DEFAULT     0x86700000u     /* dt: reserved-memory adsp@86700000, memory-region of qcom,lpass@3700000 */
 #define ADSP_MEMORY_SIZE        0x04000000u
 #define PAS_ADSP                1               /* dt: qcom,pas-id */
+
+/*
+ * Where the image goes, and how its own addresses are read. On redwood the reserved-memory node
+ * (adsp@86700000) is where the image's lowest segment is, so the two are the same number; mars's PIL
+ * region -- the one Qualcomm's TrustZone knows, pil_adsp_region@86100000 -- is not where the Lahaina
+ * image's addresses start (0x87300000), so the region is told on the command line, adsp_memory=0x86100000,
+ * and the segments are placed at the region plus their distance from the image's lowest one, the way
+ * qcom_mdt_load() does it. The span must fit in ADSP_MEMORY_SIZE, the region's size (64 MB on both).
+ */
+static uint32_t adsp_memory = ADSP_MEMORY_DEFAULT;
 
 
 /*
@@ -1148,8 +1161,6 @@ step_firmware(void)
 		goto fail;
 	}
 	for (uint32_t i = 0; i < count; i++) {
-		char name[16];
-
 		memcpy(&segment, header + 52 + 32 * i, sizeof(segment));
 		if (MDT_HASH(segment.flags)) {
 			hashes = segment.file_size;
@@ -1157,13 +1168,28 @@ step_firmware(void)
 		if (segment.type != 1 || MDT_HASH(segment.flags) || segment.memory_size == 0) {
 			continue;
 		}
-		if (segment.paddr < ADSP_MEMORY || segment.file_size > segment.memory_size ||
-		    (uint64_t)segment.paddr + segment.memory_size > (uint64_t)ADSP_MEMORY + ADSP_MEMORY_SIZE) {
-			printf("adsp: %u: segment %u (%#x, %#x bytes) is not within the DSP's memory\n", step, i, segment.paddr,
-			    segment.memory_size);
+		if (segment.file_size > segment.memory_size) {
+			printf("adsp: %u: segment %u (%#x, %#x bytes, %#x of file) is longer than the room the header gives it\n", step, i,
+			    segment.paddr, segment.memory_size, segment.file_size);
 			goto fail;
 		}
-		image.segment[image.segments].at = segment.paddr - ADSP_MEMORY;
+		lowest = segment.paddr < lowest ? segment.paddr : lowest;
+		highest = segment.paddr + segment.memory_size > highest ? segment.paddr + segment.memory_size : highest;
+	}
+	/* (the image's own addresses say how far apart its segments are; the region says where they go) */
+	if (lowest == ~0u || (uint64_t)highest - lowest > ADSP_MEMORY_SIZE) {
+		printf("adsp: %u: the image's segments span %#llx bytes, the DSP's memory is %#x\n", step,
+		    (unsigned long long)(lowest == ~0u ? 0u : (uint64_t)highest - lowest), ADSP_MEMORY_SIZE);
+		goto fail;
+	}
+	for (uint32_t i = 0; i < count; i++) {
+		char name[16];
+
+		memcpy(&segment, header + 52 + 32 * i, sizeof(segment));
+		if (segment.type != 1 || MDT_HASH(segment.flags) || segment.memory_size == 0) {
+			continue;
+		}
+		image.segment[image.segments].at = segment.paddr - lowest;
 		image.segment[image.segments].file_size = segment.file_size;
 		image.segment[image.segments].memory_size = segment.memory_size;
 		image.segment[image.segments].file = NULL;
@@ -1184,21 +1210,19 @@ step_firmware(void)
 			}
 			files += file_size;
 		}
-		lowest = segment.paddr < lowest ? segment.paddr : lowest;
-		highest = segment.paddr + segment.memory_size > highest ? segment.paddr + segment.memory_size : highest;
 		image.segments++;
 	}
-	if (image.segments == 0 || lowest != ADSP_MEMORY || 52 + 32 * count + (uint64_t)hashes != size) {
+	if (image.segments == 0 || 52 + 32 * count + (uint64_t)hashes != size) {
 		printf("adsp: %u: not what TrustZone takes: %u segments to load, the lowest at %#x; the header file has %llu bytes, "
 		    "the header %u and the hashes %u\n", step, image.segments, lowest, size, 52 + 32 * count, hashes);
 		goto fail;
 	}
 	image.header = header;
 	image.header_size = size;
-	image.size = ((highest + 0xfff) & ~0xfffu) - ADSP_MEMORY;
+	image.size = ((highest + 0xfff) & ~0xfffu) - lowest;
 	printf("adsp: %u: the image is whole (%s): a header of %llu bytes (%u of hashes), %u segments, %llu bytes of files, %#x "
 	    "bytes of the DSP's %#x from %#x\n", step, from_root ? "from /fw on the root" : "from the small image", size, hashes,
-	    image.segments, files, image.size, ADSP_MEMORY_SIZE, ADSP_MEMORY);
+	    image.segments, files, image.size, ADSP_MEMORY_SIZE, adsp_memory);
 	return true;
 fail:
 	image_forget();
@@ -1446,12 +1470,12 @@ step_header(void)
 	printf("adsp: %u: TRUSTZONE ACCEPTS THE AUDIO DSP'S SIGNATURE FROM THIS KERNEL\n", step);
 
 	announce("tell TrustZone where the image will be");
-	result = scm("where the image will be", SCM_PAS_MEM_SETUP, SCM_THREE_VALUES, PAS_ADSP, ADSP_MEMORY, image.size, &answer);
+	result = scm("where the image will be", SCM_PAS_MEM_SETUP, SCM_THREE_VALUES, PAS_ADSP, adsp_memory, image.size, &answer);
 	if (result != 0 || answer != 0) {
 		printf("adsp: %u: TRUSTZONE DOES NOT TAKE THE PLACE: the call returns %d, its answer is %#llx\n", step, result, answer);
 		return false;
 	}
-	printf("adsp: %u: TrustZone takes the place: %#x bytes at %#x\n", step, image.size, ADSP_MEMORY);
+	printf("adsp: %u: TrustZone takes the place: %#x bytes at %#x\n", step, image.size, adsp_memory);
 	return true;
 }
 
@@ -1479,10 +1503,10 @@ step_image(void)
 	if (image.segments == 0) {
 		return false;
 	}
-	announce("put the image's segments into the audio DSP's memory (0x86700000, 64 MB: memory of nobody's until TrustZone "
+	announce("put the image's segments into the audio DSP's memory (memory of nobody's until TrustZone "
 	    "starts the DSP), with zeroes where a segment is longer than its file, and read them back");
-	dsp_memory = (volatile uint64_t *)ml_io_map_unmappable(ADSP_MEMORY, ADSP_MEMORY_SIZE, VM_WIMG_WCOMB);
-	snprintf(last_write, sizeof(last_write), "step %u wrote the image at %#x", step, ADSP_MEMORY);
+	dsp_memory = (volatile uint64_t *)ml_io_map_unmappable(adsp_memory, ADSP_MEMORY_SIZE, VM_WIMG_WCOMB);
+	snprintf(last_write, sizeof(last_write), "step %u wrote the image at %#x", step, adsp_memory);
 	for (unsigned s = 0; s < image.segments; s++) {
 		volatile uint64_t *to = dsp_memory + image.segment[s].at / 8;
 
@@ -3263,7 +3287,11 @@ hakios_adsp_init(void)
 {
 	uint32_t on = 0;
 	thread_t thread;
+	uint64_t memory = 0;
 
+	if (PE_parse_boot_argn("adsp_memory", &memory, sizeof(memory)) && memory != 0) {
+		adsp_memory = (uint32_t)memory;
+	}
 	PE_parse_boot_argn("adsp_step", &last_step, sizeof(last_step));
 	if (last_step == 0 && (!PE_parse_boot_argn("adsp", &on, sizeof(on)) || on != 1)) {
 		return;

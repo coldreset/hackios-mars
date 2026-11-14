@@ -93,6 +93,16 @@
 };
 
 /* the sm8350.dtsi's pil nodes, where they differ from mars's own tree */
+/*
+ * The audio DSP's image goes here (drivers/audio/hakios.adsp.c, adsp_memory=0x86100000): the Lahaina
+ * image's own addresses start at 0x87300000 and its span is 57 MB. Upstream's 33 MB end at 0x88200000,
+ * 8 MB short of pil_slpi_mem where this file moves it -- memory the kernel would hand out and the
+ * image would then overwrite -- so the vendor's own 41 MB, which ends where the slpi's region begins.
+ */
+&pil_adsp_mem {
+	reg = <0x0 0x86100000 0x0 0x2900000>;
+};
+
 &pil_slpi_mem {
 	reg = <0x0 0x88a00000 0x0 0x1500000>;
 };

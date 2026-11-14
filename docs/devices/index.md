@@ -7,7 +7,7 @@ Every device with a repository, and how far each part of it works. A device of y
 
 | Device | SoC | display | touch | buttons | cpu | gpu | storage | audio | battery | haptic | camera | torch | wifi | bluetooth | cellular | network | thermal |
 |---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
-| [Xiaomi 11 Pro](mars.md) | `lahaina` | yes | yes | partly | yes | yes | partly | no | partly |  | no |  | partly |  |  |  | no |
+| [Xiaomi 11 Pro](mars.md) | `lahaina` | yes | yes | partly | yes | yes | partly | no | yes |  | no |  | partly |  |  |  | no |
 | [QEMU virt (aarch64)](qemu.md) | `none` | yes | yes | yes |  | no | yes | yes |  |  |  |  |  |  |  | yes |  |
 | [POCO X5 Pro 5G](redwood.md) | `sc7280` | yes | yes | yes | yes | yes | yes | yes | partly | yes | yes | partly | yes | no | partly |  | partly |
 

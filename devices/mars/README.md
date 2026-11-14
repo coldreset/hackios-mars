@@ -32,7 +32,10 @@ Everything else the kernel needs comes from `devices/mars/configs/mars.config` a
 | cpu | works | all 8 cores (`cpus=8`); the A78/X1 cores sit at their top OPP with `cpufreq=1` |
 | gpu | works | Adreno 660, all 21 bring-up steps pass; OpenGL ES through Mesa freedreno (`gpu=1 adreno_nomeasure=1 gl=1`) |
 | storage | read only | the system image is resident in RAM; `var_store` / UFS writes are not enabled yet |
-| buttons, battery, thermal, wifi, audio, camera | not started | the drivers exist in the tree but are off in this device's config |
+| battery | works | the audio DSP's battery manager (`adsp=1`): capacity, voltage, current, temperature, charge and the charger's state, every 10 s |
+| buttons | partial | the power and volume keys are read; presses reach `backboardd` as consumer events |
+| wifi | partial | ath11k's bring-up stages pass up to the board data, which does not fit the radio's message limit (`docs/wifi-board-limit.md`) |
+| thermal, audio, camera | not started | the drivers exist in the tree but are off in this device's config |
 
 ## Building
 
@@ -83,7 +86,8 @@ Boot arguments that matter on this phone:
 | `glbin=1` | let freedreno use binning (GMEM) again; the default is `FD_MESA_DEBUG=sysmem` |
 | `glquiet=1` | no five-second GPU report, so the end of the log is left to other messages |
 | `procexit=1` | one line for every process that exits with an error, and for the signals that kill it |
-| `battery=1` / `pmic=1` / `thermal=1` / `buttons=1` | the peripheral drivers; the battery has no source of charge yet (see Known issues) |
+| `adsp=1` | the audio DSP, which is where the battery is read on this phone (`adsp_memory=0x86100000` on mars); the small image needs `ADSP=1 userland/build.sh` |
+| `pmic=1` / `thermal=1` / `buttons=1` | the peripheral drivers |
 
 ## Touch: what this phone actually has
 
@@ -116,9 +120,10 @@ per transfer leaves the queue standing still.
   `glbin=1` asks for the old path back), which gives 60 fps.
 - **CoreAnimation draws at half the rate it is told**, so the framebuffer driver reports 120 Hz by
   default (`fb_ca_hz`, `xnu/files/iokit/Kernel/MiniIOMobileFramebuffer.cpp`).
-- **The battery cannot be read yet.** The kernel takes its charge from a page the loader fills, and
-  the loader needs UEFI charger protocols this boot chain does not have; every sample fails
-  (`battery: SOC=-1% ... (0 reads, 13 failed)`).
+- **The battery is read from the audio DSP, not from the loader.** The loader's shared page needs UEFI
+  charger protocols this boot chain does not have, so `battery=1` reads nothing; with `adsp=1` the DSP's
+  battery manager answers over `PMIC_RTR_ADSP_APPS` (`adsp: battmgr: the DSP says: capacity ... uV, uA,
+  temperature ...`) and the percentage follows it.
 - **The buttons are seen by the driver but do nothing yet.** Presses and releases (with their
   duration) are logged, and userland turns them into HID consumer events, but neither the lock nor
   the volume keys have an effect on the system.

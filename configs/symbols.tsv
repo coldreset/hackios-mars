@@ -16,6 +16,7 @@ ADSP_AGAIN	arg	adsp_again	Audio and battery	k	hakios.adsp.c
 ADSP_APR_WAIT	arg	adsp_apr_wait	Audio and battery	k	hakios.adsp.c	
 ADSP_KEEP	arg	adsp_keep	Audio and battery	k	hakios.adsp.c	
 ADSP_LISTEN	arg	adsp_listen	Audio and battery	k	hakios.adsp.c	
+ADSP_MEMORY	arg	adsp_memory	Audio and battery	k	hakios.adsp.c	
 ADSP_NEW	arg	adsp_new	Audio and battery	k	hakios.adsp.c	
 ADSP_PAUSE	arg	adsp_pause	Audio and battery	k	hakios.adsp.c	
 ADSP_RETURN	arg	adsp_return	Audio and battery	k	hakios.adsp.c	
@@ -55,6 +56,8 @@ APPLOG_NAME	arg	applog_name	CPU, memory and boot	k	(patch)
 AUTOUNLOCK	arg	autounlock	User space	u	inject_sb.c	
 BATTERY	arg	battery	Audio and battery	kl	hakios.adsp.c,hakios.battery.c,loader.c	
 BATTMGR	arg	battmgr	Audio and battery	k	hakios.adsp.c	every property once, for the log (which number is which on this phone's firmware)
+BOARD_REPEAT_FIRST	arg	board_repeat_first	User space	k	hakios.wifi_pcie.c	
+BOARD_TOTAL_CONSTANT	arg	board_total_constant	User space	k	hakios.wifi_pcie.c	
 BT	arg	bt	User space	k	hakios.bt.c	
 BT_AGAIN	arg	bt_again	User space	k	hakios.bt.c	the second look this many seconds later (0: no second look; 30)
 BUTTONS	arg	buttons	Touch and buttons	k	hakios.buttons.c	
@@ -142,7 +145,12 @@ GPU_FLUSH	arg	gpu_flush	GPU and display	k	hakios.adreno.c
 GPU_KEEP	arg	gpu_keep	GPU and display	k	hakios.gpu.cpp	
 GPU_LOG	arg	gpu_log	GPU and display	k	hakios.adreno.c	
 GPU_RECOVER	arg	gpu_recover	GPU and display	k	hakios.adreno.c	the 3D core is put back where step 20 and step 21 left it, and everything it had been given is given up, so that the next submission is its own again
+HAKIOSPCIE_DMA_VERIFIED	arg	hakiospcie_dma_verified	User space	k	hakios.wifi_pcie.c	
+HAKIOSPCIE_RUNTIME	arg	hakiospcie_runtime	User space	k	hakios.wifi_pcie.c	
+HAKIOSPCIE_WIFI	arg	hakiospcie_wifi	User space	k	hakios.wifi_pcie.c	
 HAPTIC_EFFECT	arg	haptic_effect	Haptics and torch	k	hakios.haptic.c	
+LANGUAGE	arg	language	User space	u	init.c	
+LOADER_WAIT	arg	loader_wait	Loader	l	loader.c	
 MACHINE_NAME	arg	machine_name	CPU, memory and boot	k	GenericARMPE.cpp	
 MEMBENCH	arg	membench	CPU, memory and boot	k	hakios.cpufreq.c	
 METAL	arg	metal	GPU and display	ku	HakiosMetal.m,MiniIOMobileFramebuffer.cpp	only the program metal_test (userland/src/metal_test.m): the safe level, for seeing what Metal does with the device
@@ -281,7 +289,7 @@ UFS_NATIVE_LEAVE	arg	ufs_native_leave	Storage and APFS	k	hakios.ufshc.c
 UFS_NATIVE_SLOTS	arg	ufs_native_slots	Storage and APFS	k	hakios.ufshc.c	
 UFS_NATIVE_SPIN	arg	ufs_native_spin	Storage and APFS	k	hakios.ufshc.c	
 UFS_PROBE	arg	ufs_probe	Loader	l	loader.c	
-USB_AFTER	arg	usb_after	Loader	l	loader.c	take the controller back for a while so the log can be fetched over the cable (xl log, fastboot get_staged) instead of photographed
+USB_AFTER	arg	usb_after	Loader	l	loader.c	shut the controller down *before* the kernel runs
 USTACKS	arg	ustacks	Debugging	k	user_exception_trace.c	
 USTACKS_AT	arg	ustacks_at	Debugging	k	user_exception_trace.c	
 USTACKS_COUNT	arg	ustacks_count	Debugging	k	user_exception_trace.c	
@@ -297,6 +305,11 @@ VIRTIO_SOUND	arg	virtio_sound	Audio and battery	k	hakios.virtio_sound.c
 WIFI_AGAIN	arg	wifi_again	Wi-Fi	k	hakios.wifi.c	start the DSP although the one before it was shut down without having acknowledged a stop: THAT HAS RESET THE PHONE, twice of two
 WIFI_ASK	arg	wifi_ask	Wi-Fi	k	hakios.wifi.c	step 14 also asks that service a question (its capabilities) and writes down the beginning of an answer
 WIFI_BA	arg	wifi_ba	Wi-Fi	k	lx_80211.c	
+WIFI_BOARD_CAP	arg	wifi_board_cap	User space	k	hakios.wifi_pcie.c	hand ath11k only part of the board file, so its last piece carries end=1 and the radio sees a complete transfer
+WIFI_BOARD_ELF	arg	wifi_board_elf	User space	k	hakios.wifi_pcie.c	
+WIFI_BOARD_END	arg	wifi_board_end	User space	k	hakios.wifi_pcie.c	
+WIFI_BOARD_PACE	arg	wifi_board_pace	User space	k	hakios.wifi_pcie.c	
+WIFI_BOARD_TYPE	arg	wifi_board_type	User space	k	hakios.wifi_pcie.c	
 WIFI_CAL	arg	wifi_cal	Wi-Fi	k	hakios.wlfw.c	
 WIFI_DIRTY	arg	wifi_dirty	Wi-Fi	k	hakios.wifi.c	
 WIFI_FILE	arg	wifi_file	Wi-Fi	k	hakios.wifi.c	with wifi=1: the network of fw/network is not joined at the start
@@ -310,14 +323,22 @@ WIFI_LOUD	arg	wifi_loud	Wi-Fi	k	hakios.wifi.c
 WIFI_LX	arg	wifi_lx	Wi-Fi	k	hakios.wifi.c,lx_bus.c	
 WIFI_LX_STEP	arg	wifi_lx_step	Wi-Fi	k	lx_base.c	
 WIFI_MAC	arg	wifi_mac	Wi-Fi	k	hakios.wifi.c	the radio's own address for the driver (hakios_wifi_radio_address() below; xl takes it from a file that is not in the repository)
+WIFI_MEM_ALIGN	arg	wifi_mem_align	User space	k	hakios.wifi_pcie.c	round the addresses in a memory reply down to this boundary
+WIFI_MEM_BUILD	arg	wifi_mem_build	User space	k	hakios.wifi_pcie.c	answer with a reply we compose, inside the window we mapped
+WIFI_MEM_EMPTY	arg	wifi_mem_empty	User space	k	hakios.wifi_pcie.c	answer a memory request with an empty reply
+WIFI_MEM_REAL	arg	wifi_mem_real	User space	k	hakios.wifi_pcie.c	name memory we really allocated, not a spot in the window
+WIFI_MEM_SHIFT	arg	wifi_mem_shift	User space	k	hakios.wifi_pcie.c	undo the eight bit shift in the sizes of a memory reply
+WIFI_MEM_TYPE	arg	wifi_mem_type	User space	k	hakios.wifi_pcie.c	the type field to write into each segment of a memory reply
 WIFI_MISSION	arg	wifi_mission	Wi-Fi	k	hakios.wlfw.c	
 WIFI_NEW	arg	wifi_new	Wi-Fi	k	hakios.wifi.c	steps K and later have not been seen to work (default: the last one)
 WIFI_PAUSE	arg	wifi_pause	Wi-Fi	k	hakios.wifi.c	
+WIFI_PING	arg	wifi_ping	User space	k	hakios.wifi_pcie.c	
 WIFI_QUIET	arg	wifi_quiet	Wi-Fi	k	lx_bus.c	
 WIFI_RADIO_READ	arg	wifi_radio_read	Wi-Fi	k	hakios.wifi.c	step 16 does read (2: whatever mode the firmware is in)
 WIFI_READY	arg	wifi_ready	Wi-Fi	k	hakios.wlfw.c	
 WIFI_RETURN	arg	wifi_return	Wi-Fi	k	hakios.wifi.c	when all is over, go back to the loader instead of starting the system
 WIFI_SCAN	arg	wifi_scan	Wi-Fi	k	lx_bus.c	
+WIFI_SKIP_REGDB	arg	wifi_skip_regdb	User space	k	hakios.wifi_pcie.c	let the board data go first, to see whether the radio only takes one board file before it stops answering
 WIFI_SMMU	arg	wifi_smmu	Wi-Fi	k	hakios.wifi.c	before any step: read what the boot chain has set up in the SMMU for the radio's stream (smmu_look() below; nothing is written)
 WIFI_STATION	arg	wifi_station	Wi-Fi	k	lx_bus.c	
 WIFI_STEP	arg	wifi_step	Wi-Fi	k	hakios.wifi.c	
