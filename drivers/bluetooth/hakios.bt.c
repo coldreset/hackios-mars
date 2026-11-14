@@ -706,6 +706,76 @@ uart_after_power(void)
 		wr(se + SE_UART_LOOPBACK_CFG, rd(se + SE_UART_LOOPBACK_CFG) & ~1u);
 		return;
 	}
+	if (bt_dry == 38) {
+		/* The sequences the ROM might be waiting for, one per line, in order: the vendor's EDL reset,
+		   then the version request, each followed by a longer listen than before. The engine is set up
+		   like the console, the chip is powered and out of reset, the pins are muxed, and every send
+		   carries its length. A line with anything but "0 byte(s)" is the answer we have been after. */
+		static const uint8_t edl[5] = { 0x01, 0x00, 0xfc, 0x01, 0x05 };
+		static const uint8_t version[5] = { 0x01, 0x00, 0xfc, 0x01, 0x19 };
+		static const uint8_t quiesce[5] = { 0x01, 0x00, 0xfc, 0x01, 0x00 };
+		static const unsigned config[] = { 0x48, 0x4c, 0x25c, 0x260, 0x264, 0x268, 0x26c, 0x284, 0x288, 0x28c };
+		static const struct {
+			const uint8_t *bytes;
+			unsigned length;
+			const char *what;
+		} tries[] = {
+			{ version, sizeof(version), "the version request" },
+			{ edl, sizeof(edl), "the EDL reset" },
+			{ quiesce, sizeof(quiesce), "the quiesce byte" },
+		};
+		volatile uint8_t *console = (volatile uint8_t *)ml_io_map(0x98c000, 0x4000);
+
+		if (console != NULL) {
+			uart_init();
+			for (unsigned i = 0; i < sizeof(config) / sizeof(config[0]); i++) {
+				wr(se + config[i], *(volatile uint32_t *)(console + config[i]));
+			}
+		}
+		{
+			uint32_t tx = rd(GPIO_CFG(70)), rx = rd(GPIO_CFG(71));
+			wr(GPIO_CFG(70), (tx & ~0x3fu) | (1u << 2) | 3u);
+			wr(GPIO_CFG(71), (rx & ~0x3fu) | (1u << 2) | 0u);
+		}
+		wr(se + SE_UART_LOOPBACK_CFG, rd(se + SE_UART_LOOPBACK_CFG) & ~1u);
+		wr(se + SE_M_IRQ_EN, rd(se + SE_M_IRQ_EN) | M_TX_FIFO_WATERMARK_EN | M_CMD_DONE_EN |
+		    M_RX_FIFO_WATERMARK_EN | M_RX_FIFO_LAST_EN);
+		wr(se + SE_S_IRQ_EN, rd(se + SE_S_IRQ_EN) | S_RX_FIFO_WATERMARK_EN | S_RX_FIFO_LAST_EN);
+
+		for (unsigned t = 0; t < sizeof(tries) / sizeof(tries[0]); t++) {
+			unsigned seen = 0;
+
+			while ((rd(se + SE_RX_FIFO_STATUS) & FIFO_WORDS_MSK) != 0) {
+				(void)rd(se + SE_RX_FIFO(0));
+			}
+			wr(se + SE_S_CMD0, UART_START_READ_OPCODE);
+			say("bt: uart: 38. sending %s\n", tries[t].what);
+			if (!uart_send(tries[t].bytes, tries[t].length)) {
+				say("bt: uart: 38. the send did not complete\n");
+			}
+			/* The marker word comes with the read command itself; step over it first. */
+			if ((rd(se + SE_RX_FIFO_STATUS) & FIFO_WORDS_MSK) != 0) {
+				(void)rd(se + SE_RX_FIFO(0));
+			}
+			for (unsigned round = 0; round < 40; round++) {
+				while ((rd(se + SE_RX_FIFO_STATUS) & FIFO_WORDS_MSK) != 0 && seen < 32) {
+					uint32_t w = rd(se + SE_RX_FIFO(0));
+
+					say("bt: uart: 38. %s: byte %u: %02x (word %08x)\n", tries[t].what, seen,
+					    w & 0xff, w);
+					seen++;
+				}
+				if (seen != 0) {
+					break;
+				}
+				wait_ms(50);
+			}
+			say("bt: uart: 38. %s: %u byte(s) back\n", tries[t].what, seen);
+			wr(se + SE_S_CMD0, UART_STOP_READ_OPCODE);
+			wait_ms(100);
+		}
+		return;
+	}
 	if (bt_dry == 37) {
 		/* The question itself, asked properly for the first time: the engine set up like the console,
 		   the chip powered and its reset line released, the pins muxed, and the version request sent
@@ -753,6 +823,40 @@ uart_after_power(void)
 			wait_ms(50);
 		}
 		say("bt: uart: 37. %u byte(s) from the chip; rx line %u\n", seen, rd(GPIO_IO(71)) & 1);
+
+		/* Then the vendor's own reset, in case the ROM wants that before it will talk: the same
+		   engine, the same five-byte shape, one different sub-command (0x05). */
+		{
+			static const uint8_t edl[5] = { 0x01, 0x00, 0xfc, 0x01, 0x05 };
+			unsigned got = 0;
+
+			wr(se + SE_S_CMD0, UART_STOP_READ_OPCODE);
+			while ((rd(se + SE_RX_FIFO_STATUS) & FIFO_WORDS_MSK) != 0) {
+				(void)rd(se + SE_RX_FIFO(0));
+			}
+			wr(se + SE_S_CMD0, UART_START_READ_OPCODE);
+			if (uart_send(edl, sizeof(edl))) {
+				say("bt: uart: 37b. the EDL reset went out\n");
+			} else {
+				say("bt: uart: 37b. the EDL reset did not complete\n");
+			}
+			if ((rd(se + SE_RX_FIFO_STATUS) & FIFO_WORDS_MSK) != 0) {
+				(void)rd(se + SE_RX_FIFO(0));
+			}
+			for (unsigned round = 0; round < 40; round++) {
+				while ((rd(se + SE_RX_FIFO_STATUS) & FIFO_WORDS_MSK) != 0 && got < 16) {
+					uint32_t w = rd(se + SE_RX_FIFO(0));
+
+					say("bt: uart: 37b. edge byte %u: %02x (word %08x)\n", got, w & 0xff, w);
+					got++;
+				}
+				if (got != 0) {
+					break;
+				}
+				wait_ms(50);
+			}
+			say("bt: uart: 37b. %u byte(s) after the EDL reset\n", got);
+		}
 		wr(se + SE_S_CMD0, UART_STOP_READ_OPCODE);
 		return;
 	}
