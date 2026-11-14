@@ -244,7 +244,9 @@ try:
     check("a driver without one it requires is refused (SOUND without ADSP)", any("CONFIG_HAKIOS_SOUND requires CONFIG_HAKIOS_ADSP" in p for p in problems), problems)
     problems, _ = hc.check(dict(off, HAKIOS_GOODIX="n"))
     check("an argument another built driver still reads is fine (touchscreen= is the buttons' too)", not problems, problems)
-    problems, _ = hc.check(dict(off, HAKIOS_GOODIX="n", HAKIOS_BUTTONS="n", HAKIOS_FOCALTECH="n"))
+    # hakios.wifi_pcie.c reads `touchscreen` as well (its integrated-runtime coexistence rule): every reader of the
+    # argument has to be left out for it to be read by nothing.
+    problems, _ = hc.check(dict(off, HAKIOS_GOODIX="n", HAKIOS_BUTTONS="n", HAKIOS_FOCALTECH="n", HAKIOS_WIFI_PCIE="n"))
     check("an argument only left-out drivers read is refused (touchscreen= without GOODIX, BUTTONS and FOCALTECH)",
           any("CONFIG_TOUCHSCREEN gives touchscreen=" in p and "CONFIG_HAKIOS_GOODIX" in p and "CONFIG_HAKIOS_BUTTONS" in p for p in problems), problems)
     problems, _ = hc.check(dict(off, HAKIOS_GOODIX="n", HAKIOS_BUTTONS="n", HAKIOS_FOCALTECH="n", TOUCHSCREEN="n"))
