@@ -50,6 +50,8 @@
  *   bt=1           the look
  *   bt=2           the look, then the supplies and the reset line (the Wi-Fi half is left off)
  *   bt=3           level 2, then the UART: its state, then an HCI Reset at each candidate clock
+ *                  (bt_dry=20 sends the QCA version request 0xfc00/0x19 first -- what the chip
+ *                  answers before it will talk HCI at all)
  *   bt_again=<s>   the second look this many seconds later (0: no second look; 30)
  */
 #include <stdint.h>
@@ -651,6 +653,57 @@ uart_after_power(void)
 			wait_ms(50);
 		}
 		say("bt: uart: 18. %u bytes from the chip; the rx line reads %u\n", seen, rd(GPIO_IO(71)) & 1);
+		return;
+	}
+	if (bt_dry == 20) {
+		/* The chip is not asked "are you there" first: WCN6855 answers a vendor command,
+		   EDL_PATCH_CMD_OPCODE 0xfc00 with EDL_PATCH_VER_REQ_CMD 0x19 -- the way Linux's
+		   hci_qca.c asks it what firmware it runs before anything else. Send that, watch a
+		   second; if the wire stays quiet, send HCI_Reset the same way and watch again, so
+		   the two answers are told apart in one run. */
+		static const uint8_t version[] = { 0x01, 0x00, 0xfc, 0x01, 0x19 };
+		static const uint8_t reset[] = { 0x01, 0x03, 0x0c, 0x00 };
+		uint32_t tx = rd(GPIO_CFG(70)), rx = rd(GPIO_CFG(71));
+		unsigned seen = 0, more = 0;
+		bool sent;
+
+		wr(GPIO_CFG(70), (tx & ~0x3fu) | (1u << 2) | 3u);
+		wr(GPIO_CFG(71), (rx & ~0x3fu) | (1u << 2) | 0u);
+		wait_ms(2);
+		uart_divisor(7372800, 115200);
+		uart_init();
+		for (unsigned i = 0; i < 32 && (rd(se + SE_RX_FIFO_STATUS) & FIFO_WORDS_MSK) != 0; i++) {
+			(void)rd(se + SE_RX_FIFO(0));
+		}
+		wr(se + SE_S_CMD0, UART_START_READ_OPCODE);
+
+		sent = uart_send(version, sizeof(version));
+		say("bt: uart: 20. the version request %s; the rx line reads %u\n",
+		    sent ? "went out" : "did not go out", rd(GPIO_IO(71)) & 1);
+		for (unsigned round = 0; round < 20; round++) {
+			unsigned words = rd(se + SE_RX_FIFO_STATUS) & FIFO_WORDS_MSK;
+			while (words-- != 0 && seen < 32) {
+				uint32_t word = rd(se + SE_RX_FIFO(0));
+				say("bt: uart: 20. version byte %u: %#x\n", seen++, word & 0xff);
+			}
+			wait_ms(50);
+		}
+		say("bt: uart: 20. %u bytes to the version request\n", seen);
+
+		if (seen == 0) {
+			sent = uart_send(reset, sizeof(reset));
+			say("bt: uart: 20. then HCI_Reset %s; the rx line reads %u\n",
+			    sent ? "went out" : "did not go out", rd(GPIO_IO(71)) & 1);
+			for (unsigned round = 0; round < 20; round++) {
+				unsigned words = rd(se + SE_RX_FIFO_STATUS) & FIFO_WORDS_MSK;
+				while (words-- != 0 && more < 32) {
+					uint32_t word = rd(se + SE_RX_FIFO(0));
+					say("bt: uart: 20. reset byte %u: %#x\n", more++, word & 0xff);
+				}
+				wait_ms(50);
+			}
+			say("bt: uart: 20. %u bytes to HCI_Reset\n", more);
+		}
 		return;
 	}
 	if (bt_dry == 17) {
