@@ -591,6 +591,9 @@ CONFIG_GPU=y
 # the audio DSP; the battery level in the UI and charging state come through it [needs fw-audio/ from the phone]
 CONFIG_ADSP=y
 
+# where the DSP's firmware is loaded: mars's pil_adsp_region is 0x86100000; the driver's own default is redwood's ... [needs fw-audio/ from the phone] [requires CONFIG_ADSP]
+# CONFIG_ADSP_MEMORY is not set
+
 # the speakers (4 is what the README's phone line uses) [needs fw-audio/ from the phone] [requires CONFIG_ADSP]
 CONFIG_SOUND=4
 
@@ -614,9 +617,6 @@ CONFIG_SOUND=4
 
 # read by hakios.adsp.c (kernel)
 # CONFIG_ADSP_LISTEN is not set
-
-# read by hakios.adsp.c (kernel)
-# CONFIG_ADSP_MEMORY is not set
 
 # read by hakios.adsp.c (kernel)
 # CONFIG_ADSP_NEW is not set

@@ -16,7 +16,6 @@ ADSP_AGAIN	arg	adsp_again	Audio and battery	k	hakios.adsp.c
 ADSP_APR_WAIT	arg	adsp_apr_wait	Audio and battery	k	hakios.adsp.c	
 ADSP_KEEP	arg	adsp_keep	Audio and battery	k	hakios.adsp.c	
 ADSP_LISTEN	arg	adsp_listen	Audio and battery	k	hakios.adsp.c	
-ADSP_MEMORY	arg	adsp_memory	Audio and battery	k	hakios.adsp.c	
 ADSP_NEW	arg	adsp_new	Audio and battery	k	hakios.adsp.c	
 ADSP_PAUSE	arg	adsp_pause	Audio and battery	k	hakios.adsp.c	
 ADSP_RETURN	arg	adsp_return	Audio and battery	k	hakios.adsp.c	

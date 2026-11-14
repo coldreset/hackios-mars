@@ -60,6 +60,8 @@ SYMBOLS = [
     ("TOUCHSCREEN", "bool", "touchscreen", "the touch screen, and the power and volume buttons", None, None),
     ("GPU", "bool", "gpu", "rendering on Adreno (an image built with GL=1; the GPU's firmware from your phone)", "fw-gpu", None),
     ("ADSP", "bool", "adsp", "the audio DSP; the battery level in the UI and charging state come through it", "fw-audio", None),
+    ("ADSP_MEMORY", "hex", "adsp_memory", "where the DSP's firmware is loaded: mars's pil_adsp_region is 0x86100000; "
+                                   "the driver's own default is redwood's 0x86700000", "fw-audio", "ADSP"),
     ("SOUND", "int", "sound", "the speakers (4 is what the README's phone line uses)", "fw-audio", "ADSP"),
     ("MIC", "int", "mic", "the microphone (4 is what the README's phone line uses)", "fw-audio", "ADSP"),
     ("WIFI", "bool", "wifi", "Wi-Fi: the radio, its driver, a connection (also fw-wifi/mac and fw-wifi/network)", "fw-wifi", None),
@@ -92,7 +94,8 @@ GROUP_OF = {
     "CPUS": "CPU, memory and boot", "BOOTCPU": "CPU, memory and boot", "CPUFREQ": "CPU, memory and boot",
     "UFS": "Storage and APFS", "UFS_WRITE": "Storage and APFS", "VAR_STORE": "Storage and APFS",
     "TOUCHSCREEN": "Touch and buttons", "GPU": "GPU and display",
-    "ADSP": "Audio and battery", "SOUND": "Audio and battery", "MIC": "Audio and battery",
+    "ADSP": "Audio and battery", "ADSP_MEMORY": "Audio and battery", "SOUND": "Audio and battery",
+    "MIC": "Audio and battery",
     "WIFI": "Wi-Fi", "HAPTIC": "Haptics and torch", "CAM": "Cameras",
     "MODEM": "Cellular", "MODEM_AGAIN": "Cellular", "MODEM_BUFFER": "Cellular",
     "NET_TRACE": "Network", "NET_NAMES": "Network", "VIRTIO_NET": "Network",
