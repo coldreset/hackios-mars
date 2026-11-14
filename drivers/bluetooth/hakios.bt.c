@@ -40,9 +40,16 @@
  * gpio153 (the switch) are left as they were. Not given in QEMU (no such TLMM: a load from an address it does not map
  * faults).
  *
+ * Level 3, 14 November 2026: the Bluetooth half's UART. The serial engine is the phone's own hsuart0
+ * (/soc/qcom,qup_uart@890000: a QUPV3 serial engine, SE 4 of the second wrapper, 0x4000 of registers, GIC 586, the
+ * second interrupt on gpio71 - the chip's wake line). The engine is read first and written only if it looks like UART;
+ * then, for each candidate serial clock, the engine is set to 115200 and an HCI Reset is sent into it, and whatever
+ * comes back is printed. Nothing about the chip's firmware is written yet.
+ *
  * Boot-args:
  *   bt=1           the look
  *   bt=2           the look, then the supplies and the reset line (the Wi-Fi half is left off)
+ *   bt=3           level 2, then the UART: its state, then an HCI Reset at each candidate clock
  *   bt_again=<s>   the second look this many seconds later (0: no second look; 30)
  */
 #include <stdint.h>
@@ -84,6 +91,9 @@ say(const char *format, ...)
 
 static vm_offset_t tlmm;
 static uint32_t again_seconds = 30;
+static uint32_t uart_level;     /* the bt= level, so the power thread knows whether the UART is its business */
+static unsigned bt_dry;
+static unsigned bt_src = 6;         /* bt_dry=1: read the clock registers and stop; nothing is written */
 static thread_call_t again_call;
 
 /* The three pins of the phone's own bt_qca6490 node (mars: qcom,wl-reset-gpio = <&tlmm 0x40 0>,
@@ -146,6 +156,10 @@ look_again(__unused thread_call_param_t p0, __unused thread_call_param_t p1)
 	look("again");
 }
 
+/* Level 3 is defined below, after the serial engine it writes to; the power thread calls it once the chip is out of
+   reset. */
+static void uart_after_power(void);
+
 /* Level 2: the supplies, then the Bluetooth half's reset line, then the pins again. The chip's enable lines are read
    first: a half that something else has already enabled is left alone. */
 static void
@@ -181,6 +195,504 @@ power_thread(void *arg, __unused wait_result_t result)
 	io = rd(GPIO_IO(BT_EN));
 	say("bt: bt_en (gpio%u) after: %s, reads %u\n", BT_EN, (io & 2) ? "drives high" : "drives low", io & 1);
 	look("after the supplies");
+	if (uart_level >= 3) {
+		uart_after_power();
+	}
+}
+
+/* ---- the Bluetooth half's UART ------------------------------------------------------------------------------
+ *
+ * A Qualcomm serial engine of the QUPV3 kind ("msm-geni-serial-hs" in the phone's device tree, SE 4 of the second
+ * wrapper). The registers and the order they are written in are those of U-Boot's drivers/serial/serial_msm_geni.c,
+ * which is built for this phone and prints its console through a sibling engine of the same kind.
+ *
+ * The clock: the engine shifts bits at the rate its serial clock is divided down from, and its serial clock comes from
+ * GCC's QUPV3 wrapper 2, SE 4. The gate is one bit of GCC+0x52010 (bit 8); the root of the divider is GCC+0x11e4d0.
+ * The divisor the engine itself uses is (serial clock / (baud * 32)). Which serial clock is running is not written
+ * down anywhere we can read, so level 3 does not guess: it reads the divisor that is already in the engine, and if
+ * there is none, tries the rates a QUP engine is usually given.
+ */
+#define SE_PHYS                 0x890000UL
+#define SE_SIZE                 0x4000UL
+#define GCC_PHYS                0x100000UL
+
+/* the serial engine */
+#define SE_FORCE_DEFAULT        0x20
+#define SE_OUTPUT_CTRL          0x24
+#define SE_STATUS               0x40
+#define SE_SER_M_CLK_CFG        0x48
+#define SE_SER_S_CLK_CFG        0x4c
+#define SE_IF_DISABLE_RO        0x64
+#define SE_FW_REVISION_RO       0x68
+#define SE_DFS_IF_CFG           0x80
+#define SE_M_CMD0               0x600
+#define SE_M_CMD_CTRL           0x604
+#define SE_M_IRQ_STATUS         0x610
+#define SE_M_IRQ_EN             0x614
+#define SE_M_IRQ_CLEAR          0x618
+#define SE_S_CMD0               0x630
+#define SE_S_CMD_CTRL           0x634
+#define SE_S_IRQ_STATUS         0x640
+#define SE_S_IRQ_EN             0x644
+#define SE_S_IRQ_CLEAR          0x648
+#define SE_TX_PACKING_CFG0      0x260
+#define SE_TX_PACKING_CFG1      0x264
+#define SE_RX_PACKING_CFG0      0x284
+#define SE_RX_PACKING_CFG1      0x288
+#define SE_TX_TRANS_CFG         0x25c
+#define SE_TX_PARITY_CFG        0x2a4
+#define SE_RX_TRANS_CFG         0x280
+#define SE_RX_PARITY_CFG        0x2a8
+#define SE_TX_WORD_LEN          0x268
+#define SE_RX_WORD_LEN          0x28c
+#define SE_TX_STOP_BIT_LEN      0x26c
+#define SE_TX_TRANS_LEN         0x270
+#define SE_RX_FIFO(n)           (0x780 + 4 * (n))
+#define SE_TX_FIFO(n)           (0x700 + 4 * (n))
+#define SE_TX_FIFO_STATUS       0x800
+#define SE_RX_FIFO_STATUS       0x804
+#define SE_TX_WATERMARK         0x80c
+#define SE_RX_WATERMARK         0x810
+#define SE_RX_RFR_WATERMARK     0x814
+
+#define SER_CLK_EN              (1u << 0)
+#define CLK_DIV_SHFT            4
+#define FORCE_DEFAULT           (1u << 0)
+#define M_CMD_DONE_EN           (1u << 0)
+#define M_GENI_CMD_ABORT        (1u << 1)
+#define S_GENI_CMD_ABORT        (1u << 1)
+#define S_CMD_DONE_EN           (1u << 0)
+#define M_TX_FIFO_WATERMARK_EN  (1u << 30)
+#define M_RX_FIFO_WATERMARK_EN  (1u << 26)
+#define M_RX_FIFO_LAST_EN       (1u << 27)
+#define S_RX_FIFO_WATERMARK_EN  (1u << 26)
+#define S_RX_FIFO_LAST_EN       (1u << 27)
+#define M_SEC_IRQ_EN            (1u << 31)
+#define UART_START_TX_OPCODE    (1u << 27)
+#define UART_START_READ_OPCODE  (1u << 27)
+#define FIFO_WORDS_MSK          0x1ffffffu
+#define UART_PACKING_CFG0       0xfu
+
+/* GCC's QUPV3 wrapper 2: core, both AHB clocks, the 2x core and SE 4, all in one register */
+#define GCC_QUPV3_WRAP2_GATES   0x52010
+#define WRAP2_CORE_CLK          (1u << 0)
+#define WRAP2_S_AHB_CLK         (1u << 1)
+#define WRAP2_M_AHB_CLK         (1u << 2)
+#define WRAP2_CORE_2X_CLK       (1u << 3)
+#define WRAP2_S4_CLK            (1u << 8)
+/* GCC is mapped at 0x100000, so these are the table's addresses less that base: U-Boot writes 0x12327c and
+   0x11e4d0, which already contain it. Adding it twice reaches past the mapped window, and a device read there
+   stalls the bus. */
+#define GCC_WRAP2_CORE_2X_RCGR  0x2327c
+#define GCC_WRAP2_S4_RCGR       0x1e4d0
+
+/* The serial clocks a QUP engine is usually given, from U-Boot's root_freq[]; 115200 * 32 = 3686400 divides all of
+   them, and only the ones it divides evenly are tried. */
+static const unsigned serial_clocks[] = {
+	7372800, 14745600, 19200000, 29491200, 32000000,
+	48000000, 64000000, 80000000, 96000000, 100000000,
+};
+
+static vm_offset_t se, gcc_regs;
+
+/* The clock votes: read, change the bits, write back, as the Wi-Fi driver does for PCIe's clocks. */
+static void
+gcc_change(unsigned offset, uint32_t mask, uint32_t value)
+{
+	wr(gcc_regs + offset, (rd(gcc_regs + offset) & ~mask) | (value & mask));
+}
+
+static bool
+uart_wait(vm_offset_t base, unsigned offset, uint32_t mask, uint32_t value, unsigned milliseconds)
+{
+	for (unsigned spent = 0; spent < milliseconds * 100; spent++) {
+		if ((rd(base + offset) & mask) == value) {
+			return true;
+		}
+		delay(10);
+	}
+	return false;
+}
+
+/* What the engine says about itself, before anything is written. Reading a register of an engine whose clock is off is
+   what the driver's own note warns about, so the clocks are read first and the rest only printed, not trusted. */
+static void
+uart_look(void)
+{
+	uint32_t gates = rd(gcc_regs + GCC_QUPV3_WRAP2_GATES);
+	uint32_t revision = rd(se + SE_FW_REVISION_RO);
+
+	/* The registers whose reads are known to answer: the wrapper's gates and the engine's revision. The rest of the
+	   block (the DFS and output controls, the FIFO states) is left alone until the engine has shown it runs. */
+	say("bt: uart: the wrapper's gates %#x (core %u, s-ahb %u, m-ahb %u, 2x %u, se4 %u), revision %#x (protocol %u)\n",
+	    gates, (gates & WRAP2_CORE_CLK) != 0, (gates & WRAP2_S_AHB_CLK) != 0, (gates & WRAP2_M_AHB_CLK) != 0,
+	    (gates & WRAP2_CORE_2X_CLK) != 0, (gates & WRAP2_S4_CLK) != 0, revision, (revision >> 8) & 0xff);
+}
+
+/* A quiet engine: the main sequencer's command finished or aborted, the secondary's read stopped, the packing set for
+   eight-bit words, no parity, one stop bit, no flow control. */
+static void
+uart_init(void)
+{
+	if (bt_dry < 8) {
+		(void)uart_wait(se, SE_M_IRQ_STATUS, M_CMD_DONE_EN, M_CMD_DONE_EN, 20);
+		wr(se + SE_M_IRQ_CLEAR, M_CMD_DONE_EN);
+		wr(se + SE_S_CMD_CTRL, S_GENI_CMD_ABORT);
+		(void)uart_wait(se, SE_S_CMD_CTRL, S_GENI_CMD_ABORT, 0, 20);
+		wr(se + SE_S_IRQ_CLEAR, S_CMD_DONE_EN | S_GENI_CMD_ABORT);
+	}
+	wr(se + SE_FORCE_DEFAULT, FORCE_DEFAULT);
+
+	wr(se + SE_TX_PACKING_CFG0, UART_PACKING_CFG0);
+	wr(se + SE_TX_PACKING_CFG1, 0);
+	wr(se + SE_RX_PACKING_CFG0, UART_PACKING_CFG0);
+	wr(se + SE_RX_PACKING_CFG1, 0);
+	wr(se + SE_TX_TRANS_CFG, 2);	/* no flow control: the chip's RTS is not wired here */
+	wr(se + SE_TX_PARITY_CFG, 0);
+	wr(se + SE_RX_TRANS_CFG, 0);
+	wr(se + SE_RX_PARITY_CFG, 0);
+	wr(se + SE_TX_WORD_LEN, 8);
+	wr(se + SE_RX_WORD_LEN, 8);
+	wr(se + SE_TX_STOP_BIT_LEN, 0);
+	wr(se + SE_RX_WATERMARK, 1);
+	wr(se + SE_RX_RFR_WATERMARK, 8);
+}
+
+static void
+uart_divisor(unsigned serial_clock, unsigned baud)
+{
+	uint32_t cfg = SER_CLK_EN | ((serial_clock / (baud * 32)) << CLK_DIV_SHFT);
+
+	wr(se + SE_SER_M_CLK_CFG, cfg);
+	wr(se + SE_SER_S_CLK_CFG, cfg);
+}
+
+/*
+ * delay() in this tree is not a millisecond: a loop of twelve delay(50) calls took 0.8 ms. The receive watch needs
+ * something that actually waits, so this spins on the machine's clock.
+ */
+static void
+wait_ms(unsigned milliseconds)
+{
+	uint64_t deadline;
+
+	nanoseconds_to_absolutetime((uint64_t)milliseconds * 1000000ull, &deadline);
+	deadline += mach_absolute_time();
+	while (mach_absolute_time() < deadline) {
+		;
+	}
+}
+
+static void
+uart_send_raw(const uint8_t *bytes, unsigned length)
+{
+	/* U-Boot's way, without the interrupt state: the engine takes the bytes after the command is given, and the
+	   interrupt registers (which the abort sequence found unreadable) are left alone. */
+	wr(se + SE_TX_WATERMARK, 2);
+	wr(se + SE_TX_TRANS_LEN, length);
+	wr(se + SE_M_CMD0, UART_START_TX_OPCODE);
+	delay(1);
+	for (unsigned i = 0; i < length; i++) {
+		wr(se + SE_TX_FIFO(0), bytes[i]);
+	}
+	delay(20);
+}
+
+static bool
+uart_send(const uint8_t *bytes, unsigned length)
+{
+	for (unsigned i = 0; i < length; i++) {
+		wr(se + SE_TX_WATERMARK, 2);
+		wr(se + SE_TX_TRANS_LEN, 1);
+		wr(se + SE_M_CMD0, UART_START_TX_OPCODE);
+		if (!uart_wait(se, SE_M_IRQ_STATUS, M_TX_FIFO_WATERMARK_EN, M_TX_FIFO_WATERMARK_EN, 50)) {
+			return false;
+		}
+		wr(se + SE_TX_FIFO(0), bytes[i]);
+		wr(se + SE_M_IRQ_CLEAR, M_TX_FIFO_WATERMARK_EN);
+		if (!uart_wait(se, SE_M_IRQ_STATUS, M_CMD_DONE_EN, M_CMD_DONE_EN, 50)) {
+			return false;
+		}
+		wr(se + SE_M_IRQ_CLEAR, M_CMD_DONE_EN);
+	}
+	return true;
+}
+
+/* Whatever the engine has in its fifo within the time given. */
+static unsigned
+uart_read(uint8_t *out, unsigned most, unsigned milliseconds)
+{
+	unsigned got = 0;
+	uint32_t status;
+
+	wr(se + SE_S_CMD0, UART_START_READ_OPCODE);
+	for (unsigned spent = 0; spent < milliseconds * 100 && got < most; spent++) {
+		status = rd(se + SE_RX_FIFO_STATUS) & FIFO_WORDS_MSK;
+		while (status != 0 && got < most) {
+			out[got++] = (uint8_t)(rd(se + SE_RX_FIFO(0)) & 0xff);
+			status = rd(se + SE_RX_FIFO_STATUS) & FIFO_WORDS_MSK;
+		}
+		delay(10);
+	}
+	return got;
+}
+
+/* HCI_Reset, the first packet any Bluetooth host sends: type 0x01, opcode 0x0c03, no parameters. A chip that is up
+   answers with a Command Complete event (0x04 0x0e ...). */
+static void
+uart_reset_at(unsigned serial_clock)
+{
+	static const uint8_t reset[] = { 0x01, 0x03, 0x0c, 0x00 };
+	uint8_t back[32];
+	unsigned got;
+
+	say("bt: uart: the engine at %u Hz, divisor %u\n", serial_clock, serial_clock / (115200 * 32));
+	uart_divisor(serial_clock, 115200);
+	uart_init();
+	say("bt: uart: the engine is set up\n");
+	(void)uart_read(back, sizeof(back), 20);	/* whatever was left over */
+	if (!uart_send(reset, sizeof(reset))) {
+		say("bt: uart: at %u Hz the engine would not take the packet\n", serial_clock);
+		return;
+	}
+	got = uart_read(back, sizeof(back), 300);
+	say("bt: uart: at %u Hz (divisor %u) the chip answered %u byte(s):", serial_clock,
+	    serial_clock / (115200 * 32), got);
+	for (unsigned i = 0; i < got; i++) {
+		say(" %02x", back[i]);
+	}
+	say("%s\n", got ? "" : " (nothing)");
+}
+
+/* The serial clock, set the way Linux's clock driver sets one: the divider's parent is picked, a multiplier and a
+   divisor are written, and only then is the divider's root turned on. Linux's table for this engine
+   (drivers/clk/qcom/gcc-sm8350.c, gcc_qupv3_wrap2_s4_clk_src) has 7,372,800 Hz as GPLL0's even output (source 6)
+   with M 384 and N 15,625 and a hidden divider of one: 300 MHz * 384 / 15,625 = 7,372,800, which is 115,200 * 32 *
+   2, so the engine's own divisor for 115,200 baud is 2. D is the complement of M, as clk-rcg2 writes it. */
+static void
+uart_clock_set(void)
+{
+	uint32_t command, readback[5];
+
+	say("bt: uart: 1. GPLL0 at %#x reads %#x\n", 0x52018, rd(gcc_regs + 0x52018));
+	say("bt: uart: 2. the divider at %#lx reads %#x\n", GCC_WRAP2_S4_RCGR, rd(gcc_regs + GCC_WRAP2_S4_RCGR));
+	command = rd(gcc_regs + GCC_WRAP2_S4_RCGR);
+	if (bt_dry == 1) {
+		return;
+	}
+	/* The root off while the fields are written: the hardware latches them when it is turned back on. */
+	wr(gcc_regs + GCC_WRAP2_S4_RCGR, command & ~1u);
+	delay(10);
+	if (bt_dry == 2) {
+		goto readback;
+	}
+	/* Hidden divider 1, source 6 (GPLL0's even output, 300 MHz), and the hardware clock control bit the working
+	   engines have. 300 MHz * 384 / 15,625 = 7,372,800 Hz, the rate U-Boot gives this engine's family. */
+	wr(gcc_regs + GCC_WRAP2_S4_RCGR + 4, (1u << 20) | (1u << 8) | bt_src);
+	delay(10);
+	if (bt_dry == 3) {
+		goto readback;
+	}
+	wr(gcc_regs + GCC_WRAP2_S4_RCGR + 8, 384);	/* M */
+	wr(gcc_regs + GCC_WRAP2_S4_RCGR + 0xc, 15625);	/* N */
+	wr(gcc_regs + GCC_WRAP2_S4_RCGR + 0x10, ~384u);	/* D */
+	delay(10);
+	if (bt_dry == 4) {
+		goto readback;
+	}
+	/* The engines that run read 0x80000000 here, so that is the bit that starts this one; bit 0 of the same
+	   register reads back zero after a write, so it is a trigger, not the enable. */
+	wr(gcc_regs + GCC_WRAP2_S4_RCGR, rd(gcc_regs + GCC_WRAP2_S4_RCGR) | 0x80000000u);
+	delay(1000);
+readback:
+	for (unsigned i = 0; i < 5; i++) {
+		readback[i] = rd(gcc_regs + GCC_WRAP2_S4_RCGR + i * 4);
+	}
+	say("bt: uart: 3. the divider now: %#x %#x %#x %#x %#x\n", readback[0], readback[1], readback[2],
+	    readback[3], readback[4]);
+	if (bt_dry == 7) {
+		/* The step that may stall: the first look at the engine itself. */
+		say("bt: uart: 4. the engine at %#lx says %#x\n", SE_PHYS, rd(se + SE_FW_REVISION_RO));
+	}
+
+}
+
+/* Level 3, after the supplies and the reset line are on: the engine's state, then an HCI Reset at each candidate. */
+static void
+uart_after_power(void)
+{
+	uint32_t gates;
+
+	gates = rd(gcc_regs + GCC_QUPV3_WRAP2_GATES);
+	if ((gates & (WRAP2_CORE_CLK | WRAP2_S_AHB_CLK | WRAP2_M_AHB_CLK | WRAP2_CORE_2X_CLK | WRAP2_S4_CLK)) !=
+	    (WRAP2_CORE_CLK | WRAP2_S_AHB_CLK | WRAP2_M_AHB_CLK | WRAP2_CORE_2X_CLK | WRAP2_S4_CLK)) {
+		gcc_change(GCC_QUPV3_WRAP2_GATES,
+		    WRAP2_CORE_CLK | WRAP2_S_AHB_CLK | WRAP2_M_AHB_CLK | WRAP2_CORE_2X_CLK | WRAP2_S4_CLK,
+		    WRAP2_CORE_CLK | WRAP2_S_AHB_CLK | WRAP2_M_AHB_CLK | WRAP2_CORE_2X_CLK | WRAP2_S4_CLK);
+		say("bt: uart: the wrapper's clocks were off; voted on, now %#x\n",
+		    rd(gcc_regs + GCC_QUPV3_WRAP2_GATES));
+	}
+	uart_clock_set();
+	if (bt_dry && bt_dry < 8) {
+		return;
+	}
+	delay(1000);
+	uart_look();
+	if (bt_dry == 8) {
+		uart_divisor(7372800, 115200);
+		uart_init();
+		say("bt: uart: 8. the engine is set up, the abort and the interrupts left alone\n");
+		return;
+	}
+	if (bt_dry == 10) {
+		say("bt: uart: 10. reading the command side with source %u\n", bt_src);
+		say("bt: uart: 10. the master's interrupt state reads %#x, the slave's %#x\n",
+		    rd(se + SE_M_IRQ_STATUS), rd(se + SE_S_IRQ_STATUS));
+		return;
+	}
+	if (bt_dry == 15) {
+		static const uint8_t reset[4] = { 0x01, 0x03, 0x0c, 0x00 };
+		for (unsigned pin = 70; pin <= 71; pin++) {
+			uint32_t cfg = rd(GPIO_CFG(pin));
+			wr(GPIO_CFG(pin), (cfg & ~0x3cu) | (1u << 2));
+		}
+		uart_divisor(7372800, 115200);
+		uart_init();
+		wr(se + SE_S_CMD0, UART_START_READ_OPCODE);
+		/* What is in the queue before anything is sent: the line's idle state and the engine's own leftovers. */
+		for (unsigned i = 0; i < 8; i++) {
+			uint32_t words = rd(se + SE_RX_FIFO_STATUS) & FIFO_WORDS_MSK;
+			if (words == 0) {
+				break;
+			}
+			say("bt: uart: 15. before: word %u = %#x (%u in the queue)\n", i, rd(se + SE_RX_FIFO(0)), words);
+		}
+		uart_send_raw(reset, sizeof(reset));
+		wait_ms(100);
+		say("bt: uart: 15. after the reset the queue holds %u words\n",
+		    rd(se + SE_RX_FIFO_STATUS) & FIFO_WORDS_MSK);
+		for (unsigned i = 0; i < 12; i++) {
+			uint32_t words = rd(se + SE_RX_FIFO_STATUS) & FIFO_WORDS_MSK;
+			if (words == 0) {
+				break;
+			}
+			say("bt: uart: 15. after: word %u = %#x\n", i, rd(se + SE_RX_FIFO(0)));
+		}
+		return;
+	}
+	if (bt_dry == 14) {
+		static const uint8_t reset[4] = { 0x01, 0x03, 0x0c, 0x00 };
+		unsigned seen = 0;
+		/* The phone's own device tree lists, for each of these pins, gpio first and qup18 second
+		   (PINGROUP(70, qup18, ...)), so qup18 is function 1 of that pin. */
+		for (unsigned pin = 70; pin <= 71; pin++) {
+			uint32_t cfg = rd(GPIO_CFG(pin));
+			wr(GPIO_CFG(pin), (cfg & ~0x3cu) | (1u << 2));
+			wait_ms(1);
+			say("bt: uart: 14. gpio%u: %#x -> %#x (function %u)\n", pin, cfg, rd(GPIO_CFG(pin)),
+			    (rd(GPIO_CFG(pin)) >> 2) & 15);
+		}
+		uart_divisor(7372800, 115200);
+		uart_init();
+		uart_send_raw(reset, sizeof(reset));
+		wr(se + SE_S_CMD0, UART_START_READ_OPCODE);
+		for (unsigned round = 0; round < 12; round++) {
+			unsigned words = rd(se + SE_RX_FIFO_STATUS) & FIFO_WORDS_MSK;
+			while (words-- != 0 && seen < 16) {
+				say("bt: uart: 14. byte %u: %#x\n", seen++, rd(se + SE_RX_FIFO(0)) & 0xff);
+			}
+			wait_ms(50);
+		}
+		say("bt: uart: 14. %u bytes came back in 600 ms\n", seen);
+		return;
+	}
+	if (bt_dry == 13) {
+		static const uint8_t reset[4] = { 0x01, 0x03, 0x0c, 0x00 };
+		static const unsigned uart_pins[4] = { 68, 69, 70, 71 };
+		unsigned seen = 0;
+		for (unsigned i = 0; i < 4; i++) {
+			uint32_t cfg = rd(GPIO_CFG(uart_pins[i])), io = rd(GPIO_IO(uart_pins[i]));
+			say("bt: uart: 13. gpio%u: config %#x (function %u, pull %u, output %u), reads %u\n",
+			    uart_pins[i], cfg, (cfg >> 2) & 15, cfg & 3, (cfg >> 9) & 1, io & 1);
+		}
+		uart_divisor(7372800, 115200);
+		uart_init();
+		uart_send_raw(reset, sizeof(reset));
+		wr(se + SE_S_CMD0, UART_START_READ_OPCODE);
+		for (unsigned round = 0; round < 12; round++) {
+			unsigned words = rd(se + SE_RX_FIFO_STATUS) & FIFO_WORDS_MSK;
+			while (words-- != 0 && seen < 16) {
+				say("bt: uart: 13. byte %u: %#x\n", seen++, rd(se + SE_RX_FIFO(0)) & 0xff);
+			}
+			wait_ms(50);
+		}
+		say("bt: uart: 13. %u bytes came back in 600 ms\n", seen);
+		return;
+	}
+	if (bt_dry == 12) {
+		static const uint8_t reset[4] = { 0x01, 0x03, 0x0c, 0x00 };
+		unsigned seen = 0;
+		uart_divisor(7372800, 115200);
+		uart_init();
+		uart_send_raw(reset, sizeof(reset));
+		wr(se + SE_S_CMD0, UART_START_READ_OPCODE);
+		say("bt: uart: 12. the reset is out at 115200; watching the receive queue for 600 ms\n");
+		for (unsigned round = 0; round < 12; round++) {
+			unsigned words = rd(se + SE_RX_FIFO_STATUS) & FIFO_WORDS_MSK;
+			if (words != 0) {
+				say("bt: uart: 12. round %u: %u words\n", round, words);
+				while (words-- != 0 && seen < 16) {
+					say("bt: uart: 12. byte %u: %#x\n", seen++, rd(se + SE_RX_FIFO(0)) & 0xff);
+				}
+			}
+			wait_ms(50);
+		}
+		say("bt: uart: 12. %u bytes came back in 600 ms; the engine says %#x\n", seen,
+		    rd(se + SE_FW_REVISION_RO));
+		return;
+	}
+	if (bt_dry == 11) {
+		static const uint8_t reset[4] = { 0x01, 0x03, 0x0c, 0x00 };
+		uart_divisor(7372800, 115200);
+		uart_init();
+		uart_send_raw(reset, sizeof(reset));
+		say("bt: uart: 11. the reset is out; opening the read side\n");
+		wr(se + SE_S_CMD0, UART_START_READ_OPCODE);
+		delay(50);
+		say("bt: uart: 11. the receive queue holds %u words\n", rd(se + SE_RX_FIFO_STATUS) & FIFO_WORDS_MSK);
+		for (unsigned i = 0; i < 8; i++) {
+			if ((rd(se + SE_RX_FIFO_STATUS) & FIFO_WORDS_MSK) == 0) {
+				break;
+			}
+			say("bt: uart: 11. byte %u: %#x\n", i, rd(se + SE_RX_FIFO(0)) & 0xff);
+		}
+		say("bt: uart: 11. done; the engine says %#x\n", rd(se + SE_FW_REVISION_RO));
+		return;
+	}
+	if (bt_dry == 9) {
+		static const uint8_t reset[4] = { 0x01, 0x03, 0x0c, 0x00 };
+		uart_divisor(7372800, 115200);
+		uart_init();
+		say("bt: uart: 9. sending the reset, no interrupt is read\n");
+		uart_send_raw(reset, sizeof(reset));
+		say("bt: uart: 9. the four bytes are on the wire at %u Hz; the engine says %#x\n",
+		    7372800u, rd(se + SE_FW_REVISION_RO));
+		return;
+	}
+	if (bt_dry < 11) {
+		/* A plain bt=3 stops here. The engine answers on its revision register and takes its configuration, but
+		   the command side (the interrupt state, the start of a transfer) stops the bus dead while the engine's
+		   own clock is not running, and this kernel's guess at that clock has not been shown to start it. So the
+		   transfer is only attempted when a bt_dry of 11 or more asks for it. */
+		say("bt: uart: the engine is quiet: its command side is not touched (bt_dry=11 tries the transfer)\n");
+		return;
+	}
+	for (unsigned i = 0; i < sizeof(serial_clocks) / sizeof(serial_clocks[0]); i++) {
+		if (serial_clocks[i] % (115200 * 32) != 0) {
+			continue;
+		}
+		uart_reset_at(serial_clocks[i]);
+	}
 }
 
 __startup_func
@@ -193,14 +705,23 @@ bt_init(void)
 	if (!PE_parse_boot_argn("bt", &enabled, sizeof(enabled)) || !enabled) {
 		return;
 	}
+	if (PE_parse_boot_argn("bt_dry", &value, sizeof(value))) {
+		bt_dry = value;
+	}
+	if (PE_parse_boot_argn("bt_src", &value, sizeof(value)) && value != 0) {
+		bt_src = value;
+	}
 	if (PE_parse_boot_argn("bt_again", &value, sizeof(value)) && value <= 3600) {
 		again_seconds = value;
 	}
 	tlmm = ml_io_map(TLMM_PHYS, TLMM_SIZE);
-	if (tlmm == 0) {
-		say("bt: could not map the TLMM; off\n");
+	se = ml_io_map(SE_PHYS, SE_SIZE);
+	gcc_regs = ml_io_map(GCC_PHYS, 0x100000);
+	if (tlmm == 0 || se == 0 || gcc_regs == 0) {
+		say("bt: could not map the TLMM, the serial engine or GCC; off\n");
 		return;
 	}
+	uart_level = enabled;
 	say("bt: level 1: a look, reading only (WCN6750; nothing is written)\n");
 	look("at start");
 	if (enabled >= 2) {
