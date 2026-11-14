@@ -89,6 +89,10 @@ Never in it: any file of Darwin (you build the system image on your machine from
 `sysimage/unpack.sh`; nothing is downloaded for you, decrypted or circumvented); the phone's firmware (pulled from your own phone into
 `fw-*/`, which git ignores); keys, certificates, activation, or anything that would make the phone pass as an iPhone to Apple.
 
+And no vendor binary of any kind — not Apple's and not the SoC vendor's: no UEFI DXE blobs, no firmware images, no
+touch-controller firmware headers. The loader and the kernel under `prebuilt/` are built from this source on your machine
+(`make loader`, `make kernel`); everything else a session needs, it reads from the phone you own.
+
 ## Independent, and Apple-free at the core
 
 HakiOS is an independent research project. It is **not affiliated with or endorsed by Apple**;
