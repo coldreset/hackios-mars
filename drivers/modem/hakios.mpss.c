@@ -1049,6 +1049,7 @@ static uint32_t mpss_memory = MPSS_MEMORY_DEFAULT;
 #define MPSS_MEMORY_SIZE        0x0f600000u   /* redwood's; soc_mpss_size=0x10000000 for mars, whose own tree says so */
 static uint32_t mpss_size = MPSS_MEMORY_SIZE;
 static unsigned mpss_setup_image;     /* mpss_setup_image=1: tell TrustZone the image's size, as the DSP's driver does */
+static unsigned mpss_setup_extra;     /* mpss_setup_extra=<bytes>: the claim reaches past the region, over the hash table */
 static vm_offset_t metadata_page;      /* the MDT the secure world was shown: alive until AUTH_AND_RESET */
 static uint32_t metadata_size;
 #define PAS_MPSS_DEFAULT        4               /* dt: qcom,pas-id of qcom,mss */
@@ -1514,9 +1515,10 @@ step_header(void)
 	}
 	printf("mpss: %u: TRUSTZONE ACCEPTS THE MODEM'S SIGNATURE FROM THIS KERNEL\n", step);
 
-	uint32_t setup = mpss_setup_image ? image.size : mpss_size;
+	uint32_t setup = (mpss_setup_image ? image.size : mpss_size) + mpss_setup_extra;
 
-	announce(mpss_setup_image ? "tell TrustZone where the image will be: the image's own size, as the DSP's driver does"
+	announce(mpss_setup_extra != 0 ? "tell TrustZone where the image will be: the region and the hash table past its end"
+	    : mpss_setup_image ? "tell TrustZone where the image will be: the image's own size, as the DSP's driver does"
 	    : "tell TrustZone where the image will be: the whole of the modem's memory, as Linux does");
 	result = scm("where the image will be", SCM_PAS_MEM_SETUP, SCM_THREE_VALUES, pas_mpss, mpss_memory, setup, 0, &answer);
 	if (result != 0 || answer != 0) {
@@ -6343,6 +6345,7 @@ soc_override(void)
 	PE_parse_boot_argn("soc_mpss_mem", &mpss_memory, sizeof(mpss_memory));
 	PE_parse_boot_argn("soc_mpss_size", &mpss_size, sizeof(mpss_size));
 	PE_parse_boot_argn("mpss_setup_image", &mpss_setup_image, sizeof(mpss_setup_image));
+	PE_parse_boot_argn("mpss_setup_extra", &mpss_setup_extra, sizeof(mpss_setup_extra));
 	PE_parse_boot_argn("soc_imem", &ipa_imem, sizeof(ipa_imem));
 	PE_parse_boot_argn("soc_ipa_stream", &ipa_stream, sizeof(ipa_stream));
 	PE_parse_boot_argn("soc_ipa_stream_uc", &ipa_stream_uc, sizeof(ipa_stream_uc));
