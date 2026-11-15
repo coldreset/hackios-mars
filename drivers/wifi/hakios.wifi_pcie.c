@@ -1131,6 +1131,16 @@ static bool ipcr_transfer_event(unsigned channel, unsigned code, uint64_t pointe
     if (!ok) { return false; }
     ipcr.rx_read = hakiospcie_mhi_next(ipcr.rx_read, 32);
     ipcr.rx_write = hakiospcie_mhi_next(ipcr.rx_write, 32);
+    if (ipcr.rx_packets <= 40) {
+        /* HAKIOS: the radio goes quiet partway through a download; these are
+         * the four numbers that say whether the host gave its buffers back. */
+        uint64_t ev = ((uint64_t)rd(dma_space.control + 0x800 + 1 * 44, 32) << 32) |
+            rd(dma_space.control + 0x800 + 1 * 44, 28);
+        hakiospcie_tl("QMI ring: in %u of %u bytes at index %u; rx read %u write %u; "
+            "event read %#llx consumed %u returned %u; rx packets %u\n",
+            length, MHI_IPCR_MTU, index, ipcr.rx_read, ipcr.rx_write,
+            (unsigned long long)ev, mhi.consumed[1], mhi.returned[1], ipcr.rx_packets);
+    }
     uint64_t write = base + ipcr.rx_write * 16;
     mhi_context_address(dma_space.control + 21 * 44, 36, write);
     mhi_write_address(mhi.channel_db + 21 * 8, write);
@@ -1374,6 +1384,16 @@ static bool ipcr_qmi_request(unsigned message, const void *payload, unsigned len
     for (unsigned i = 0; i < 5000 && !ipcr.response_seen; i++) {
         if (!mhi_events()) { return false; }
         pause_us(1000);
+    }
+    if (!ipcr.response_seen) {
+        /* HAKIOS: no answer came; say what the rings looked like when it stopped. */
+        uint64_t ev = ((uint64_t)rd(dma_space.control + 0x800 + 1 * 44, 32) << 32) |
+            rd(dma_space.control + 0x800 + 1 * 44, 28);
+        hakiospcie_tl("QMI wait: no answer to 0x%x; rx read %u write %u packets %u; "
+            "event read %#llx consumed %u returned %u; events %u; FSR %#x global %#x\n",
+            message, ipcr.rx_read, ipcr.rx_write, ipcr.rx_packets,
+            (unsigned long long)ev, mhi.consumed[1], mhi.returned[1], mhi.events,
+            rd(dma_space.cb, 0x58), rd(dma_space.mmio, 0x48));
     }
     return ipcr.response_seen && !ipcr.response_result && !ipcr.response_error;
 }

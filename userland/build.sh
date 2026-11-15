@@ -685,8 +685,14 @@ if [ -f $DARWIN/system.manifest ] && [ -f $CACHE/dyld_shared_cache_arm64 ] &&
 	# This stages the files; a separate XNU MPSS driver is still required to start the modem.
 	if [ -n "$MODEM" ]; then
 		[ -f ../fw-modem/modem.mdt ] || { echo "build.sh: MODEM=1 needs ../fw-modem/modem.mdt" >&2; exit 1; }
-		../devices/redwood/tools/modem_firmware.py --dtb ../devices/redwood/prebuilt/device-tree.dtb --firmware-dir ../fw-modem \
-			--node /soc/qcom,mss@4080000 >/dev/null
+		# The check runs against this device's own tree. mars's tree in the repository is a
+		# dump of an older ROM (modem at 0x8c000000, a 41 MB DSP region); the phone's own
+		# says 0x8f000000 and 0x3900000, which is what the U-Boot tree carries. Set
+		# MODEM_CHECK=0 to stage the firmware without it.
+		if [ "${MODEM_CHECK:-1}" != 0 ]; then
+			../devices/${DEVICE:-redwood}/tools/modem_firmware.py --dtb ../devices/${DEVICE:-redwood}/prebuilt/device-tree.dtb \
+				--firmware-dir ../fw-modem --node "${MODEM_NODE:-/soc/qcom,mss@4080000}" >/dev/null
+		fi
 		mkdir -p sysroot/fw
 		cp ../fw-modem/modem.mdt ../fw-modem/modem.b[0-9][0-9] sysroot/fw/
 		# ... and the firmware partition's image/ (its mcfg configurations and the registry's *.jsn, pulled from

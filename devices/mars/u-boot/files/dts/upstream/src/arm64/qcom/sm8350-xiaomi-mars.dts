@@ -115,8 +115,10 @@
  * image would then overwrite -- so the vendor's own 41 MB, which ends where the slpi's region begins.
  * The image is 57 MB, so its last 16 MB lie in the slpi's region, which this boot does not load either.
  */
+/* The phone's own tree (read from /proc/device-tree) says 0x3900000 here: the
+   Lahaina image's segments span 57 MB, exactly this much. */
 &pil_adsp_mem {
-	reg = <0x0 0x86100000 0x0 0x2900000>;
+	reg = <0x0 0x86100000 0x0 0x3900000>;
 };
 
 &pil_slpi_mem {
@@ -143,8 +145,9 @@
 	reg = <0x0 0x8be00000 0x0 0x100000>;
 };
 
+/* The phone's own tree says 0x8f000000, and the firmware's segments start there. */
 &pil_modem_mem {
-	reg = <0x0 0x8c000000 0x0 0x10000000>;
+	reg = <0x0 0x8f000000 0x0 0x10000000>;
 };
 
 &pm8350_gpios {

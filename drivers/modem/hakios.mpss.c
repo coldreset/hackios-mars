@@ -1046,7 +1046,11 @@ step_survey(void)
 
 #define MPSS_MEMORY_DEFAULT     0x8b800000u   /* dt: reserved-memory mpss@..., memory-region of qcom,mss */
 static uint32_t mpss_memory = MPSS_MEMORY_DEFAULT;
-#define MPSS_MEMORY_SIZE        0x0f600000u
+#define MPSS_MEMORY_SIZE        0x0f600000u   /* redwood's; soc_mpss_size=0x10000000 for mars, whose own tree says so */
+static uint32_t mpss_size = MPSS_MEMORY_SIZE;
+static unsigned mpss_setup_image;     /* mpss_setup_image=1: tell TrustZone the image's size, as the DSP's driver does */
+static vm_offset_t metadata_page;      /* the MDT the secure world was shown: alive until AUTH_AND_RESET */
+static uint32_t metadata_size;
 #define PAS_MPSS_DEFAULT        4               /* dt: qcom,pas-id of qcom,mss */
 static uint32_t pas_mpss = PAS_MPSS_DEFAULT;
 
@@ -1077,7 +1081,7 @@ root_file(const char *name, uint64_t *size)
 	VATTR_INIT(&attributes);
 	VATTR_WANTED(&attributes, va_data_size);
 	if (vnode_getattr(vnode, &attributes, context) != 0 || attributes.va_data_size == 0 ||
-	    attributes.va_data_size > MPSS_MEMORY_SIZE) {
+	    attributes.va_data_size > mpss_size) {
 		vnode_put(vnode);
 		return NULL;
 	}
@@ -1205,7 +1209,7 @@ step_firmware(void)
 			continue;
 		}
 		if (segment.paddr < mpss_memory || segment.file_size > segment.memory_size ||
-		    (uint64_t)segment.paddr + segment.memory_size > (uint64_t)mpss_memory + MPSS_MEMORY_SIZE) {
+		    (uint64_t)segment.paddr + segment.memory_size > (uint64_t)mpss_memory + mpss_size) {
 			printf("mpss: %u: segment %u (%#x, %#x bytes) is not within the DSP's memory\n", step, i, segment.paddr,
 			    segment.memory_size);
 			goto fail;
@@ -1243,7 +1247,7 @@ step_firmware(void)
 	image.size = ((highest + 0xfff) & ~0xfffu) - mpss_memory;
 	printf("mpss: %u: the image is whole (%s): a header of %llu bytes (%u of hashes), %u segments, %llu bytes of files, %#x "
 	    "bytes of the DSP's %#x from %#x\n", step, from_root ? "from /fw on the root" : "from the small image", size, hashes,
-	    image.segments, files, image.size, MPSS_MEMORY_SIZE, mpss_memory);
+	    image.segments, files, image.size, mpss_size, mpss_memory);
 	announce("read the modem's four file systems from the phone's storage into memory of ours (rmtfs below)");
 	{
 		unsigned loaded = rmtfs_load();
@@ -1489,29 +1493,37 @@ step_header(void)
 	}
 
 	announce("hand the image's header to TrustZone to check its signature (image 4), in a page of ours");
-	if (kmem_alloc(kernel_map, &page, PAGE_SIZE, KMA_KOBJECT | KMA_ZERO | KMA_DATA, VM_KERN_MEMORY_IOKIT) != KERN_SUCCESS) {
+	if (kmem_alloc(kernel_map, &page, round_page(image.header_size), KMA_KOBJECT | KMA_ZERO | KMA_DATA, VM_KERN_MEMORY_IOKIT)
+	    != KERN_SUCCESS) {
 		printf("mpss: %u: no memory\n", step);
 		return false;
 	}
 	memcpy((void *)page, image.header, image.header_size);
+	/* the secure world goes on reading this buffer until AUTH_AND_RESET, so it is not given back here */
+	metadata_page = page;
+	metadata_size = image.header_size;
 	for (vm_offset_t line = page; line < page + PAGE_SIZE; line += 64) {
 		__asm__ volatile ("dc civac, %0" : : "r" (line));
 	}
 	settle();
-	result = scm("to take the modem's header", SCM_PAS_INIT_IMAGE, SCM_VALUE_AND_BUFFER, pas_mpss, kvtophys(page), 0, 0, &answer);
+	result = scm("to take the modem's header", SCM_PAS_INIT_IMAGE, SCM_VALUE_AND_BUFFER, pas_mpss, kvtophys(page),
+	    option("modem_init_image_size") ? image.header_size : 0, 0, &answer);
 	if (result != 0 || answer != 0) {
 		printf("mpss: %u: TRUSTZONE DOES NOT TAKE THE HEADER: the call returns %d, its answer is %#llx\n", step, result, answer);
 		return false;
 	}
 	printf("mpss: %u: TRUSTZONE ACCEPTS THE MODEM'S SIGNATURE FROM THIS KERNEL\n", step);
 
-	announce("tell TrustZone where the image will be: the whole of the modem's memory, as Linux does");
-	result = scm("where the image will be", SCM_PAS_MEM_SETUP, SCM_THREE_VALUES, pas_mpss, mpss_memory, MPSS_MEMORY_SIZE, 0, &answer);
+	uint32_t setup = mpss_setup_image ? image.size : mpss_size;
+
+	announce(mpss_setup_image ? "tell TrustZone where the image will be: the image's own size, as the DSP's driver does"
+	    : "tell TrustZone where the image will be: the whole of the modem's memory, as Linux does");
+	result = scm("where the image will be", SCM_PAS_MEM_SETUP, SCM_THREE_VALUES, pas_mpss, mpss_memory, setup, 0, &answer);
 	if (result != 0 || answer != 0) {
 		printf("mpss: %u: TRUSTZONE DOES NOT TAKE THE PLACE: the call returns %d, its answer is %#llx\n", step, result, answer);
 		return false;
 	}
-	printf("mpss: %u: TrustZone takes the place: %#x bytes at %#x (the image takes %#x of them)\n", step, MPSS_MEMORY_SIZE, mpss_memory,
+	printf("mpss: %u: TrustZone takes the place: %#x bytes at %#x (the image takes %#x of them)\n", step, setup, mpss_memory,
 	    image.size);
 	return true;
 }
@@ -6329,6 +6341,8 @@ soc_override(void)
 	PE_parse_boot_argn("soc_smem", &smem_phys, sizeof(smem_phys));
 	PE_parse_boot_argn("soc_cmd_db", &cmd_db_phys, sizeof(cmd_db_phys));
 	PE_parse_boot_argn("soc_mpss_mem", &mpss_memory, sizeof(mpss_memory));
+	PE_parse_boot_argn("soc_mpss_size", &mpss_size, sizeof(mpss_size));
+	PE_parse_boot_argn("mpss_setup_image", &mpss_setup_image, sizeof(mpss_setup_image));
 	PE_parse_boot_argn("soc_imem", &ipa_imem, sizeof(ipa_imem));
 	PE_parse_boot_argn("soc_ipa_stream", &ipa_stream, sizeof(ipa_stream));
 	PE_parse_boot_argn("soc_ipa_stream_uc", &ipa_stream_uc, sizeof(ipa_stream_uc));

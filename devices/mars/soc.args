@@ -11,3 +11,7 @@ soc_ipa_stream_uc=0x5c2
 soc_pas_mpss=0x4
 soc_pas_ipa=0xf
 soc_ipa_fw=ipa_fws
+# the modem region the phone's own tree gives: modem_region@8f000000, 256 MB
+soc_mpss_mem=0x8f000000
+# the phone's modem region is 256 MB, the driver's default (redwood's) is 246
+soc_mpss_size=0x10000000
