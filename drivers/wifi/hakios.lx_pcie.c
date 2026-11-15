@@ -225,6 +225,20 @@ int
 lx_os_firmware(const char *name, const void **data, unsigned long *size)
 {
 	uint64_t length = 0;
+	printf("lx: firmware asked for \"%s\"\n", name);
+	/* the board data of the run image wins: that is where a trimmed, length-consistent
+	 * copy lives, and the radio takes no more than about thirty kilobytes of it */
+	const char *base = strrchr(name, '/');
+	if (base != NULL) { base++; } else { base = name; }
+	if (strncmp(base, "board", 5) == 0) {
+		uint64_t small = 0;
+		const uint8_t *file = hakios_image_file("fw", base, &small, NULL);
+		if (file != NULL && small != 0) {
+			printf("lx: the run image's %s is used: %lu bytes\n", base, (unsigned long)small);
+			*data = file; *size = (unsigned long)small;
+			return 0;
+		}
+	}
 	const uint8_t *file = hakiospcie_wifi_driver_mode() ? hakiospcie_wifi_driver_file(name, &length) :
 	    hakiospcie_wifi_driver_file(name, &length);
 
@@ -247,6 +261,7 @@ lx_os_firmware(const char *name, const void **data, unsigned long *size)
 		printf("lx: the driver asks for \"%s\" and fw/%s has it, %lu bytes\n", name,
 		    slash != NULL ? slash + 1 : name, (unsigned long)fallback);
 	}
+	printf("lx: firmware \"%s\" is %lu bytes\n", name, (unsigned long)length);
 	*data = file;
 	*size = (unsigned long)length;
 	return 0;

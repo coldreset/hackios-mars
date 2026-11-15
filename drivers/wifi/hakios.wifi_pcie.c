@@ -81,6 +81,8 @@ static unsigned wifi_mem_shift;
 /* wifi_mem_type: the type field to write into each segment of a memory reply */
 static unsigned wifi_mem_type;
 static unsigned wifi_board_type;
+/* keep the file id the radio asked for instead of rewriting it to 0 */
+static unsigned board_file_id_keep;
 static unsigned wifi_skip_regdb;
 static unsigned wifi_ping;
 static unsigned wifi_board_pace = 20;
@@ -1937,7 +1939,9 @@ static bool power_root(unsigned step) {
 }
 void hakiospcie_wifi_init(void) {
     unsigned mode = 0;
-    if (!PE_parse_boot_argn("hakiospcie_wifi", &mode, sizeof(mode)) || !mode) { return; }
+    bool have = PE_parse_boot_argn("hakiospcie_wifi", &mode, sizeof(mode));
+    printf("wifi-pcie: init entered; the argument says %s %u\n", have ? "yes" : "no", mode);
+    if (!have || !mode) { return; }
     if (!platform_is_lemonade()) {
         hakiospcie_tl("wifi-pcie: refused on another platform\n");
         return;
@@ -1976,6 +1980,7 @@ void hakiospcie_wifi_init(void) {
     PE_parse_boot_argn("wifi_mem_shift", &wifi_mem_shift, sizeof(wifi_mem_shift));
     PE_parse_boot_argn("wifi_mem_type", &wifi_mem_type, sizeof(wifi_mem_type));
     PE_parse_boot_argn("wifi_board_type", &wifi_board_type, sizeof(wifi_board_type));
+    PE_parse_boot_argn("board_file_id_keep", &board_file_id_keep, sizeof(board_file_id_keep));
     PE_parse_boot_argn("wifi_skip_regdb", &wifi_skip_regdb, sizeof(wifi_skip_regdb));
     PE_parse_boot_argn("wifi_ping", &wifi_ping, sizeof(wifi_ping));
     PE_parse_boot_argn("wifi_board_pace", &wifi_board_pace, sizeof(wifi_board_pace));
@@ -2163,7 +2168,7 @@ qrtr_send(struct hakios_qrtr_port *port, uint32_t node, uint32_t to_port, const 
 	}
 	if (length >= 18 && ((const uint8_t *)data)[3] == 0x25) {
 		uint8_t *edited = (uint8_t *)data;
-		qmi_board_file_id_zero(edited, (unsigned)length);
+		if (!board_file_id_keep) { qmi_board_file_id_zero(edited, (unsigned)length); }
 		qmi_board_type_claim(edited, (unsigned)length);
 		/* The radio stops answering partway through the board file. Give it
 		 * a moment between pieces: the copy is done by its own firmware, and
