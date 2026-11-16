@@ -2559,14 +2559,24 @@ step_start(void)
 		return false;
 	}
 	rails_asked = true;
-	if (!mailbox_send("{class: image, res: load_state, name: modem, val: on}")) {
-		rails(0);
-		rails_asked = false;
-		lck_mtx_unlock(&dsp_lock);
-		return false;
+	/* Linux's qcom_q6v5_pas does the authentication first, and only then tells the
+	 * always-on processor that the image is loaded (modem_load_state_first=1 does the
+	 * other way round, which is what this kernel did until now). */
+	if (option("modem_load_state_first")) {
+		if (!mailbox_send("{class: image, res: load_state, name: modem, val: on}")) {
+			rails(0);
+			rails_asked = false;
+			lck_mtx_unlock(&dsp_lock);
+			return false;
+		}
 	}
 	result = scm("to authenticate the modem's image and start it", SCM_PAS_AUTH_AND_RESET, SCM_ONE_VALUE, pas_mpss, 0, 0, 0,
 	    &answer);
+	if (result == 0 && answer == 0 && !option("modem_load_state_first")) {
+		if (!mailbox_send("{class: image, res: load_state, name: modem, val: on}")) {
+			printf("mpss: %u: THE MODEM IS STARTED BUT THE ALWAYS-ON PROCESSOR WAS NOT TOLD\n", step);
+		}
+	}
 	doorbell.since = started = now_us();
 	image_written = false;
 	if (result != 0 || answer != 0) {
