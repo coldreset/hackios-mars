@@ -1078,8 +1078,47 @@ log_of_hung_kernel(const struct kernel_live *live, uint64_t slide)
 		len = (uint32_t)(live->log_head + live->log_ring);
 	}
 	if (len <= live->log_head + live->log_ring) {
-		loader_ctx[CTX_LOG_PA] = (uint64_t)(uintptr_t)log;
-		loader_ctx[CTX_LOG_LEN] = len;
+		uint64_t want = 192 * 1024;
+
+		if (len > want) {
+			/* (the newest part, without the launchd lines: SpringBoard asks for a service that is
+			   not there hundreds of times a second, and that is all this window would hold) */
+			const char *from = log + len - want;
+			uint64_t i, at = 0;
+			unsigned line = 0;
+			int skipping = 0;
+
+			for (i = 0; i < want && at + 1 < sizeof(log_verify); i++) {
+				char c = from[i];
+
+				if (line == 0 && i + 25 <= want) {
+					static const char noise[] = "com.apple.xpc.launchd|";
+					int same = 1;
+
+					for (unsigned k = 0; k < sizeof(noise) - 1; k++) {
+						if (from[i + k] != noise[k]) {
+							same = 0;
+							break;
+						}
+					}
+					skipping = same;
+				}
+				if (skipping) {
+					if (c == '\n') {
+						skipping = 0;
+						line = 0;
+					}
+					continue;
+				}
+				log_verify[at++] = (uint8_t)c;
+				line = (c == '\n') ? 0 : line + 1;
+			}
+			loader_ctx[CTX_LOG_PA] = (uint64_t)(uintptr_t)log_verify;
+			loader_ctx[CTX_LOG_LEN] = at;
+		} else {
+			loader_ctx[CTX_LOG_PA] = (uint64_t)(uintptr_t)log;
+			loader_ctx[CTX_LOG_LEN] = len;
+		}
 	}
 }
 
@@ -1109,12 +1148,49 @@ compose_live_log(const struct kernel_live *live, uint64_t slide)
 	n += take; \
 } while (0)
 	PUT(sep, sizeof(sep) - 1);
-	if (!wrapped || ring_at >= live->log_ring) {
-		PUT(log, len <= live->log_head + live->log_ring ? len : live->log_head + live->log_ring);
-	} else {
-		PUT(log, live->log_head);
-		PUT(log + live->log_head + ring_at, live->log_ring - ring_at);
-		PUT(log + live->log_head, ring_at);
+	{
+		uint64_t total, from, cap = room - n;
+		unsigned i, line = 0;
+		int skipping = 0;
+
+		if (!wrapped || ring_at >= live->log_ring) {
+			uint32_t have = len <= live->log_head + live->log_ring ? len : live->log_head + live->log_ring;
+			total = have;
+			from = (cap < total) ? total - cap : 0;     /* the newest bytes, and only those */
+		} else {
+			total = live->log_ring;
+			from = (cap < total) ? (ring_at + total - cap) % total : ring_at;
+		}
+		for (i = 0; i < total && n < room - 1; i++) {
+			uint64_t at = (from + i) % total;
+			uint64_t src = (!wrapped || ring_at >= live->log_ring) ? at : live->log_head + at;
+			char c = log[src];
+
+			if (line == 0 && i + 25 <= total) {
+				static const char noise[] = "com.apple.xpc.launchd|";
+				int same = 1;
+
+				for (unsigned k = 0; k < sizeof(noise) - 1; k++) {
+					uint64_t a2 = (from + i + k) % total;
+					uint64_t s2 = (!wrapped || ring_at >= live->log_ring) ? a2 : live->log_head + a2;
+
+					if (log[s2] != noise[k]) {
+						same = 0;
+						break;
+					}
+				}
+				skipping = same;
+			}
+			if (skipping) {
+				if (c == '\n') {
+					skipping = 0;
+					line = 0;
+				}
+				continue;
+			}
+			out_buf[n++] = c;
+			line = (c == '\n') ? 0 : line + 1;
+		}
 	}
 #undef PUT
 	staged_len = n;
