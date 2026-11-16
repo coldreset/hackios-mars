@@ -1146,6 +1146,11 @@ static struct {
 		uint32_t file_size, memory_size;
 		const uint8_t *file;
 	} segment[MAX_SEGMENTS];
+	struct {
+		uint32_t at;
+		uint32_t file_size;
+		const uint8_t *file;
+	} hash;
 	unsigned segments;
 	uint32_t size;
 } image;
@@ -1169,8 +1174,29 @@ image_forget(void)
 			kfree_data(data, image.segment[s].file_size);
 		}
 	}
+	if (image.hash.file != NULL) {
+		void *data = (void *)(uintptr_t)image.hash.file;
+
+		kfree_data(data, image.hash.file_size);
+	}
 	bzero(&image, sizeof(image));
 	from_root = false;
+}
+
+/* How much of the region the image and its hash table need, rounded to a page. */
+static uint32_t
+image_span(void)
+{
+	uint32_t span = image.size;
+
+	if (image.hash.file_size != 0) {
+		uint32_t end = (image.hash.at + image.hash.file_size + 0xfff) & ~0xfffu;
+
+		if (end > span) {
+			span = end;
+		}
+	}
+	return span;
 }
 
 static unsigned rmtfs_load(void);
@@ -1205,6 +1231,21 @@ step_firmware(void)
 		memcpy(&segment, header + 52 + 32 * i, sizeof(segment));
 		if (MDT_HASH(segment.flags)) {
 			hashes = segment.file_size;
+			if (segment.file_size != 0 && segment.paddr >= mpss_memory) {
+				uint64_t hash_size = 0;
+
+				snprintf(name, sizeof(name), "modem.b%02u", i);
+				image.hash.at = segment.paddr - mpss_memory;
+				image.hash.file_size = segment.file_size;
+				image.hash.file = image_file(name, &hash_size);
+				if (image.hash.file == NULL || hash_size != segment.file_size) {
+					printf("mpss: %u: fw/%s is not the %u bytes of the hash table\n", step, name,
+					    segment.file_size);
+					goto fail;
+				}
+				printf("mpss: %u: the hash table is %u bytes at %#x, past the image's %#x\n", step,
+				    segment.file_size, segment.paddr, image.size);
+			}
 		}
 		if (segment.type != 1 || MDT_HASH(segment.flags) || segment.memory_size == 0) {
 			continue;
@@ -1499,6 +1540,29 @@ step_header(void)
 		printf("mpss: %u: no memory\n", step);
 		return false;
 	}
+	if (option("modem_pas_probe")) {
+		uint32_t probe;
+
+		for (probe = 0; probe <= 20; probe++) {
+			uint64_t probe_answer = 0;
+			int probe_result;
+
+			probe_result = scm("to ask TrustZone about an image id", SCM_PAS_INIT_IMAGE, SCM_VALUE_AND_BUFFER,
+			    probe, kvtophys(page), 0, 0, &probe_answer);
+			printf("mpss: 4: image id %u: the header was offered, the call returns %d, its answer is %#llx\n",
+			    probe, probe_result, probe_answer);
+		}
+	}
+
+	if (option("modem_shutdown_first")) {
+		uint64_t shut = 0;
+		int shut_result = scm("to shut the modem down before taking its image", SCM_PAS_SHUTDOWN, SCM_ONE_VALUE,
+		    pas_mpss, 0, 0, 0, &shut);
+
+		printf("mpss: %u: the modem was asked to be shut down first: the call returns %d, its answer is %#llx\n", step,
+		    shut_result, shut);
+	}
+
 	memcpy((void *)page, image.header, image.header_size);
 	/* the secure world goes on reading this buffer until AUTH_AND_RESET, so it is not given back here */
 	metadata_page = page;
@@ -1515,7 +1579,11 @@ step_header(void)
 	}
 	printf("mpss: %u: TRUSTZONE ACCEPTS THE MODEM'S SIGNATURE FROM THIS KERNEL\n", step);
 
-	uint32_t setup = (mpss_setup_image ? image.size : mpss_size) + mpss_setup_extra;
+	uint32_t setup = (mpss_setup_image ? image_span() : mpss_size) + mpss_setup_extra;
+
+	if (setup < image_span() && !option("modem_no_hash")) {
+		setup = image_span();           /* (the hash table is past the region's end) */
+	}
 
 	announce(mpss_setup_extra != 0 ? "tell TrustZone where the image will be: the region and the hash table past its end"
 	    : mpss_setup_image ? "tell TrustZone where the image will be: the image's own size, as the DSP's driver does"
@@ -1592,9 +1660,9 @@ step_image(void)
 	if (image.segments == 0) {
 		return false;
 	}
-	announce("put the image's segments into the modem's memory (0x8b800000, 246 MB: memory of nobody's until TrustZone starts "
-	    "the modem), with zeroes where a segment is longer than its file, and read them back");
-	dsp_memory = (volatile uint8_t *)ml_io_map_unmappable(mpss_memory, image.size, VM_WIMG_WCOMB);
+	announce("put the image's segments into the modem's memory, and its hash table past them, with zeroes where a segment is "
+	    "longer than its file, and read them all back");
+	dsp_memory = (volatile uint8_t *)ml_io_map_unmappable(mpss_memory, image_span(), VM_WIMG_WCOMB);
 	if (dsp_memory == NULL) {
 		printf("mpss: %u: the modem's memory cannot be mapped (%#x bytes)\n", step, image.size);
 		return false;
@@ -1606,14 +1674,25 @@ step_image(void)
 		written += image.segment[s].file_size;
 		cleared += image.segment[s].memory_size - image.segment[s].file_size;
 	}
+	if (image.hash.file_size != 0 && !option("modem_no_hash")) {
+		for (uint32_t i = 0; i < image.hash.file_size; i++) {
+			dsp_memory[image.hash.at + i] = image.hash.file[i];
+		}
+		written += image.hash.file_size;
+	}
 	settle();
 	for (unsigned s = 0; s < image.segments; s++) {
 		wrong += segment_check(dsp_memory, s);
 	}
+	if (image.hash.file_size != 0 && !option("modem_no_hash")) {
+		for (uint32_t i = 0; i < image.hash.file_size; i++) {
+			wrong += dsp_memory[image.hash.at + i] != image.hash.file[i];
+		}
+	}
 	printf("mpss: %u: %u segments, %llu bytes written and %llu cleared in %llu ms; read back, %llu words or bytes differ\n", step,
 	    image.segments, written, cleared, (now_us() - began) / 1000, wrong);
 	settle();
-	ml_io_unmap((vm_offset_t)dsp_memory, image.size);
+	ml_io_unmap((vm_offset_t)dsp_memory, image_span());
 	image_written = wrong == 0;
 	image_forget();                         /* (it is in the modem's memory now: what was read of the root, given back) */
 	return image_written;
@@ -2211,6 +2290,13 @@ ipa_firmware_load(void)
 
 	PE_parse_boot_argn("modem_ipa_fw_at", &ipa_fw_memory, sizeof(ipa_fw_memory));
 	ipa_fw_size = ipa_fw_memory == 0x8b700000u ? 0x1a000u : 0xa000u;
+	{
+		uint64_t given = 0;
+
+		if (PE_parse_boot_argn("modem_ipa_fw_size", &given, sizeof(given)) && given != 0) {
+			ipa_fw_size = (uint32_t)given;
+		}
+	}
 	announce("turn the IPA's clock on (RPMh), load the IPA's firmware (image 15) into its memory and have TrustZone start it, as "
 	    "Android does before the modem");
 	printf("mpss: %u: the IPA's image goes at %#x (%#x bytes allowed)\n", step, ipa_fw_memory, ipa_fw_size);
@@ -2221,10 +2307,12 @@ ipa_firmware_load(void)
 	if (!option("modem_ipa_smmu_off")) {
 		ipa_space_on();
 	}
+	char fw[80];
 	{
 		/* the IPA's firmware file is SoC-specific (dt: qcom,firmware-name of qcom,ipa_fws; "yupik_ipa_fws"
-		 * on the first phone, something else on another SoC); soc_ipa_fw= overrides the name */
-		char fw[80], path[96];
+		 * on the first phone, something else on another SoC); soc_ipa_fw= overrides the name.
+		 * fw is declared outside, so that the segments are looked for under the same name. */
+		char path[96];
 
 		strlcpy(fw, "yupik_ipa_fws", sizeof(fw));
 		PE_parse_boot_argn("soc_ipa_fw", fw, sizeof(fw));
@@ -2237,7 +2325,7 @@ ipa_firmware_load(void)
 	}
 	count = header_size >= 52 ? header[44] | header[45] << 8 : 0;
 	if (memcmp(header, "\177ELF\1", 5) != 0 || count == 0 || count > 8 || 52 + 32 * count > header_size) {
-		printf("mpss: %u: yupik_ipa_fws.mdt is not such a header (%u segments)\n", step, count);
+		printf("mpss: %u: %s.mdt is not such a header (%u segments)\n", step, fw, count);
 		goto out;
 	}
 	/* (the image is relocatable, bit 27 of the flags: its addresses count from the lowest, which goes at the region's start) */
@@ -2272,7 +2360,7 @@ ipa_firmware_load(void)
 			goto out;
 		}
 		if (segments[i].file_size != 0) {
-			snprintf(name, sizeof(name), "image/yupik_ipa_fws.b%02u", i);
+			snprintf(name, sizeof(name), "image/%s.b%02u", fw, i);
 			segment_file[i] = root_file(name, &segment_size[i]);
 			if (segment_file[i] == NULL || segment_size[i] != segments[i].file_size) {
 				printf("mpss: %u: fw/%s: %s\n", step, name, segment_file[i] == NULL ? "not there" : "not the size the header says");
@@ -2286,6 +2374,10 @@ ipa_firmware_load(void)
 	}
 	size = ((highest + 0xfff) & ~0xfffu) - ipa_fw_memory;
 	printf("mpss: %u: the IPA's image: %u segments to load, %#x bytes from %#x\n", step, loaded, size, ipa_fw_memory);
+	if (option("modem_ipa_load_only")) {
+		printf("mpss: %u: the IPA's segments are read; nothing of the IPA is written (modem_ipa_load_only)\n", step);
+		goto out;
+	}
 	if (kmem_alloc(kernel_map, &page, PAGE_SIZE, KMA_KOBJECT | KMA_ZERO | KMA_DATA, VM_KERN_MEMORY_IOKIT) != KERN_SUCCESS) {
 		goto out;
 	}
