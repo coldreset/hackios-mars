@@ -700,6 +700,24 @@ if [ -f $DARWIN/system.manifest ] && [ -f $CACHE/dyld_shared_cache_arm64 ] &&
 		if [ -d ../fw-modem/image ]; then
 			rm -rf sysroot/fw/image && cp -R ../fw-modem/image sysroot/fw/image
 		fi
+		# ... and the modem's four file systems, dumped once from the phone with root
+		# (../fw-modem/fs/<partition>.bin): the loader's UEFI has no partition table on mars, so the
+		# driver serves these out of memory (hakios.mpss.c, rmtfs_load)
+		if [ -d ../fw-modem/fs ]; then
+			mkdir -p sysroot/fw/modem
+			for f in ../fw-modem/fs/*.bin; do
+				[ -f "$f" ] && cp "$f" "sysroot/fw/modem/$(basename "$f" .bin)"
+			done
+		fi
+		# ... and the modem's four file systems, dumped once from the phone with root
+		# (../fw-modem/fs/<partition>.bin): the loader's UEFI has no partition table on mars, so the
+		# driver serves these out of memory (hakios.mpss.c, rmtfs_load)
+		if [ -d ../fw-modem/fs ]; then
+			mkdir -p sysroot/fw/modem
+			for f in ../fw-modem/fs/*.bin; do
+				[ -f "$f" ] && cp "$f" "sysroot/fw/modem/$(basename "$f" .bin)"
+			done
+		fi
 	fi
 	# ... and the speaker amplifiers' configuration, the phone's /vendor/etc/aw882xx_acf.bin (drivers/audio/hakios.speaker.c,
 	# for sound=3): Android's own register values, which are not in the repository either

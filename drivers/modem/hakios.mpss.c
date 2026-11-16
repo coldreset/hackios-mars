@@ -188,6 +188,12 @@ sleep_us(uint32_t us)
 static void
 sleep_ms(uint32_t ms)
 {
+	/* delay_for_interval() scales a 32-bit count: anything over about 2,147 ms overflows it and
+	 * never returns, so the long sleeps are taken a second at a time. */
+	while (ms > 1000) {
+		delay_for_interval(1000, NSEC_PER_MSEC);
+		ms -= 1000;
+	}
 	delay_for_interval(ms, NSEC_PER_MSEC);
 }
 
@@ -259,7 +265,13 @@ static void
 announce(const char *what)
 {
 	printf("mpss: step %u: %s\n", step, what);
+	if (option("modem_read_probe")) {
+		printf("mpss: %u: about to hold %u ms (new_from %u)\n", step, pause_ms, new_from);
+	}
 	hold();
+	if (option("modem_read_probe")) {
+		printf("mpss: %u: held\n", step);
+	}
 }
 
 static uint32_t
@@ -269,7 +281,9 @@ get(struct block *b, const char *name, uint32_t offset)
 
 	need(b);
 	value = rd(b->base + offset);
-	printf("mpss: %u: %s %s (%#x) = %#x\n", step, b->name, name, b->phys + offset, value);
+	if (!option("modem_quiet_reads")) {
+		printf("mpss: %u: %s %s (%#x) = %#x\n", step, b->name, name, b->phys + offset, value);
+	}
 	return value;
 }
 
@@ -277,7 +291,9 @@ static void
 put(struct block *b, const char *name, uint32_t offset, uint32_t value)
 {
 	need(b);
-	printf("mpss: %u: about to write %s %s at %#x: %#x\n", step, b->name, name, b->phys + offset, value);
+	if (!option("modem_quiet_reads")) {
+		printf("mpss: %u: about to write %s %s at %#x: %#x\n", step, b->name, name, b->phys + offset, value);
+	}
 	snprintf(last_write, sizeof(last_write), "step %u wrote %#x to %s %s at %#x", step, value, b->name, name, b->phys + offset);
 	wr(b->base + offset, value);
 }
@@ -1213,6 +1229,9 @@ step_firmware(void)
 	announce("find the modem's image in the small image or on the root, and check it against its own header");
 	image_forget();
 	image.segments = 0;
+	if (option("modem_read_probe")) {
+		printf("mpss: reading modem.mdt\n");
+	}
 	header = image_file("modem.mdt", &size);
 	if (header == NULL) {
 		return false;
@@ -1264,6 +1283,9 @@ step_firmware(void)
 			uint64_t file_size = 0;
 
 			snprintf(name, sizeof(name), "modem.b%02u", i);
+			if (option("modem_read_probe")) {
+				printf("mpss: reading %s (%u of %u)\n", name, i, count);
+			}
 			image.segment[image.segments].file = image_file(name, &file_size);
 			if (image.segment[image.segments].file == NULL) {
 				goto fail;
@@ -1290,6 +1312,19 @@ step_firmware(void)
 	printf("mpss: %u: the image is whole (%s): a header of %llu bytes (%u of hashes), %u segments, %llu bytes of files, %#x "
 	    "bytes of the DSP's %#x from %#x\n", step, from_root ? "from /fw on the root" : "from the small image", size, hashes,
 	    image.segments, files, image.size, mpss_size, mpss_memory);
+	if (option("modem_fs_probe")) {
+		const uint8_t *probe = NULL;
+		uint64_t probe_size = 0;
+
+		printf("mpss: %u: probe: the small image, fw/modemst1\n", step);
+		probe = hakios_image_file("fw", "modemst1", &probe_size, NULL);
+		printf("mpss: %u: probe: the small image gave %p (%llu bytes)\n", step, (const void *)probe, probe_size);
+		printf("mpss: %u: probe: the root, fw/modem/modemst1\n", step);
+		probe_size = 0;
+		probe = root_file("modem/modemst1", &probe_size);
+		printf("mpss: %u: probe: the root gave %p (%llu bytes)\n", step, (const void *)probe, probe_size);
+		printf("mpss: %u: probe: done\n", step);
+	}
 	announce("read the modem's four file systems from the phone's storage into memory of ours (rmtfs below)");
 	{
 		unsigned loaded = rmtfs_load();
@@ -3708,8 +3743,25 @@ rmtfs_load(void)
 		int error = hakios_ufs_read_partition(rmtfs_files[f].partition, 0, NULL, 0, &size);
 
 		if (error != 0 || size == 0 || size > (64u << 20)) {
+			char name[64];
+			const uint8_t *image;
+
+			snprintf(name, sizeof(name), "modem/%s", rmtfs_files[f].partition);
+			image = root_file(name, &size);
+			if (image != NULL) {
+				if (rmtfs_files[f].data != NULL) {
+					kfree_data(rmtfs_files[f].data, rmtfs_files[f].size);
+				}
+				rmtfs_files[f].data = (uint8_t *)image;
+				rmtfs_files[f].size = size;
+				printf("mpss: %u: the partition %s (%s): %llu bytes from the image (fw/%s)\n", step,
+				    rmtfs_files[f].partition, rmtfs_files[f].path, size, name);
+				loaded++;
+				continue;
+			}
 			printf("mpss: %u: the partition %s: %s (%d)\n", step, rmtfs_files[f].partition, error == ENXIO ?
-			    "no storage to read it from (the loader was not asked for ufs=2)" : "not read", error);
+			    "no storage to read it from (the loader was not asked for ufs=2), and no fw/%s in the image" :
+			    "not read, and no fw/%s in the image", error, name);
 			continue;
 		}
 		if (rmtfs_files[f].data == NULL || rmtfs_files[f].size != size) {
@@ -3890,6 +3942,7 @@ rmtfs_receive(__unused void *context, uint32_t node, uint32_t port, const void *
 	}
 	message = (uint16_t)(m[3] | m[4] << 8);
 	rmtfs_requests++;
+	printf("mpss: rmtfs: request %#x, %u bytes\n", message, (unsigned)length);
 	bzero(answer, sizeof(answer));
 	answer[0] = QMI_RESPONSE;
 	answer[1] = m[1];
@@ -6366,6 +6419,10 @@ run_steps(void)
 	step = done;
 	new_from = STEPS + 1;
 	steps_over(done);
+	printf("mpss: SUMMARY: steps %u; dms at node %#x port %u (answers %u, result %u, error %u); nas polls %u changes %u registered %d; buffer %s\n",
+	    done, dms_node, dms_port_number, (unsigned)dms_answers, (unsigned)dms_result, (unsigned)dms_error,
+	    nas_polls, nas_changes, wds_registered ? 1 : 0,
+	    rmtfs_window != NULL ? "shared" : "none");
 	printf("mpss: over after step %u; %s\n", done, last_write);
 }
 
