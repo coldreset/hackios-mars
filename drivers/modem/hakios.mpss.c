@@ -722,6 +722,7 @@ mpss_note_item(void)
 /* A fixed place both sides know: the two kilobytes before the shared memory's table of contents.
  * Nothing walks the partitions to find it, so a wrong guess about the layout cannot hide it. */
 #define MPSS_NOTE_FIXED	(SMEM_SIZE - 0x2000u)
+#define MPSS_NOTE_SPARE	0xfa000000u	/* the loader's own hole: Android does not own it */
 
 static void
 mpss_note_smem(const char *line)
@@ -756,6 +757,22 @@ mpss_note_smem(const char *line)
 	smem_poke(MPSS_NOTE_FIXED + 0, MPSS_NOTE_MAGIC);
 	smem_poke(MPSS_NOTE_FIXED + 4, written + 1);
 	smem_poke(MPSS_NOTE_FIXED + 8, mpss_notes_next);
+	/* and in the loader's hole, which outlives this kernel even when the modem takes the phone down */
+	{
+		static vm_offset_t spare;
+
+		if (spare == 0) {
+			spare = ml_io_map_unmappable(MPSS_NOTE_SPARE, 0x2000, VM_WIMG_WCOMB);
+		}
+		if (spare != 0) {
+			for (uint32_t i = 0; i < sizeof(ring) / sizeof(ring[0]); i++) {
+				wr(spare + 16 + i * 4, ring[i]);
+			}
+			wr(spare + 0, MPSS_NOTE_MAGIC);
+			wr(spare + 4, written + 1);
+			wr(spare + 8, mpss_notes_next);
+		}
+	}
 	settle();
 	written++;
 	(void)size;
@@ -4088,6 +4105,22 @@ rmtfs_load(void)
 		    rmtfs_files[f].path, size);
 		loaded++;
 	}
+	{
+		/* (are the bytes we hand the modem really the phone's? the first eight and a sum) */
+		for (unsigned f = 0; f < 4; f++) {
+			uint64_t sum = 0;
+			const uint8_t *d = rmtfs_files[f].data;
+
+			if (d == NULL || rmtfs_files[f].size < 16) {
+				continue;
+			}
+			for (uint64_t i = 0; i < 512; i++) {
+				sum = (sum ^ d[i]) * 0x100000001b3ull;
+			}
+			tell("mpss: the first bytes of the four: %s %llu bytes %02x%02x%02x%02x%02x%02x%02x%02x sum %#llx\n",
+			    rmtfs_files[f].partition, rmtfs_files[f].size, d[0], d[1], d[2], d[3], d[4], d[5], d[6], d[7], sum);
+		}
+	}
 	return loaded;
 }
 
@@ -4237,7 +4270,7 @@ static void
 rmtfs_receive(__unused void *context, uint32_t node, uint32_t port, const void *data, size_t length)
 {
 	const uint8_t *m = data, *value;
-	uint8_t answer[64], *tlv;
+	uint8_t answer[256], *tlv;
 	uint16_t message, size = 0, result = 0, error = 0, extra = 0;
 	unsigned file = 4;
 
@@ -4391,13 +4424,22 @@ rmtfs_receive(__unused void *context, uint32_t node, uint32_t port, const void *
 				break;
 			}
 			if (write) {
-				for (uint64_t i = 0; i < bytes; i++) {
-					rmtfs_files[file].data[sector * RMTFS_SECTOR + i] = rmtfs_window[physical - rmtfs_buffer_pa + i];
-				}
+				memcpy(rmtfs_files[file].data + sector * RMTFS_SECTOR, rmtfs_window + (physical - rmtfs_buffer_pa), bytes);
 				rmtfs_sectors_written += sectors;
 			} else {
-				for (uint64_t i = 0; i < bytes; i++) {
-					rmtfs_window[physical - rmtfs_buffer_pa + i] = rmtfs_files[file].data[sector * RMTFS_SECTOR + i];
+				bool blank = false;
+				uint64_t began = now_us();
+
+				PE_parse_boot_argn("modem_rmtfs_blank", &blank, sizeof(blank));
+				if (blank) {
+					memset(rmtfs_window + (physical - rmtfs_buffer_pa), 0, bytes);
+				} else {
+					memcpy(rmtfs_window + (physical - rmtfs_buffer_pa),
+					    rmtfs_files[file].data + sector * RMTFS_SECTOR, bytes);
+				}
+				settle();
+				if (bytes >= 4096) {
+					tell("mpss: rmtfs: %llu bytes into the window in %llu us\n", bytes, now_us() - began);
 				}
 				rmtfs_sectors_read += sectors;
 			}
@@ -4443,6 +4485,16 @@ rmtfs_receive(__unused void *context, uint32_t node, uint32_t port, const void *
 		if (rmtfs_reads + rmtfs_writes <= 12) {
 			tell("mpss: rmtfs: the modem %s %u pieces of %s%s: served\n", write ? "writes" : "reads", count, rmtfs_files[file].partition,
 			    write ? " (kept in memory, not on the storage)" : "");
+		}
+		if (1 + 12 * count <= 200) {
+			/* (the pieces, as the modem sent them: AOSP's rmt_storage answers a read with its iovec) */
+			uint16_t pieces = (uint16_t)(1 + 12 * count);
+
+			tlv[0] = 0x10;
+			tlv[1] = (uint8_t)(pieces & 0xff);
+			tlv[2] = (uint8_t)((pieces >> 8) & 0xff);
+			memcpy(tlv + 3, entries, pieces);
+			extra = 3 + pieces;
 		}
 		break;
 	}

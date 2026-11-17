@@ -111,3 +111,43 @@ and it silently produced six runs of "the modem says nothing".
 `xl` does not append `devices/mars/soc.args`, the kernel's boot-argument buffer is 607 characters,
 and `PE_parse_boot_argn` takes the last occurrence of a name -- so the `soc_*` arguments above have
 to be passed by hand and never twice.
+
+## What the same night established afterwards (it corrects the line above)
+
+The first summary of the night blamed "saying success" as such. Two experiments afterwards narrowed
+it down, and the narrower answer is a different question to ask next.
+
+* **A refused superblock is survivable; a valid one is not.** With `modem_rmtfs_blank=1` (the window
+  is zeroed and the read is answered *successfully*) the phone lives: the modem reads an invalid
+  superblock, gives up with `fs_rmts_pm.c:1009:[5, 6] rmts_read_iovec failed`, and everything is in
+  the log. So a successful answer does not by itself reset the machine -- the *content* it accepts
+  does.
+* **It is the very first read, not the second.** `modem_rmtfs_silent_after=N` means "answer N reads,
+  then go silent" (the counter is checked before the reply is built). `N=1` therefore answers
+  *nothing*: the modem's dog fires (`dog_hal_common.c:177:DOG detects stalled initialization, triage
+  with IMAGE OWNER`), `slave-kernel = 0x107`, and the phone lives. `N=2` answers exactly the first
+  read -- modemst1's superblock -- and the phone resets within about 80 ms, before the modem asks for
+  anything else. So the reset follows the modem *accepting* the first superblock, and no further
+  request of ours is involved.
+* **The data is genuine.** The four file systems are read at run time from the phone's own
+  partitions (`hakios_ufs_read_partition()`; the `fw/modem` image fallback never triggers), and the
+  `fsg` checksum the kernel computes (`FNV-1a`, `0x9d4f9e3b04b30f44`) is byte for byte what `dd` on
+  the phone gives. `modemst1/2` are rewritten by Android's modem at 12.9 s and 144.5 s after boot,
+  so cross-boot checksums of those two mean nothing.
+* **Echoing the iovec back does not help** (`answer[]` grown to 256, TLV `0x10` with the pieces
+  copied in): still a reset. **`memcpy` instead of the byte loop does not help** either, and neither
+  does a 4 KiB-granular `settle()` -- so "we are too slow for the modem's timeout" is not shown.
+
+What is left, and the order to test it in:
+
+1. **A valid magic with a zero body.** Serve the superblock's first bytes and nothing else: if the
+   phone lives, the modem is parsing deeper into EFS; if it dies, a magic alone is enough to send it
+   down the fatal path.
+2. **Tell a modem assert from a kernel panic.** The PMIC's PON block (`pon_pbs@800`, `pon_hlos@1300`
+   on `pmk8350`) keeps the reset reason across a reset; reading it in the loader (or in the kernel at
+   the next boot) says whether `PS_HOLD` was pulled or the AP died. `ro.boot.bootreason` is useless
+   here -- it reads `bootloader` because the loader was entered through `fastboot boot`.
+3. **Compare the two superblocks.** `modemst1` and `modemst2` are written three minutes apart; if the
+   modem insists that both carry the same generation and we hand it a pair from two different
+   generations, that is a plausible reason for it to die on the first valid read. Waiting past the
+   144 s write before starting a run is the cheap half of this experiment.

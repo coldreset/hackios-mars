@@ -34,7 +34,7 @@ Every driver the kernel can be built with. `CONFIG_HAKIOS_<NAME>=y` in a defconf
 
 | Driver | Files | Requires | Boot arguments | mars | qemu | redwood | |
 |---|---|---|---|---|---|---|
-| **`HAKIOS_BT`**<br>the Bluetooth half of the WCN6750: step one, a read-only look at its three pins (bt=1), step two the supplies and the reset line (bt=2). The supply vote it needs is the PCIe radio driver's | `hakios.bt.c` | `HAKIOS_WIFI_PCIE` | `bt=`, `bt_again=` | built |  | built | |
+| **`HAKIOS_BT`**<br>the Bluetooth half of the WCN6750: step one, a read-only look at its three pins (bt=1), step two the supplies and the reset line (bt=2). The supply vote it needs is the PCIe radio driver's | `hakios.bt.c` | `HAKIOS_WIFI_PCIE` | `bt=`, `bt_again=`, `bt_dry=`, `bt_src=` | built |  | built | |
 
 ## camera
 
@@ -75,7 +75,7 @@ Every driver the kernel can be built with. `CONFIG_HAKIOS_<NAME>=y` in a defconf
 | Driver | Files | Requires | Boot arguments | mars | qemu | redwood | |
 |---|---|---|---|---|---|---|
 | **`HAKIOS_QMI`**<br>QMI messages over the IPC router: how the Wi-Fi firmware's service and the modem's are spoken to | `hakios.qmi.c` |  |  | built |  | built | |
-| **`HAKIOS_MODEM`**<br>the modem (modem=1): started, its file systems served from the flash, the IPA's data path as en1, the SIM and the network registration. Research; needs fw-modem/ from the phone | `hakios.mpss.c`<br>`hakios.cell.c`<br>`hakios.nas.c`<br>`hakios.ipa.c` | `HAKIOS_QMI`, `HAKIOS_UFS` | `modem=`, `modem_again=`, `modem_apn=`, `modem_buffer=`, `modem_data_nobind=`, `modem_data_off=`, `modem_data_wait=`, `modem_dpm_off=` and 45 more |  |  | built | |
+| **`HAKIOS_MODEM`**<br>the modem (modem=1): started, its file systems served from the flash, the IPA's data path as en1, the SIM and the network registration. Research; needs fw-modem/ from the phone | `hakios.mpss.c`<br>`hakios.cell.c`<br>`hakios.nas.c`<br>`hakios.ipa.c` | `HAKIOS_QMI`, `HAKIOS_UFS` | `modem=`, `modem_again=`, `modem_apn=`, `modem_buffer=`, `modem_data_nobind=`, `modem_data_off=`, `modem_data_wait=`, `modem_dpm_off=` and 62 more | built |  | built | |
 
 ## net
 
@@ -97,7 +97,7 @@ Every driver the kernel can be built with. `CONFIG_HAKIOS_<NAME>=y` in a defconf
 
 | Driver | Files | Requires | Boot arguments | mars | qemu | redwood | |
 |---|---|---|---|---|---|---|
-| **`HAKIOS_UFS`**<br>the phone's UFS flash: a block device for each GPT partition (ufs=1, ufs=2), and the UFS host controller driven from the kernel (ufs_native=). THE ONLY CODE OF THE KERNEL THAT MAY WRITE TO THE PHONE (ufs_write=1, the partition `darwin` only): see tools/provenance.allow | `hakios.ufs.c`<br>`hakios.ufshc.c` |  | `ufs_bench=`, `ufs_check=`, `ufs_native_bench=`, `ufs_native_buffer=`, `ufs_native_check=`, `ufs_native_hang=`, `ufs_native_leave=`, `ufs_native_slots=` and 3 more |  |  | built | |
+| **`HAKIOS_UFS`**<br>the phone's UFS flash: a block device for each GPT partition (ufs=1, ufs=2), and the UFS host controller driven from the kernel (ufs_native=). THE ONLY CODE OF THE KERNEL THAT MAY WRITE TO THE PHONE (ufs_write=1, the partition `darwin` only): see tools/provenance.allow | `hakios.ufs.c`<br>`hakios.ufshc.c` |  | `ufs_bench=`, `ufs_check=`, `ufs_native_bench=`, `ufs_native_buffer=`, `ufs_native_check=`, `ufs_native_hang=`, `ufs_native_leave=`, `ufs_native_slots=` and 3 more | built |  | built | |
 | **`HAKIOS_VIRTIO_BLK`**<br>a disk image of the host as /dev/rvblk0 (virtio_blk=1). QEMU only | `hakios.virtio_blk.c` |  | `virtio_blk=` | built | built | built | |
 
 ## wifi
@@ -105,6 +105,6 @@ Every driver the kernel can be built with. `CONFIG_HAKIOS_<NAME>=y` in a defconf
 | Driver | Files | Requires | Boot arguments | mars | qemu | redwood | |
 |---|---|---|---|---|---|---|
 | **`HAKIOS_WIFI`**<br>Wi-Fi of the WCN6750 (wifi=1, wifi_step=N): the DSP that runs the radio's firmware, Linux's ath11k (its object, made by tools/mk-ath11k.sh, is linked in only with this), a station, and the Apple80211 surface Darwin's wifid talks to. Needs fw-wifi/ from the phone | `hakios.wifi.c`<br>`hakios.wlfw.c`<br>`hakios.lx.c`<br>`hakios.sta.c`<br>`hakios.apple80211.c`<br>`hakios.wlan.cpp` | `HAKIOS_QMI` | `wifi=`, `wifi_again=`, `wifi_ask=`, `wifi_cal=`, `wifi_dirty=`, `wifi_file=`, `wifi_fine=`, `wifi_keep=` and 14 more |  |  | built | |
-| **`HAKIOS_WIFI_PCIE`**<br>Wi-Fi of the QCA6490 on PCIe (wifipcie=1): the links the OnePlus 9 port of the same SoC has | `hakios.wifi_pcie.c`<br>`hakios.radio_pcie.c`<br>`hakios.lx_pcie.c` | `HAKIOS_QMI` | `board_repeat_first=`, `board_total_constant=`, `cpufreq=`, `gpu=`, `hakiospcie_dma_verified=`, `hakiospcie_runtime=`, `hakiospcie_wifi=`, `touchscreen=` and 13 more | built |  | built | |
+| **`HAKIOS_WIFI_PCIE`**<br>Wi-Fi of the QCA6490 on PCIe (wifipcie=1): the links the OnePlus 9 port of the same SoC has | `hakios.wifi_pcie.c`<br>`hakios.radio_pcie.c`<br>`hakios.lx_pcie.c` | `HAKIOS_QMI` | `board_file_id_keep=`, `board_repeat_first=`, `board_total_constant=`, `cpufreq=`, `gpu=`, `hakiospcie_dma_verified=`, `hakiospcie_runtime=`, `hakiospcie_wifi=` and 14 more | built |  | built | |
 
 The columns on the right are the devices' defconfigs: "built" means that defconfig builds the driver in.

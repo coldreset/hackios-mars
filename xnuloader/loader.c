@@ -4946,7 +4946,12 @@ fb_command(char *cmd)
 			fb_reply("OKAY", "");
 		} else if (starts_with(cmd, "oem notes")) {
 			/* the six lines the modem driver left in the shared memory's last page (0x80900000 + 0x1fe000) */
-			const char *notes = (const char *)(uintptr_t)0x80afe000u;
+			const char *notes = (const char *)(uintptr_t)0xfa000000u;
+
+	if (*(const uint32_t *)notes != 0x484e4f54u) {
+		/* the hole is empty: fall back to the shared memory's last page */
+		notes = (const char *)(uintptr_t)0x80afe000u;
+	}
 
 			if (*(const volatile uint32_t *)notes != 0x484e4f54u) {
 				fb_reply("FAIL", "no notes in the shared memory");
