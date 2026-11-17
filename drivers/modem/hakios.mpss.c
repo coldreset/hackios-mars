@@ -93,6 +93,220 @@ extern dev_t mdevlookup(int devid);
 extern int mdevgetkernelrange(dev_t dev, vm_offset_t *base, uint64_t *size);
 extern void FlushPoC_DcacheRegion(vm_offset_t va, size_t length);   /* osfmk/arm64/caches_asm.s */
 
+#include <stdarg.h>
+
+/* The screen holds what a reset would otherwise take: the modem's requests, drawn as text into
+ * the framebuffer with the loader's font. Nothing here draws unless modem_draw_text is asked for. */
+#define MPSS_NOTES 6
+static const uint16_t mpss_font[95][8] = {
+	{0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000}, /* ' ' */
+	{0x0000, 0x0000, 0x0000, 0x06fc, 0x0000, 0x0000, 0x0000, 0x0000}, /* '!' */
+	{0x0000, 0x0000, 0x001c, 0x0000, 0x001c, 0x000c, 0x0000, 0x0000}, /* '"' */
+	{0x0120, 0x0720, 0x07f8, 0x0120, 0x07e0, 0x0138, 0x0120, 0x0000}, /* '#' */
+	{0x0000, 0x0470, 0x1c48, 0x07f8, 0x048c, 0x0388, 0x0000, 0x0000}, /* '$' */
+	{0x0418, 0x0624, 0x01bc, 0x03f8, 0x07b0, 0x0498, 0x0304, 0x0000}, /* '%' */
+	{0x0300, 0x07b8, 0x04ec, 0x05e4, 0x073c, 0x0780, 0x0480, 0x0000}, /* '&' */
+	{0x0000, 0x0000, 0x0000, 0x001c, 0x0000, 0x0000, 0x0000, 0x0000}, /* "'" */
+	{0x0000, 0x0000, 0x07e0, 0x1c38, 0x300c, 0x0000, 0x0000, 0x0000}, /* '(' */
+	{0x0000, 0x0000, 0x300c, 0x1c38, 0x07e0, 0x0000, 0x0000, 0x0000}, /* ')' */
+	{0x0000, 0x0028, 0x0038, 0x007c, 0x0010, 0x0028, 0x0000, 0x0000}, /* '*' */
+	{0x0080, 0x0080, 0x0080, 0x07f0, 0x0080, 0x0080, 0x0080, 0x0000}, /* '+' */
+	{0x0000, 0x1000, 0x1000, 0x1e00, 0x0400, 0x0000, 0x0000, 0x0000}, /* ',' */
+	{0x0000, 0x0000, 0x0080, 0x0080, 0x0080, 0x0080, 0x0000, 0x0000}, /* '-' */
+	{0x0000, 0x0000, 0x0000, 0x0600, 0x0000, 0x0000, 0x0000, 0x0000}, /* '.' */
+	{0x0000, 0x0c00, 0x0700, 0x00e0, 0x0038, 0x000c, 0x0000, 0x0000}, /* '/' */
+	{0x00c0, 0x03f0, 0x0598, 0x04c8, 0x0468, 0x03f0, 0x01e0, 0x0000}, /* '0' */
+	{0x0000, 0x0410, 0x0418, 0x07f8, 0x07f8, 0x0400, 0x0000, 0x0000}, /* '1' */
+	{0x0000, 0x0610, 0x0708, 0x0588, 0x04d8, 0x0470, 0x0400, 0x0000}, /* '2' */
+	{0x0000, 0x0408, 0x0448, 0x0448, 0x06f8, 0x03b0, 0x0000, 0x0000}, /* '3' */
+	{0x0180, 0x01c0, 0x0160, 0x0118, 0x07f8, 0x07f8, 0x0100, 0x0000}, /* '4' */
+	{0x0000, 0x0478, 0x0448, 0x0448, 0x06c8, 0x0388, 0x0000, 0x0000}, /* '5' */
+	{0x0000, 0x03f0, 0x06d0, 0x0448, 0x0448, 0x03c8, 0x0100, 0x0000}, /* '6' */
+	{0x0000, 0x0008, 0x0608, 0x0388, 0x00e8, 0x0038, 0x0000, 0x0000}, /* '7' */
+	{0x0000, 0x03b0, 0x04e8, 0x0448, 0x04e8, 0x07b8, 0x0000, 0x0000}, /* '8' */
+	{0x0000, 0x04f0, 0x0488, 0x0488, 0x06c8, 0x03f0, 0x0000, 0x0000}, /* '9' */
+	{0x0000, 0x0000, 0x0000, 0x0660, 0x0000, 0x0000, 0x0000, 0x0000}, /* ':' */
+	{0x0000, 0x1000, 0x1000, 0x1e60, 0x0400, 0x0000, 0x0000, 0x0000}, /* ';' */
+	{0x0000, 0x0080, 0x01c0, 0x0360, 0x0630, 0x0410, 0x0000, 0x0000}, /* '<' */
+	{0x0000, 0x0140, 0x0140, 0x0140, 0x0140, 0x0140, 0x0000, 0x0000}, /* '=' */
+	{0x0000, 0x0000, 0x0630, 0x0360, 0x01c0, 0x0080, 0x0000, 0x0000}, /* '>' */
+	{0x0000, 0x0000, 0x06c4, 0x06c4, 0x0078, 0x0038, 0x0000, 0x0000}, /* '?' */
+	{0x0fe0, 0x3038, 0x27cc, 0x2424, 0x37e4, 0x040c, 0x03f8, 0x0000}, /* '@' */
+	{0x0600, 0x07c0, 0x0170, 0x0108, 0x0178, 0x03c0, 0x0600, 0x0000}, /* 'A' */
+	{0x0000, 0x07f8, 0x0448, 0x0448, 0x0448, 0x03f8, 0x0100, 0x0000}, /* 'B' */
+	{0x0000, 0x03f0, 0x0618, 0x0408, 0x0408, 0x0408, 0x0000, 0x0000}, /* 'C' */
+	{0x0000, 0x07f8, 0x0408, 0x0408, 0x0618, 0x03f0, 0x01e0, 0x0000}, /* 'D' */
+	{0x0000, 0x07f8, 0x07f8, 0x0448, 0x0448, 0x0448, 0x0000, 0x0000}, /* 'E' */
+	{0x0000, 0x07f8, 0x07f8, 0x0048, 0x0048, 0x0048, 0x0000, 0x0000}, /* 'F' */
+	{0x00c0, 0x03f0, 0x0618, 0x0448, 0x0448, 0x07c8, 0x03c8, 0x0000}, /* 'G' */
+	{0x0000, 0x07f8, 0x0040, 0x0040, 0x0040, 0x07f8, 0x07f8, 0x0000}, /* 'H' */
+	{0x0000, 0x0408, 0x0408, 0x07f8, 0x0408, 0x0408, 0x0000, 0x0000}, /* 'I' */
+	{0x0000, 0x0208, 0x0408, 0x0408, 0x07f8, 0x01f8, 0x0000, 0x0000}, /* 'J' */
+	{0x0000, 0x07f8, 0x00c0, 0x01e0, 0x0330, 0x0408, 0x0000, 0x0000}, /* 'K' */
+	{0x0000, 0x07f8, 0x07f8, 0x0400, 0x0400, 0x0400, 0x0000, 0x0000}, /* 'L' */
+	{0x07e0, 0x07f8, 0x0070, 0x00c0, 0x0070, 0x0078, 0x07f8, 0x0000}, /* 'M' */
+	{0x0000, 0x07f8, 0x0038, 0x00c0, 0x0300, 0x07f8, 0x07f8, 0x0000}, /* 'N' */
+	{0x01e0, 0x03f0, 0x0618, 0x0408, 0x0408, 0x03f0, 0x01e0, 0x0000}, /* 'O' */
+	{0x0000, 0x07f8, 0x0088, 0x0088, 0x0088, 0x0078, 0x0020, 0x0000}, /* 'P' */
+	{0x01e0, 0x03f0, 0x0618, 0x0c08, 0x1408, 0x13f0, 0x11e0, 0x0000}, /* 'Q' */
+	{0x0000, 0x07f8, 0x0088, 0x0088, 0x03d8, 0x0770, 0x0400, 0x0000}, /* 'R' */
+	{0x0000, 0x0470, 0x0448, 0x04c8, 0x0488, 0x0388, 0x0000, 0x0000}, /* 'S' */
+	{0x0008, 0x0008, 0x0008, 0x07f8, 0x0008, 0x0008, 0x0008, 0x0000}, /* 'T' */
+	{0x0000, 0x03f8, 0x0400, 0x0400, 0x0400, 0x03f8, 0x01f8, 0x0000}, /* 'U' */
+	{0x0018, 0x00f8, 0x07c0, 0x0600, 0x0780, 0x00f0, 0x0018, 0x0000}, /* 'V' */
+	{0x00f8, 0x07f8, 0x0700, 0x00c0, 0x0380, 0x0700, 0x03f8, 0x0000}, /* 'W' */
+	{0x0400, 0x0618, 0x03f0, 0x00e0, 0x03f0, 0x0718, 0x0408, 0x0000}, /* 'X' */
+	{0x0008, 0x0038, 0x0060, 0x07c0, 0x00e0, 0x0038, 0x0008, 0x0000}, /* 'Y' */
+	{0x0000, 0x0608, 0x0708, 0x04c8, 0x0428, 0x0418, 0x0400, 0x0000}, /* 'Z' */
+	{0x0000, 0x0000, 0x3ffc, 0x2004, 0x2004, 0x0000, 0x0000, 0x0000}, /* '[' */
+	{0x0000, 0x0004, 0x0038, 0x00e0, 0x0380, 0x0c00, 0x0000, 0x0000}, /* '\\' */
+	{0x0000, 0x0000, 0x2004, 0x2004, 0x3ffc, 0x0000, 0x0000, 0x0000}, /* ']' */
+	{0x0000, 0x0040, 0x0030, 0x0008, 0x0030, 0x0060, 0x0000, 0x0000}, /* '^' */
+	{0x2000, 0x2000, 0x2000, 0x2000, 0x2000, 0x2000, 0x2000, 0x0000}, /* '_' */
+	{0x0000, 0x0004, 0x000c, 0x0008, 0x0000, 0x0000, 0x0000, 0x0000}, /* '`' */
+	{0x0000, 0x0720, 0x04a0, 0x04a0, 0x06a0, 0x07c0, 0x0000, 0x0000}, /* 'a' */
+	{0x0000, 0x07fc, 0x0460, 0x0420, 0x0420, 0x03e0, 0x0080, 0x0000}, /* 'b' */
+	{0x0000, 0x03c0, 0x0660, 0x0420, 0x0420, 0x0420, 0x0000, 0x0000}, /* 'c' */
+	{0x0000, 0x07c0, 0x0460, 0x0420, 0x0220, 0x07fc, 0x0000, 0x0000}, /* 'd' */
+	{0x0000, 0x03c0, 0x06a0, 0x04a0, 0x04a0, 0x04e0, 0x0080, 0x0000}, /* 'e' */
+	{0x0020, 0x0020, 0x07f0, 0x07fc, 0x0024, 0x0024, 0x0024, 0x0000}, /* 'f' */
+	{0x0000, 0x3fc0, 0x25e0, 0x2520, 0x25e0, 0x3ce0, 0x1820, 0x0000}, /* 'g' */
+	{0x0000, 0x07fc, 0x0060, 0x0020, 0x0020, 0x07e0, 0x0000, 0x0000}, /* 'h' */
+	{0x0000, 0x0420, 0x0420, 0x07ec, 0x0400, 0x0400, 0x0000, 0x0000}, /* 'i' */
+	{0x0000, 0x2020, 0x2020, 0x2020, 0x1fec, 0x0000, 0x0000, 0x0000}, /* 'j' */
+	{0x0000, 0x07fc, 0x0080, 0x01c0, 0x0360, 0x0620, 0x0000, 0x0000}, /* 'k' */
+	{0x0000, 0x0404, 0x0404, 0x07fc, 0x0400, 0x0400, 0x0000, 0x0000}, /* 'l' */
+	{0x07e0, 0x07e0, 0x0020, 0x07e0, 0x0060, 0x07e0, 0x07c0, 0x0000}, /* 'm' */
+	{0x0000, 0x07e0, 0x0060, 0x0020, 0x0020, 0x07e0, 0x0000, 0x0000}, /* 'n' */
+	{0x0000, 0x03c0, 0x0420, 0x0420, 0x0420, 0x03e0, 0x0180, 0x0000}, /* 'o' */
+	{0x0000, 0x3fe0, 0x0460, 0x0420, 0x0420, 0x03e0, 0x0080, 0x0000}, /* 'p' */
+	{0x0000, 0x07c0, 0x0460, 0x0420, 0x0620, 0x3fe0, 0x0000, 0x0000}, /* 'q' */
+	{0x0000, 0x07e0, 0x07e0, 0x0020, 0x0020, 0x0060, 0x0040, 0x0000}, /* 'r' */
+	{0x0000, 0x0440, 0x04e0, 0x05a0, 0x0520, 0x0320, 0x0000, 0x0000}, /* 's' */
+	{0x0020, 0x0020, 0x03f8, 0x0620, 0x0420, 0x0420, 0x0000, 0x0000}, /* 't' */
+	{0x0000, 0x03e0, 0x0600, 0x0400, 0x0600, 0x07e0, 0x0000, 0x0000}, /* 'u' */
+	{0x0000, 0x00e0, 0x0380, 0x0400, 0x0780, 0x00e0, 0x0020, 0x0000}, /* 'v' */
+	{0x00e0, 0x07c0, 0x0700, 0x00c0, 0x0780, 0x0780, 0x01e0, 0x0000}, /* 'w' */
+	{0x0000, 0x0420, 0x03c0, 0x0180, 0x03c0, 0x0660, 0x0000, 0x0000}, /* 'x' */
+	{0x2000, 0x20e0, 0x3380, 0x1e00, 0x0380, 0x00e0, 0x0020, 0x0000}, /* 'y' */
+	{0x0000, 0x0420, 0x0620, 0x05a0, 0x0460, 0x0420, 0x0000, 0x0000}, /* 'z' */
+	{0x0000, 0x0080, 0x01c0, 0x3f7c, 0x2004, 0x2004, 0x0000, 0x0000}, /* '{' */
+	{0x0000, 0x0000, 0x0000, 0x3ffe, 0x0000, 0x0000, 0x0000, 0x0000}, /* '|' */
+	{0x0000, 0x2004, 0x2004, 0x3f7c, 0x01c0, 0x0080, 0x0000, 0x0000}, /* '}' */
+	{0x0100, 0x01c0, 0x0040, 0x0080, 0x0100, 0x0180, 0x00c0, 0x0000}, /* '~' */
+};
+static char mpss_notes[MPSS_NOTES][72];
+static void mpss_note_smem(const char *line);
+static unsigned mpss_notes_next;
+static vm_offset_t mpss_fb_base;
+static unsigned mpss_fb_row;
+static unsigned mpss_fb_width;
+static unsigned mpss_fb_height;
+
+static uint32_t *
+mpss_fb(void)
+{
+	vm_size_t bytes;
+
+	if (mpss_fb_base != 0) {
+		return (uint32_t *)mpss_fb_base;
+	}
+	if (PE_state.video.v_baseAddr == 0 || PE_state.video.v_rowBytes == 0 || PE_state.video.v_height == 0) {
+		return NULL;
+	}
+	mpss_fb_row = (unsigned)PE_state.video.v_rowBytes;
+	mpss_fb_width = (unsigned)PE_state.video.v_width;
+	mpss_fb_height = (unsigned)PE_state.video.v_height;
+	bytes = (vm_size_t)mpss_fb_row * mpss_fb_height;
+	mpss_fb_base = ml_io_map_unmappable(PE_state.video.v_baseAddr, bytes, VM_WIMG_WCOMB);
+	if (mpss_fb_base == 0) {
+		return NULL;
+	}
+	return (uint32_t *)mpss_fb_base;
+}
+
+static void
+mpss_clear(int x, int y, int width, int height)
+{
+	uint32_t *pixels = mpss_fb();
+
+	if (pixels == NULL) {
+		return;
+	}
+	for (int row = 0; row < height; row++) {
+		int py = y + row;
+		if (py < 0 || (unsigned)py >= mpss_fb_height) {
+			continue;
+		}
+		for (int col = 0; col < width; col++) {
+			int px = x + col;
+			if (px < 0 || (unsigned)px >= mpss_fb_width) {
+				continue;
+			}
+			pixels[py * (mpss_fb_row / 4) + px] = 0;
+		}
+	}
+}
+
+static void
+mpss_text(int x, int y, int scale, const char *text)
+{
+	uint32_t *pixels = mpss_fb();
+
+	if (pixels == NULL) {
+		return;
+	}
+	for (int n = 0; text[n] != 0; n++) {
+		int glyph = (unsigned char)text[n] - 32;
+		if (glyph < 0 || glyph >= 95) {
+			glyph = 0;
+		}
+		for (int gx = 0; gx < 8; gx++) {
+			uint16_t bits = mpss_font[glyph][gx];
+			for (int gy = 0; gy < 16; gy++) {
+				if ((bits & (1u << gy)) == 0) {
+					continue;
+				}
+				for (int sy = 0; sy < scale; sy++) {
+					for (int sx = 0; sx < scale; sx++) {
+						int px = x + (n * 8 + gx) * scale + sx;
+						int py = y + gy * scale + sy;
+						if (px < 0 || py < 0 || (unsigned)px >= mpss_fb_width || (unsigned)py >= mpss_fb_height) {
+							continue;
+						}
+						pixels[py * (mpss_fb_row / 4) + px] = 0xffffffffu;
+					}
+				}
+			}
+		}
+	}
+}
+
+/* One line, kept in a ring of six and all six drawn again: a photograph of the screen then holds
+ * the last six things the modem asked us and what we answered. */
+static void
+mpss_note(const char *fmt, ...)
+{
+	char line[72];
+	va_list args;
+
+	va_start(args, fmt);
+	vsnprintf(line, sizeof(line), fmt, args);
+	va_end(args);
+	uint32_t draw = 0;
+
+	if (!PE_parse_boot_argn("modem_draw_text", &draw, sizeof(draw)) || draw == 0) {
+		return;
+	}
+	strlcpy(mpss_notes[mpss_notes_next], line, sizeof(mpss_notes[0]));
+	mpss_notes_next = (mpss_notes_next + 1) % MPSS_NOTES;
+	mpss_note_smem(line);
+	mpss_clear(16, 190, 1100, MPSS_NOTES * 40 + 16);
+	for (unsigned n = 0; n < MPSS_NOTES; n++) {
+		mpss_text(16, 190 + (int)n * 40, 2, mpss_notes[n]);
+	}
+}
+
 /* What the Wi-Fi's DSP and this one both use (hakios.wifi.c). */
 extern lck_mtx_t hakios_aop_mailbox_lock;
 extern lck_mtx_t hakios_smem_alloc_lock;
@@ -466,6 +680,85 @@ smem_item(uint32_t item, uint32_t *size)
 		}
 	}
 	return 0;
+}
+
+
+/* The same lines, in the shared memory: a private item of ours in the partition we share with the
+ * modem. The machine may reset before anything is read, and the shared memory keeps what is in it;
+ * the loader's "hakios crash" reads this item back (u-boot/cmd/hakios.c). */
+static bool our_item_make(uint32_t partition, uint32_t item, uint32_t bytes);
+
+#define MPSS_NOTE_ITEM	0x7f01u
+#define MPSS_NOTE_BYTES	512u
+#define MPSS_NOTE_MAGIC	0x484e4f54u	/* "HNOT" */
+
+static uint32_t mpss_note_at;
+static bool mpss_note_tried;
+static bool mpss_note_failed;
+
+static bool
+mpss_note_item(void)
+{
+	uint32_t partition, cacheline = 0, size = 0;
+
+	if (mpss_note_at != 0) {
+		return true;
+	}
+	if (mpss_note_tried) {
+		return false;
+	}
+	mpss_note_tried = true;
+	partition = smem_partition(SMEM_US, SMEM_MPSS, &cacheline, &size);
+	if (partition == 0) {
+		return false;
+	}
+	if (smem_item(MPSS_NOTE_ITEM, &size) == 0 && !our_item_make(partition, MPSS_NOTE_ITEM, MPSS_NOTE_BYTES)) {
+		return false;
+	}
+	mpss_note_at = smem_item(MPSS_NOTE_ITEM, &size);
+	return mpss_note_at != 0;
+}
+
+/* A fixed place both sides know: the two kilobytes before the shared memory's table of contents.
+ * Nothing walks the partitions to find it, so a wrong guess about the layout cannot hide it. */
+#define MPSS_NOTE_FIXED	(SMEM_SIZE - 0x2000u)
+
+static void
+mpss_note_smem(const char *line)
+{
+	static uint32_t written;
+	uint32_t ring[MPSS_NOTES * 18];
+	uint32_t size = 0;
+
+	if (!mpss_note_item() && !mpss_note_failed) {
+		mpss_note_failed = true;
+		tell("mpss: rmtfs: no shared-memory item for the notes: the fixed place and the screen only\n");
+	}
+	if (mpss_note_at != 0) {
+		smem_poke(mpss_note_at + 0, MPSS_NOTE_MAGIC);
+		smem_poke(mpss_note_at + 4, written + 1);
+		smem_poke(mpss_note_at + 8, mpss_notes_next);
+	}
+	for (unsigned n = 0; n < MPSS_NOTES; n++) {
+		for (unsigned w = 0; w < 18; w++) {
+			uint32_t word = 0;
+
+			memcpy(&word, &mpss_notes[n][w * 4], 4);
+			ring[n * 18 + w] = word;
+		}
+	}
+	for (uint32_t i = 0; i < sizeof(ring) / sizeof(ring[0]); i++) {
+		if (mpss_note_at != 0) {
+			smem_poke(mpss_note_at + 16 + i * 4, ring[i]);
+		}
+		smem_poke(MPSS_NOTE_FIXED + 16 + i * 4, ring[i]);
+	}
+	smem_poke(MPSS_NOTE_FIXED + 0, MPSS_NOTE_MAGIC);
+	smem_poke(MPSS_NOTE_FIXED + 4, written + 1);
+	smem_poke(MPSS_NOTE_FIXED + 8, mpss_notes_next);
+	settle();
+	written++;
+	(void)size;
 }
 
 static void
@@ -3258,6 +3551,13 @@ static struct {
 	uint32_t service, instance, port;
 } our_servers[4];
 static uint32_t rmtfs_requests, rmtfs_reads, rmtfs_writes, rmtfs_sectors_read, rmtfs_sectors_written, rmtfs_refused;
+static unsigned rmtfs_reads_served;
+static unsigned rmtfs_silent_after;
+static uint32_t rmtfs_ids[8], rmtfs_id_count;          /* the ids seen, in order */
+static uint32_t rmtfs_rd_file, rmtfs_rd_count, rmtfs_rd_sector, rmtfs_rd_sectors;
+static uint32_t rmtfs_rd_log[8], rmtfs_rd_log_sectors[8], rmtfs_rd_log_at[8];   /* every read asked for */
+static uint64_t rmtfs_rd_physical, rmtfs_rd_window, rmtfs_rd_source;   /* first eight bytes, window against file */
+static uint32_t rmtfs_why[8];                          /* how each answered: 0 served, 1 not here, 2 not given, 3 outside, 4 unknown */
 static uint32_t tftp_requests, tftp_served, tftp_refused, servreg_requests;
 
 /* One datagram out, of any type. */
@@ -3651,6 +3951,10 @@ link_stop(void)
 		    "GLINK %u, SMP2P %u; rmtfs: %u requests, %u reads (%u sectors), %u writes (%u sectors), %u refused\n", link_runs ?
 		    "THE THREAD DOES NOT END" : "down", glink.said, glink.heard, qrtr_out, qrtr_in, doorbell.glink, doorbell.smp2p,
 		    rmtfs_requests, rmtfs_reads, rmtfs_sectors_read, rmtfs_writes, rmtfs_sectors_written, rmtfs_refused);
+		printf("mpss: link: the read was of file %u (count %u) from sector %u, %u sectors, at %#llx; window %#llx, file %#llx\n", rmtfs_rd_file, rmtfs_rd_count, rmtfs_rd_sector, rmtfs_rd_sectors, rmtfs_rd_physical, rmtfs_rd_window, rmtfs_rd_source);
+		for (unsigned i = 0; i < rmtfs_id_count && i < 8; i++) {
+			printf("mpss: link: rmtfs request %u: id %#x, answered %u\n", i, rmtfs_ids[i], rmtfs_why[i]);
+		}
 		printf("mpss: link: tftp: %u requests, %u served whole, %u refused; the registry: %u questions\n", tftp_requests, tftp_served,
 		    tftp_refused, servreg_requests);
 	}
@@ -3700,7 +4004,7 @@ link_stop(void)
 #define RMTFS_VERSION           1
 #define RMTFS_INSTANCE          0
 #define RMTFS_SECTOR            512
-#define RMTFS_BUFFER_SIZE       0x280000u       /* dt: reg of qcom,rmtfs_sharedmem@0 */
+#define RMTFS_BUFFER_SIZE       0x300000u       /* dt: reg of qcom,rmtfs_sharedmem@0 */
 #define RMTFS_OPEN              1
 #define RMTFS_CLOSE             2
 #define RMTFS_RW_IOVEC          3
@@ -3804,7 +4108,7 @@ rmtfs_buffer_make(void)
 	}
 	rmtfs_buffer_pa = RMTFS_BUFFER_PA_DEFAULT;
 	PE_parse_boot_argn("modem_buffer", &rmtfs_buffer_pa, sizeof(rmtfs_buffer_pa));      /* (another region, to try) */
-	rmtfs_window = (volatile uint8_t *)ml_io_map_unmappable((vm_offset_t)rmtfs_buffer_pa, RMTFS_BUFFER_SIZE, VM_WIMG_WCOMB);
+	rmtfs_window = (volatile uint8_t *)ml_io_map_unmappable((vm_offset_t)rmtfs_buffer_pa, RMTFS_BUFFER_SIZE, VM_WIMG_IO);
 	if (rmtfs_window == NULL) {
 		printf("mpss: %u: the modem's buffer at %#llx cannot be mapped\n", step, rmtfs_buffer_pa);
 		return false;
@@ -3942,7 +4246,12 @@ rmtfs_receive(__unused void *context, uint32_t node, uint32_t port, const void *
 	}
 	message = (uint16_t)(m[3] | m[4] << 8);
 	rmtfs_requests++;
-	printf("mpss: rmtfs: request %#x, %u bytes\n", message, (unsigned)length);
+	if (rmtfs_id_count < 8) {
+		rmtfs_ids[rmtfs_id_count] = message;
+		rmtfs_why[rmtfs_id_count] = 0;
+		rmtfs_id_count++;
+	}
+	tell("mpss: rmtfs: request %#x, %u bytes\n", message, (unsigned)length);
 	bzero(answer, sizeof(answer));
 	answer[0] = QMI_RESPONSE;
 	answer[1] = m[1];
@@ -3960,7 +4269,8 @@ rmtfs_receive(__unused void *context, uint32_t node, uint32_t port, const void *
 			}
 		}
 		if (file == 4 || rmtfs_files[file].data == NULL) {
-			printf("mpss: rmtfs: the modem opens \"%.*s\": NOT HERE\n", value != NULL ? (int)(size < 64 ? size : 64) : 0,
+			if (rmtfs_id_count > 0) { rmtfs_why[rmtfs_id_count - 1] = 1; }
+			tell("mpss: rmtfs: the modem opens \"%.*s\": NOT HERE\n", value != NULL ? (int)(size < 64 ? size : 64) : 0,
 			    value != NULL ? (const char *)value : "");
 			result = QMI_RESULT_FAILURE;
 			error = QMI_ERR_INTERNAL;
@@ -3987,7 +4297,8 @@ rmtfs_receive(__unused void *context, uint32_t node, uint32_t port, const void *
 	case RMTFS_ALLOC_BUFF:
 		value = qmi_tlv(m, length, 2, &size);
 		if (value == NULL || size != 4 || le32(value) > RMTFS_BUFFER_SIZE || rmtfs_buffer == 0 || !rmtfs_shared) {
-			printf("mpss: rmtfs: the modem asks for a buffer of %u bytes: NOT GIVEN (ours is %u, %s)\n", value != NULL && size == 4 ?
+			if (rmtfs_id_count > 0) { rmtfs_why[rmtfs_id_count - 1] = 2; }
+			tell("mpss: rmtfs: the modem asks for a buffer of %u bytes: NOT GIVEN (ours is %u, %s)\n", value != NULL && size == 4 ?
 			    le32(value) : 0, RMTFS_BUFFER_SIZE, rmtfs_shared ? "shared" : "NOT SHARED");
 			result = QMI_RESULT_FAILURE;
 			error = QMI_ERR_INTERNAL;
@@ -4037,6 +4348,25 @@ rmtfs_receive(__unused void *context, uint32_t node, uint32_t port, const void *
 			}
 			first = false;
 		}
+		{
+			uint32_t max_sectors = 0;
+
+			if (PE_parse_boot_argn("modem_rmtfs_max_sectors", &max_sectors, sizeof(max_sectors)) && max_sectors != 0) {
+				uint64_t asked = 0;
+
+				for (unsigned e = 0; e < count; e++) {
+					asked += le32(entries + 9 + 12 * e);
+				}
+				if (asked > max_sectors) {
+					rmtfs_refused++;
+					tell("mpss: rmtfs: the modem asks for %llu sectors of %s: TOO MUCH (limit %u)\n", asked,
+					    rmtfs_files[file].partition, max_sectors);
+					result = QMI_RESULT_FAILURE;
+					error = QMI_ERR_INTERNAL;
+					break;
+				}
+			}
+		}
 		if (option("modem_rmtfs_rw_off")) {
 			/* (an experiment: the modem is told no, and the buffer is not touched from here) */
 			printf("mpss: rmtfs: the modem %s %u pieces of %s: REFUSED (modem_rmtfs_rw_off)\n", write ? "writes" : "reads", count,
@@ -4052,7 +4382,8 @@ rmtfs_receive(__unused void *context, uint32_t node, uint32_t port, const void *
 
 			if (physical < rmtfs_buffer_pa || physical - rmtfs_buffer_pa + bytes > RMTFS_BUFFER_SIZE ||
 			    sector * RMTFS_SECTOR + bytes > rmtfs_files[file].size) {
-				printf("mpss: rmtfs: %s %llu sectors from %llu of %s at %#llx: OUTSIDE THE FILE OR THE BUFFER\n", write ? "write" :
+				if (rmtfs_id_count > 0) { rmtfs_why[rmtfs_id_count - 1] = 3; }
+				tell("mpss: rmtfs: %s %llu sectors from %llu of %s at %#llx: OUTSIDE THE FILE OR THE BUFFER\n", write ? "write" :
 				    "read", sectors, sector, rmtfs_files[file].partition, physical);
 				result = QMI_RESULT_FAILURE;
 				error = QMI_ERR_MALFORMED;
@@ -4071,6 +4402,24 @@ rmtfs_receive(__unused void *context, uint32_t node, uint32_t port, const void *
 				rmtfs_sectors_read += sectors;
 			}
 		}
+		rmtfs_rd_file = file;
+		rmtfs_rd_count = count;
+		if (!write && count > 0 && entries != NULL) {
+			rmtfs_rd_sector = (uint32_t)le32(entries + 1);
+			rmtfs_rd_sectors = (uint32_t)le32(entries + 9);
+			rmtfs_rd_physical = (uint64_t)le32(entries + 5);
+			if (rmtfs_rd_physical >= rmtfs_buffer_pa) {
+				const uint8_t *w = (const uint8_t *)(rmtfs_window + (rmtfs_rd_physical - rmtfs_buffer_pa));
+				const uint8_t *s = rmtfs_files[file].data != NULL ?
+				    rmtfs_files[file].data + (uint64_t)rmtfs_rd_sector * RMTFS_SECTOR : NULL;
+				for (unsigned b = 0; b < 8; b++) {
+					rmtfs_rd_window |= (uint64_t)w[b] << (8 * b);
+					if (s != NULL) {
+						rmtfs_rd_source |= (uint64_t)s[b] << (8 * b);
+					}
+				}
+			}
+		}
 		settle();
 		if (option("modem_rmtfs_rw_fake")) {
 			/* (an experiment: the buffer is filled as asked, but the modem is told no: does the filling alone end the run?) */
@@ -4079,6 +4428,15 @@ rmtfs_receive(__unused void *context, uint32_t node, uint32_t port, const void *
 			result = QMI_RESULT_FAILURE;
 			error = QMI_ERR_INTERNAL;
 			break;
+		}
+		if (!write) {
+			rmtfs_reads_served++;
+			if (rmtfs_silent_after != 0 && rmtfs_reads_served >= rmtfs_silent_after) {
+				tell("mpss: rmtfs: %u read(s) served, now staying silent: what comes next is on the screen\n", rmtfs_reads_served);
+				mpss_note("%02x txn %04x SILENT next", message, (unsigned)(m[1] << 8) | m[2]);
+				settle();
+				return;
+			}
 		}
 		rmtfs_reads += !write;
 		rmtfs_writes += write;
@@ -4096,7 +4454,8 @@ rmtfs_receive(__unused void *context, uint32_t node, uint32_t port, const void *
 		extra = 4;
 		break;
 	default:
-		printf("mpss: rmtfs: a request this does not know (%#x, %zu bytes)\n", message, length);
+		if (rmtfs_id_count > 0) { rmtfs_why[rmtfs_id_count - 1] = 4; }
+		tell("mpss: rmtfs: a request this does not know (%#x, %zu bytes)\n", message, length);
 		result = QMI_RESULT_FAILURE;
 		error = QMI_ERR_MALFORMED;
 		break;
@@ -4110,11 +4469,12 @@ rmtfs_receive(__unused void *context, uint32_t node, uint32_t port, const void *
 	answer[11] = (uint8_t)(result >> 8);
 	answer[12] = (uint8_t)error;
 	answer[13] = (uint8_t)(error >> 8);
+	mpss_note("%02x txn %04x len %u ans %u/%u", message, (unsigned)(m[1] << 8) | m[2], (unsigned)length, (unsigned)result, (unsigned)error);
 	if (rmtfs_port != NULL) {
 		int sent = qrtr_send(rmtfs_port, node, port, answer, 7 + 7 + extra);
 
 		if (sent != 0) {
-			printf("mpss: rmtfs: the answer to %#x is NOT SENT (%d)\n", message, sent);
+			tell("mpss: rmtfs: the answer to %#x is NOT SENT (%d)\n", message, sent);
 		}
 	}
 }
@@ -4155,6 +4515,7 @@ static struct hakios_qrtr_port *ipa_host_port;
 static bool
 rmtfs_start(void)
 {
+	PE_parse_boot_argn("modem_rmtfs_silent_after", &rmtfs_silent_after, sizeof(rmtfs_silent_after));
 	if (rmtfs_port == NULL) {
 		rmtfs_port = qrtr_open(rmtfs_receive, NULL, NULL);
 	}

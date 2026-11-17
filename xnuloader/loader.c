@@ -4944,6 +4944,18 @@ fb_command(char *cmd)
 			staged_data = (const char *)(uintptr_t)SCREEN.base;
 			staged_len = (uint64_t)SCREEN.stride * SCREEN.height;
 			fb_reply("OKAY", "");
+		} else if (starts_with(cmd, "oem notes")) {
+			/* the six lines the modem driver left in the shared memory's last page (0x80900000 + 0x1fe000) */
+			const char *notes = (const char *)(uintptr_t)0x80afe000u;
+
+			if (*(const volatile uint32_t *)notes != 0x484e4f54u) {
+				fb_reply("FAIL", "no notes in the shared memory");
+				return;
+			}
+			for (unsigned i = 0; i < 6; i++) {
+				fb_reply("INFO", notes + 16 + i * 72);
+			}
+			fb_reply("OKAY", "");
 		} else if (starts_with(cmd, "oem recording")) {
 			/* stage what the kernel's display driver recorded (boot-arg rec_secs) */
 			if (recording_data == NULL) {

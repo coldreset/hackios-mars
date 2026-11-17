@@ -65,13 +65,48 @@ routes that would make it readable are
 * a write of the words into the `darwin` partition, which Android can read back with `dd` under
   `su` -- no photograph at all.
 
+## What the night of 11-18 established
+
+* **The refusal was ours.** The modem's `ALLOC_BUFF` was answered `NOT GIVEN` because
+  `RMTFS_BUFFER_SIZE` was 2.5 MiB (`0x280000`) while the modem asks for 3 MiB (`0x300000`). With
+  the size fixed the modem goes on to its first real EFS read.
+* **That read, exactly.** `the read was of file 0 (count 1) from sector 1, 1 sectors, at 0xfb000200`
+  -- modemst1's second 512-byte sector, the EFS superblock. The window we filled was byte for byte
+  the file's own bytes.
+* **What kills the phone.** Answering that read *successfully* resets the SoC within about 80 ms
+  (no log at all). Answering *refused* does not: the modem gives up cleanly with
+  `fs_device_efs_rmts.c:161:[6 ,3145728, -907861464] EFS: rmts_get_buffer api failed` and
+  `slave-kernel = 0x107`. Ruled out one by one: the data (fake success, live), the amount
+  (`max_sectors=8`, dead), the mapping (`VM_WIMG_IO`, dead). The only variable left is that we said
+  success.
+* **Android serves the same bytes.** The EFS is fed by the vendor daemon `vendor.rmt_storage`
+  (`/vendor/bin/rmt_storage`, 42,688 B, links `libqmi_csi`, `libqmi_common_so`, `libmdmdetect`;
+  no crypto of any kind). Its boot-time sequence is OPEN `modem_fs1`, OPEN `modem_fs2`,
+  ALLOC 3,145,728, read `fs1` at 512 (512 B), read `fs2` at 512 (512 B), read `fs2` at 1024
+  (3,144,704 B), then a 3 MiB write of each at 12.9 s and 144.5 s. So a successful read is followed
+  by more reads in the same session -- which is exactly the part we never reach.
+* **The partitions are containers.** `modemst1/2` and `fsg` are `IMGEFS*` images with a 472-byte
+  envelope (`version 3`, payload `0x2ffe00`, high-entropy body), so "the bytes look odd" is not the
+  explanation either -- Android hands the modem the same container.
+* **A channel that survives.** The kernel draws its six notes on the framebuffer *and* leaves them
+  in the shared memory's last page (`0x80900000 + 0x1fe000`, magic `HNOT`). The loader now answers
+  `fastboot oem notes` with those six lines as `INFO` replies, so a reset no longer costs the
+  evidence -- provided the notes are read on the next `xl enter`.
+
 ## The command line this needs
 
 ```
 cpus=8 rd=md0 touchscreen=1 modem=1 modem_step=11 sb_delay=600 modem_ipa_fw=0 \
 modem_buffer=0xFB000000 modem_no_nav=1 modem_quiet_reads=1 \
+soc_ipa_base=0x1e40000 soc_gsi_base=0x1e04000 soc_ipcc=0x408000 soc_aoss=0xc300000 \
+soc_rsc=0x18220000 soc_apps_smmu=0x15000000 soc_smem=0x80900000 soc_imem=0x14600000 \
+soc_ipa_stream=0x5c0 soc_ipa_stream_uc=0x5c2 soc_ipa_fw=ipa_fws \
 soc_mpss_mem=0x8f000000 soc_mpss_size=0x10000000
 ```
+
+Without `soc_ipcc` there is no IPC: GLINK never comes up, `IPCRTR` is never opened, and the modem
+dies before it says a word to us. That is not a subtlety of the modem -- it is a missing argument,
+and it silently produced six runs of "the modem says nothing".
 
 `xl` does not append `devices/mars/soc.args`, the kernel's boot-argument buffer is 607 characters,
 and `PE_parse_boot_argn` takes the last occurrence of a name -- so the `soc_*` arguments above have
