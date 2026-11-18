@@ -336,3 +336,31 @@ not answer, so either that name is not the IPA's clock, or a clock's vote is not
 is one bit, not `0x3fff`). Until that is right, nothing that needs the IPA -- `INIT_DRIVER`, the GSI channels, the
 microcontroller's mailbox -- can be done at all, and the modem will keep asserting with
 `Failed to initialize GSI channel: CHID 1 IPA EPID 6 errval 5`.
+
+## The IPA, from the phone's own device tree (19 Nov, 05:00)
+
+`devices/mars/prebuilt/device-tree.dtb` holds the node, and it settles three things that were being guessed at
+(`dtc -I dtb -O dts -o /tmp/mars.dts devices/mars/prebuilt/device-tree.dtb`):
+
+    qcom,ipa@1e00000 {
+        reg = <0x1e00000 0x84000  0x1e04000 0x23000>;
+        reg-names = "ipa-base\0gsi-base";
+        clock-names = "core_clk";
+        clocks = <0x29 0x16>;          /* 0x29 = qcom,lahaina-rpmh-clk, clock 22 */
+        qcom,ipa-hw-ver = <0x13>;      /* v4.11, as expected */
+        ...
+
+1. **The IPA's register window is 0x1e00000 for 0x84000 bytes**, not the 0x4000 that was mapped. The GSI is
+   0x1e04000 for 0x23000. Every read past the first 16 KB was a read of an address nothing answers: on this SoC
+   that stalls the bus instead of faulting, which is why "reads hang" came to be a rule. It was not a rule.
+2. **The IPA's clock is an RPMh clock (rpmhcc index 22), not a GCC clock.** The command database knows a BCM
+   called "IP0" at 0x5007c with the levels `40 0 8 7`, and a clock's vote carries one of those levels: a vote of
+   0 asks for 0 kHz, which leaves the clock off. Two attempts were made and both hung the machine with no log
+   (a vote of 300, which is not a level the database lists, and a vote of 40 with the window widened); the
+   driver was put back to the committed state afterwards.
+3. **The IPA's local memory is inside the IPA's own window**, at the offset the register at 0x54 gives
+   (bits 31:16, in 8-byte units). There is no separate `0x1e40000` window to write to -- writes there are a data
+   abort (pc `_wr`, lr `ipa_memory_init`), which is what the last several runs died of.
+
+What is left, in order: map the IPA's window at its real size, vote IP0 with a level from its own table, then
+read 0x54 and zero the local memory at that offset -- and only then the IPA's INIT_DRIVER can be answered.
