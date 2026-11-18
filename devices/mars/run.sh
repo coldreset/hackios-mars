@@ -29,6 +29,13 @@ GL=$(grep -ac 'libOSMesa' userland/root.apfs 2>/dev/null || true)
 [ "${GL:-0}" -gt 0 ] || fail "root.apfs has no libOSMesa: rebuild with GL=1 userland/build.sh"
 [ -f userland/root/lib/libhakios.gl.dylib ] || fail "userland/root/lib/libhakios.gl.dylib is missing"
 
+# The job that produces widgets: build.sh replaces /System/Library/LaunchDaemons with a link to
+# /redwood/LaunchDaemons and copies a chosen few jobs into it.  Without com.apple.chronod nothing
+# claims com.apple.chronoservices, SpringBoard asks for the label once a second, and every widget
+# on the home screen and in the Today view stays empty.
+[ -f userland/root/LaunchDaemons/com.apple.chronod.plist ] ||
+	fail "the chronod job is not in the root: every widget would stay empty"
+
 case "$BASE" in *adsp=1*) ;; *) fail "adsp=1 is missing: the battery would read empty" ;; esac
 case "$BASE" in *gpu=1*)  ;; *) fail "gpu=1 is missing: the GL libraries would not load" ;; esac
 case "$BASE" in *gl=1*)   ;; *) fail "gl=1 is missing: the UI would be painted by the CPU" ;; esac

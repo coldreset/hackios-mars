@@ -35,6 +35,8 @@ Everything else the kernel needs comes from `devices/mars/configs/mars.config` a
 | battery | works | the audio DSP's battery manager (`adsp=1`): capacity, voltage, current, temperature, charge and the charger's state, every 10 s |
 | buttons | partial | the power and volume keys are read; presses reach `backboardd` as consumer events |
 | wifi | partial | ath11k's bring-up stages pass up to the board data, which does not fit the radio's message limit (`docs/wifi-board-limit.md`) |
+| widgets | works | home-screen and Today-view widgets fill in about ten seconds after SpringBoard;
+  they need the `com.apple.chronod` job in `/redwood/LaunchDaemons` (see Running) |
 | thermal, audio, camera | not started | the drivers exist in the tree but are off in this device's config |
 
 ## Building
@@ -73,6 +75,13 @@ missing from the images. Three of these switches have been lost once each, and e
 | `adsp=1` | the battery is blank: no percentage, no charge state. It comes only from the audio DSP's battery manager |
 | `gpu=1` | the kernel does not bring the GPU up, and `userland/build.sh` only installs the GL libraries into a root built for a kernel that did |
 | `gl=1` | CoreAnimation stays on the software renderer: every material, blur and widget surface is painted flat white |
+
+A fourth thing lives in the image rather than in the line: the job that produces widgets.
+`build.sh` replaces `/System/Library/LaunchDaemons` with a link to `/redwood/LaunchDaemons` and
+copies a chosen few jobs into it, and `com.apple.chronod` has to be one of them -- it owns
+`com.apple.chronoservices` and `com.apple.chrono.widgetcenterconnection`. Without it SpringBoard
+asks launchd for the label every second (`Could not find job with label com.apple.chronod`) and
+every widget is drawn empty, while the rest of the interface looks finished.
 
 The GL libraries also have to be **inside** the image: `GL=1 userland/build.sh` puts
 `libOSMesa.8.dylib` and `libhakios.gl.dylib` into `root/lib/`. A plain rebuild drops them, which is

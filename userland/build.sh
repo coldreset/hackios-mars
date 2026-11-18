@@ -436,6 +436,13 @@ if [ -d $DARWIN/rootfs/usr/lib ]; then
 	# screen has no wallpaper and the switcher's cards have nothing to lay over them. mkjobs.py takes the
 	# angels only with REST=1; this one is taken alone, because the rest of them are not needed yet.
 	cp $DARWIN/rootfs/System/Library/LaunchAngels/com.apple.PosterBoard.plist root/LaunchDaemons/
+	# chronod is the only thing that produces widgets: its job owns com.apple.chronoservices and
+	# com.apple.chrono.widgetcenterconnection, and SpringBoard asks launchd for the label every
+	# second ("Could not find job with label com.apple.chronod") when nobody has claimed them.
+	# iOS 16.5 ships it as a launch daemon whose program lives inside ChronoCore.framework.
+	cp $DARWIN/rootfs/System/Library/LaunchDaemons/com.apple.chronod.plist root/LaunchDaemons/
+	cp $DARWIN/rootfs/System/Library/LifecyclePolicy/DomainAttributes/com.apple.chronod.plist \
+		root/LaunchDaemons/com.apple.chronod-domain.plist 2>/dev/null || true
 	VOLUME=""
 	[ -n "$FLASHBOOT" ] && [ -f $DARWIN/rootfs.slt ] && VOLUME="--root-volume $DARWIN/rootfs.slt"
 	[ -n "$DARWIN_JOBS" ] && OSLOG=${OSLOG-com.apple.backboardd} ./mkjobs.py ${REST:+--rest} $VOLUME $DARWIN/rootfs root/LaunchDaemons $DARWIN_JOBS
