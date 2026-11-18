@@ -446,3 +446,14 @@ A fault in the prologue is a fault on the stack pointer, not on a register the f
 What is already fixed on the way: `smem_peek()` checked its range with 32-bit arithmetic, so an item offset near
 4 GB wrapped, passed, and was read anyway; `dsp_words()` now also says what it found (`the modem's words: item 435
 is not there`) instead of faulting there.
+
+### The correction (19 Nov, 07:20)
+
+Two more runs, one of them with the driver's larger buffers moved off the stack, ended at the same place: the program
+counter inside `_glink_put`, with `_dsp_listen` as the caller, right after step 6 made the IPA's item and step 7
+reported `the modem's words: item 435 is not there (at 0, 0 bytes)`. The line just before it says the link's
+descriptor at `0x809df030` has every index at zero -- our queue read and written 0, the DSP's read and written 0 --
+so `glink_put` is handed a channel that was never opened and computes an address from it.
+
+So it is not the stack after all: it is that step 7 sends on a channel whose descriptor is empty. The step has to
+check the descriptor before sending, or the send has to move to the step that opens the channel (step 9).
