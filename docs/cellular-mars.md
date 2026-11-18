@@ -429,3 +429,20 @@ is exactly the "reads hang the bus" behaviour that took every run down.
 So the next step is not another order: it is the direct-access register pair. Read the uC's response word through
 it, poll for `IPA_HW_2_CPU_RESPONSE_INIT_COMPLETED` (0x1) with a bounded wait, and only then read 0x54 and zero the
 local memory.
+
+## Two panics at the start of a function: the stack, not a register (19 Nov, 07:00)
+
+Two runs in a row ended in `Kernel data abort` with the program counter exactly at the first instruction of a
+function -- `_dsp_words` once, `_glink_put` (called from `_dsp_listen`) the next:
+
+    panic(cpu 5 caller 0xfffffff007b1e970): Kernel data abort. at pc 0xfffffff0074e4bcc, lr 0xfffffff0074e4bb8
+    panic(cpu 4 caller 0xfffffff007b1e470): Kernel data abort. at pc 0xfffffff0074e3a1c, lr 0xfffffff0074ef8c0
+
+A fault in the prologue is a fault on the stack pointer, not on a register the function was given: both are the
+`stp x29, x30, [sp, #-N]!` of the function that was entered. The modem's step thread carries `char line[400]`,
+`char text[257]`, `answer[512]` and the rest of the driver's larger buffers on its own stack, and the chain
+`steps_thread -> step 7 -> glink_put` is deep enough that the 16 KB kernel stack is the first suspect.
+
+What is already fixed on the way: `smem_peek()` checked its range with 32-bit arithmetic, so an item offset near
+4 GB wrapped, passed, and was read anyway; `dsp_words()` now also says what it found (`the modem's words: item 435
+is not there`) instead of faulting there.

@@ -627,7 +627,7 @@ smem_peek(uint64_t offset, void *to, uint32_t size)
 	if (smem == NULL) {
 		smem = (const volatile uint8_t *)ml_io_map_unmappable(smem_phys, SMEM_SIZE, VM_WIMG_WCOMB);
 	}
-	if (offset + size > SMEM_SIZE) {
+	if ((uint64_t)offset + (uint64_t)size > (uint64_t)SMEM_SIZE) {
 		return false;
 	}
 	for (uint32_t i = 0; i < size; i++) {
@@ -912,11 +912,24 @@ dsp_words(struct smp2p *words)
 	if (at == 0) {
 		at = smem_item(ITEM_SMP2P_THEIRS, &size);
 		if (at == 0 || size < sizeof(*words)) {
+			printf("mpss: %u: the modem's words: item %u is not there (at %u, %u bytes)\n",
+			    step, ITEM_SMP2P_THEIRS, at, size);
 			at = 0;
 			return false;
 		}
+		printf("mpss: %u: the modem's words: item %u at %#x, %u bytes\n", step, ITEM_SMP2P_THEIRS, at, size);
 	}
-	return smem_peek(at, words, sizeof(*words)) && words->magic == SMP2P_MAGIC;
+	if (!smem_peek(at, words, sizeof(*words))) {
+		printf("mpss: %u: the modem's words: the peek at %#x is out of the shared memory\n", step, at);
+		at = 0;
+		return false;
+	}
+	if (words->magic != SMP2P_MAGIC) {
+		printf("mpss: %u: the modem's words: at %#x there is %#x, not the words' magic\n", step, at, words->magic);
+		at = 0;
+		return false;
+	}
+	return true;
 }
 
 static int
