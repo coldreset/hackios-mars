@@ -267,3 +267,33 @@ The next things to try, in order:
    it: IPA hands its GSI/CE registers over, then the modem binds channels through QMI).
 3. Compare the 154 bytes against what Android's IPA driver sends on this phone (`/sys/kernel/debug/ipa` is
    not available to us; its dmesg does print the IPA's memory layout at boot).
+
+### The modem registers (19 Nov, 02:20)
+
+Leaving the IPA out entirely -- no firmware for it, no INIT_DRIVER sent to it (`modem_ipa_fw=0
+modem_ipa_skip_qmi=1`) -- a full run gets further than any run before (`logs/021801-run.log`):
+
+    mpss: 11: about to ask DMS (node 0 port 70) for operating mode 0 (0 online, 1 low power): message 0x2e
+    mpss: 11: mode 0: THE MODEM AGREES (result 0, error 0)
+    mpss: 11: after 58047 ms: DMS there, the modem online; NAS there (node 0 port 59), asked 21 times,
+             answered 22, 2 changes; REGISTERED WITH A NETWORK; signal -119 dBm (NR), 2 bars
+
+That is the phone's own modem, taken out of reset by us, told to go online by us, and answering with a
+registration and a signal reading (-119 dBm on NR, two bars).
+
+It does not stay: twenty seconds later it gives up, and its last words say why --
+
+    mpss: link: THE MODEM SAYS IT HAS GIVEN UP ("slave-kernel" = 0x107)
+    mpss: 11: THE MODEM'S LAST WORDS (item 421, 256 bytes):
+              "ipa_sio.c:2517:IPA Assert: ipa_ipfltr.init_done == TRUE failed: Init message from A7 not yet
+               received, failing SIO config"
+
+So the IPA is what keeps the modem alive: its filter tables are initialised by the application processor's
+INIT_DRIVER, and without that message the modem's SIO configuration fails and it stops. Sending that message
+while the IPA's firmware is running is what takes the whole phone down (the last three runs), and the IPA's
+firmware starts at all only now that `fw/image/ipa_fws.*` is in the image.
+
+What is left, then, is the IPA itself: its microcontroller's ready interrupt (`ipa3_uc_ready`, which Android
+waits on through `ipa3_uc_init`), and the order Android keeps -- memory and hardware initialisation, then the
+microcontroller, then INIT_DRIVER. Our `ipa_memory_init()` and `ipa_hardware_init()` run after the firmware is
+already started; whether that order is what kills the phone is the next thing to settle.
