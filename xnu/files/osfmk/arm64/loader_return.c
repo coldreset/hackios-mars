@@ -118,6 +118,22 @@ loader_log_line(const char *line)
 {
 	uint64_t daif;
 	bool locked = false;
+	/*
+	 * The launchd chatter is most of the ring -- 116 KB of a 192 KB ring when it was measured on
+	 * 18 November, the same handful of "SpringBoard cannot find sleepd/commcenter" lines repeated
+	 * hundreds of times -- and it says nothing about the run being read.
+	 */
+	static const char chatter[] = "com.apple.xpc.launchd|";
+	uint32_t i;
+
+	for (i = 0; i + 1 < sizeof(chatter); i++) {
+		if (line[i] != chatter[i]) {
+			break;
+		}
+	}
+	if (i + 1 == sizeof(chatter)) {
+		return;
+	}
 
 	daif = __builtin_arm_rsr64("DAIF");
 	__builtin_arm_wsr("DAIFSet", DAIFSC_IRQF | DAIFSC_FIQF);

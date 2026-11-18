@@ -5072,10 +5072,22 @@ fb_command(char *cmd)
 			 * comes back empty, and a chunked fetch stops after one piece).
 			 */
 			{
-				/* A live log is composed in place (compose_live_log), not into out_buf. */
-				const char *base = staged_data;
+				/* The log always starts at out_buf: staged_data moves with the piece being sent. */
+				const char *base = out_buf;
 				uint64_t total = staged_total;
 
+				/*
+				 * Only about 192 KB crosses this cable before the command channel stops
+				 * answering (five runs, 18 November), so the piece that can be fetched
+				 * has to be the end of the log, where the run's last words are.
+				 */
+				if (total > 192u * 1024u) {
+					base += total - 192u * 1024u;
+					total = 192u * 1024u;
+				}
+				if (offset > total) {
+					offset = total;
+				}
 				if (offset >= total) {
 					/* Never announce zero bytes: the host's get_staged then sends nothing
 					   at all and the pair wedges. One '

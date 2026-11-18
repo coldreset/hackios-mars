@@ -30,7 +30,7 @@ Everything else the kernel needs comes from `devices/mars/configs/mars.config` a
 | display | works | 1440x3200 through the loader's framebuffer; drawn by the GPU |
 | touch | works | ST FingerTip FTM5 on `qupv3_se11_spi`; taps land where you tap, drags and the home / app-switcher swipe work |
 | cpu | works | all 8 cores (`cpus=8`); the A78/X1 cores sit at their top OPP with `cpufreq=1` |
-| gpu | works | Adreno 660, all 21 bring-up steps pass; OpenGL ES through Mesa freedreno (`gpu=1 adreno_nomeasure=1 gl=1`) |
+| gpu | works | Adreno 660, all 21 bring-up steps pass; OpenGL ES through Mesa freedreno (`gpu=1 adreno_nomeasure=1 gl=1`, and the libraries must be in the image: `GL=1 userland/build.sh`) |
 | storage | read only | the system image is resident in RAM; `var_store` / UFS writes are not enabled yet |
 | battery | works | the audio DSP's battery manager (`adsp=1`): capacity, voltage, current, temperature, charge and the charger's state, every 10 s |
 | buttons | partial | the power and volume keys are read; presses reach `backboardd` as consumer events |
@@ -61,10 +61,29 @@ turns on `CONFIG_HAKIOS_FOCALTECH` (the driver that speaks the ST protocol on th
 ```sh
 export DEVICE=mars                   # xl defaults to redwood
 adb reboot bootloader
+./devices/mars/run.sh 300            # verify, then: xl enter, xl ramdisk, xl run with the line below
+```
+
+`devices/mars/run.sh` is the one command line, and it refuses to start when a piece of it is
+missing from the images. Three of these switches have been lost once each, and each loss is
+**silent** -- nothing fails, the feature is just absent:
+
+| Switch | What is lost without it |
+|---|---|
+| `adsp=1` | the battery is blank: no percentage, no charge state. It comes only from the audio DSP's battery manager |
+| `gpu=1` | the kernel does not bring the GPU up, and `userland/build.sh` only installs the GL libraries into a root built for a kernel that did |
+| `gl=1` | CoreAnimation stays on the software renderer: every material, blur and widget surface is painted flat white |
+
+The GL libraries also have to be **inside** the image: `GL=1 userland/build.sh` puts
+`libOSMesa.8.dylib` and `libhakios.gl.dylib` into `root/lib/`. A plain rebuild drops them, which is
+why the script looks inside `root.apfs` before it starts anything.
+
+```sh
+export DEVICE=mars
+adb reboot bootloader
 ./xl enter                           # the UEFI loader into RAM
-./xl ramdisk userland/system.apfs    # 2.3 GB resident system image, about 75 s
-XL_RAMDISK=userland/root.apfs XL_SECS=240 \
-XL_CMDLINE="debug=0x8 cpus=8 rd=md0 touchscreen=1 cpufreq=1 gpu=1 adreno_nomeasure=1" ./xl run
+./xl ramdisk userland/system.apfs    # 2.6 GB resident system image, about 80 s
+XL_SECS=240 XL_CMDLINE="cpus=8 rd=md0 touchscreen=1 adsp=1 gpu=1 gl=1 adreno_nomeasure=1 cpufreq=1" ./xl run
 ```
 
 Boot arguments that matter on this phone:
@@ -132,9 +151,11 @@ per transfer leaves the queue standing still.
   page draws coloured boxes. Both are tracked in the project's problem list.
 - **A run usually ends with the loader wedged in fastboot** (`fastboot devices` shows
   `????????????`); a 15 s power-button hold recovers it.
-- **Logs are read off the screen.** After the kernel returns, the loader prints the interesting
-  lines of the last 1 MB and waits 120 s, then cold-resets. `usb_after=1` makes it try to take the
-  controller back for 60 s first, so the log can be fetched over the cable (unverified).
+- **The log comes over the cable, and only the newest 192 KB of it.** The kernel writes into a
+  ring; `oem log <offset>` hands back a window and `xl` pages through it. One 192 KB fetch is all the
+  loader's USB command channel will take -- after that `fastboot` stops answering while `getvar`
+  still does, so ask for the window once at the end (`XL_FOLLOW=` and a long `XL_SECS`) rather than
+  polling every few seconds.
 
 ## Wi-Fi and Bluetooth
 
