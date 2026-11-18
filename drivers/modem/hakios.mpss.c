@@ -2935,6 +2935,20 @@ ipa_firmware_load(void)
 		goto out;
 	}
 	tell("mpss: %u: THE IPA'S FIRMWARE IS LOADED AND STARTED (image 15, %u segments)\n", step, loaded);
+	if (option("modem_ipa_da")) {
+		/*
+		 * IPA_SRAM_DIRECT_ACCESS_N (vendor ipa_reg.h: 0x4000 + 4 * n), the pair through which Android
+		 * reaches the microcontroller's 128 bytes (ipa3_uc_interface_init()). Read only: the same kind of
+		 * access as GSI_CFG at 0x1e04000, which has always answered.
+		 */
+		uint32_t da[8];
+
+		for (unsigned i = 0; i < 8; i++) {
+			da[i] = rd(ipa_regs.base + 0x4000 + 4 * i);
+		}
+		tell("mpss: ipa: direct access 0x4000: %08x %08x %08x %08x %08x %08x %08x %08x\n",
+		    da[0], da[1], da[2], da[3], da[4], da[5], da[6], da[7]);
+	}
 	if (option("modem_ipa_after") && !option("modem_ipa_raw")) {
 		/*
 		 * After the microcontroller runs, as Android does it: 0x54 only holds the local memory's offset once the
