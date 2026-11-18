@@ -2721,10 +2721,10 @@ ipa_firmware_load(void)
 		 * fw is declared outside, so that the segments are looked for under the same name. */
 		char path[96];
 
-		strlcpy(fw, "yupik_ipa_fws", sizeof(fw));
+		strlcpy(fw, "ipa_fws", sizeof(fw));        /* mars: /vendor/firmware/ipa_fws.mdt */
 		PE_parse_boot_argn("soc_ipa_fw", fw, sizeof(fw));
 		snprintf(path, sizeof(path), "image/%s.mdt", fw);
-		header = root_file(path, &header_size);
+		header = image_file(path, &header_size);
 		if (header == NULL) {
 			printf("mpss: %u: no fw/%s: the IPA's firmware is not loaded\n", step, path);
 			return false;
@@ -2889,10 +2889,11 @@ out:
 	if (page != 0) {
 		kmem_free(kernel_map, page, PAGE_SIZE);
 	}
-	{
+	if (from_root) {
 		uint8_t *gone = __DECONST(uint8_t *, header);
 
 		kfree_data(gone, header_size);
+		from_root = false;
 	}
 	for (uint32_t i = 0; i < 8; i++) {
 		if (segment_file[i] != NULL) {

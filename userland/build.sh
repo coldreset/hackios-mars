@@ -484,6 +484,15 @@ if [ -f ../fw-wifi/amss.bin ]; then
 		[ -f "../fw-wifi/$f" ] && install -m 0644 "../fw-wifi/$f" "root/fw/$f"
 	done
 fi
+# ... and the IPA's own firmware, the phone's /vendor/firmware/ipa_fws.mdt and .b00-b04 (../fw-modem/image):
+# the modem starts the IPA and its data path needs GSI, so the kernel loads this through fw/image/
+if [ -f ../fw-modem/image/ipa_fws.mdt ]; then
+	mkdir -p root/fw/image
+	install -m 0644 ../fw-modem/image/ipa_fws.mdt root/fw/image/
+	for f in ../fw-modem/image/ipa_fws.b[0-9][0-9]; do
+		[ -f "$f" ] && install -m 0644 "$f" root/fw/image/
+	done
+fi
 # ... and the vibration motor's waveforms, the phone's /vendor/firmware/aw8697_haptic.bin, from ../fw-haptic
 # (drivers/haptic/hakios.haptic.c, haptic=3; 3.6 KB, the vendor's and not in the repository either)
 if [ -f ../fw-haptic/aw8697_haptic.bin ]; then

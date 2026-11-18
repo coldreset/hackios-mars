@@ -212,3 +212,29 @@ With 0xD6A00000 the exchange completes and the machine stays up (`logs/004228-ru
 What is left is the modem's own state: its entry still says 0x107 rather than "up", so DMS and NAS are not
 started. `devices/mars/run.sh` now carries `MODEM_BUFFER=modem_buffer=0xd6a00000` for every modem experiment,
 and the driver's default is that address.
+
+## The IPA's firmware, and what happened once it started (19 Nov, 01:30)
+
+The modem's own last words named the next thing: `ipa_hal.c:7446:IPA Assert: GSI_STATUS_SUCCESS == errval
+failed: Failed to initialize GSI channel: CHID 1 IPA EPID 6 errval 5`. That is the modem's IPA, which needs the
+IPA's firmware before the modem starts. It was not in our image: the phone keeps it at
+`/vendor/firmware/ipa_fws.{mdt,b00..b04}` (7,020 bytes of header and five segments), and `fw-modem/image/`
+had never been filled. `userland/build.sh` now puts it in the small image as `fw/image/ipa_fws.*`, the
+driver's default name is `ipa_fws` (it was `yupik_ipa_fws`), and the loader looks for it through
+`image_file()` -- the small image first, then `/fw` on the root -- so it can be loaded without rebuilding the
+2.7 GB system image.
+
+With it there, the IPA comes up (`logs/012034-run.log`):
+
+    mpss: 7: the IPA's image: 3 segments to load, 0x7000 bytes from 0x8b710000
+    mpss: 7: THE IPA'S FIRMWARE IS LOADED AND STARTED (image 15, 3 segments)
+    mpss: 7: GSI_CFG 0x205 (bit 0 GSI enable, 1 MCS enable, ...), MCS_CFG 0x1 (bit 0: the sequencer runs)
+    mpss: 7: THE MODEM SAYS IT IS UP: "slave-kernel" says 0x6, 74.521 ms after TrustZone started it
+
+and the machine stays alive through step 8, where the IPA is shut down again and the SMMU reports that it
+refused the IPA nothing.
+
+What is left: a full run (`modem_step=11`) with the IPA up stalls the kernel. The IPA's own tables
+(`ipa_memory_init()`, `ipa_hardware_init()`, `hakios_ipa_data_setup()`) are still skipped by
+`modem_ipa_raw=1`; those writes are the next thing to attribute, one at a time, with `modem_ipa_quiet=1`
+(the reads of the IPA's registers stall the bus when its clock is not really on).
