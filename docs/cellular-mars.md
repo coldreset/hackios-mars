@@ -138,6 +138,39 @@ it down, and the narrower answer is a different question to ask next.
   copied in): still a reset. **`memcpy` instead of the byte loop does not help** either, and neither
   does a 4 KiB-granular `settle()` -- so "we are too slow for the modem's timeout" is not shown.
 
+### What the freeze ladder settled (18 Nov, afternoon)
+
+The live log was lying about *where* it looked: the loader chose the newest window of
+the kernel's ring and then indexed it `(from + i) % total`, so every log came back as
+the **first** 192 KB with a tail of stale bytes, and nothing the kernel said after about
+117 s (the modem up, the four RMTFS requests, the give-up) was ever read. Indexed
+absolutely, one late fetch carries the whole exchange.
+
+With that channel working the question "does the modem pull the phone down, or does our
+code die?" could be answered by making our side do *nothing at all*:
+
+| what the kernel does after the answer | what happens |
+|---|---|
+| refuses the read (`modem_rmtfs_rw_off=1`) | lives; the modem gives up 45 ms later (`0x107`, `fs_rmts_pm.c:1009:[5, 6] rmts_read_iovec failed`) |
+| answers read 1, then **freezes** (`modem_rmtfs_halt=1`) | lives to the deadline: the first answer is acceptable to it |
+| answers reads 1 and 2, then **freezes** (`modem_rmtfs_halt=2`) | the phone is gone, and no log survives |
+
+A frozen kernel sends nothing, touches no MMIO and reads no storage, so the 80 ms that
+follow the second answer are the modem's own doing: it **asserts and pulls PS_HOLD**.
+Consistently, a window of zeroes is refused cleanly (`rmts_read_iovec failed`, phone
+alive) while a window holding the real container sends it down: it is parsing the EFS
+container and failing inside itself.
+
+Two dead ends measured the same afternoon:
+
+* **A header with a zero body** (`modem_rmtfs_zero_after=0x1d8`): still a reset. The
+  container's 472-byte header alone is enough to send it down that path.
+* **The buffer at 0x9c700000** (the CDSP image, where the phone's own heap falls):
+  TrustZone *shares* it now that the share names two destinations, and then
+  `SCM_PAS_AUTH_AND_RESET` answers `-3145796` — that address sits inside the modem's own
+  0x8f000000+0x10000000 region, so the image and the buffer collide. The address is not
+  free to choose; 0xFB000000 stays.
+
 What is left, and the order to test it in:
 
 1. **A valid magic with a zero body.** Serve the superblock's first bytes and nothing else: if the

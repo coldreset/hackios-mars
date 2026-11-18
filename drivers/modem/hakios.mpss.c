@@ -4550,8 +4550,16 @@ rmtfs_receive(__unused void *context, uint32_t node, uint32_t port, const void *
 				if (blank) {
 					memset(rmtfs_window + (physical - rmtfs_buffer_pa), 0, bytes);
 				} else {
-					memcpy(rmtfs_window + (physical - rmtfs_buffer_pa),
+					uint64_t zero_after = 0;
+					uint64_t at = physical - rmtfs_buffer_pa;
+
+					memcpy(rmtfs_window + at,
 					    rmtfs_files[file].data + sector * RMTFS_SECTOR, bytes);
+					if (PE_parse_boot_argn("modem_rmtfs_zero_after", &zero_after, sizeof(zero_after)) &&
+					    zero_after < bytes) {
+						/* (an experiment: a header and nothing behind it) */
+						memset(rmtfs_window + at + zero_after, 0, bytes - zero_after);
+					}
 				}
 				settle();
 				if (bytes >= 4096) {
