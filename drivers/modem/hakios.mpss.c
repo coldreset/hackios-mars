@@ -307,6 +307,65 @@ mpss_note(const char *fmt, ...)
 	}
 }
 
+
+/* The same words, to the flash, before the answer goes out: the modem can reset the platform, and by
+ * the next boot the memory (the screen, the log, the shared memory) is Android's again. */
+extern int hakios_ufs_checkpoint(const void *data, uint64_t len);
+
+static char mpss_ckpt_block[4096];          /* the words as they will be written */
+static volatile uint32_t mpss_ckpt_seq;     /* bumped here, written by mpss_ckpt_thread() */
+static volatile uint32_t mpss_ckpt_done;    /* what the thread has written */
+static volatile bool mpss_ckpt_on;
+static bool mpss_ckpt_started;
+
+/* The write itself, on a thread of its own: the modem's answer must not wait for the flash (a round trip
+ * to the loader in front of every reply made its watchdog fire and took the platform down by itself). */
+static void
+mpss_ckpt_thread(__unused void *parameter, __unused wait_result_t result)
+{
+	while (mpss_ckpt_on) {
+		uint32_t seq = mpss_ckpt_seq;
+
+		if (seq != mpss_ckpt_done) {
+			(void)hakios_ufs_checkpoint(mpss_ckpt_block, sizeof(mpss_ckpt_block));
+			mpss_ckpt_done = seq;
+		}
+		delay_for_interval(20, NSEC_PER_MSEC);
+	}
+	thread_terminate(current_thread());
+}
+
+static void
+mpss_checkpoint(void)
+{
+	size_t at = 0;
+	uint32_t draw = 0;
+
+	if (!PE_parse_boot_argn("modem_checkpoint", &draw, sizeof(draw)) || draw == 0) {
+		return;
+	}
+	if (!mpss_ckpt_started) {
+		thread_t thread;
+
+		mpss_ckpt_on = true;
+		if (kernel_thread_start(mpss_ckpt_thread, NULL, &thread) == KERN_SUCCESS) {
+			thread_deallocate(thread);
+			mpss_ckpt_started = true;
+		} else {
+			mpss_ckpt_on = false;
+			return;
+		}
+	}
+	memset(mpss_ckpt_block, 0, sizeof(mpss_ckpt_block));
+	at += snprintf(mpss_ckpt_block + at, sizeof(mpss_ckpt_block) - at, "HKCK %u notes\n", (unsigned)mpss_notes_next);
+	for (unsigned n = 0; n < MPSS_NOTES && at < sizeof(mpss_ckpt_block) - 96; n++) {
+		unsigned slot = (mpss_notes_next + n) % MPSS_NOTES;
+
+		at += snprintf(mpss_ckpt_block + at, sizeof(mpss_ckpt_block) - at, "%s\n", mpss_notes[slot]);
+	}
+	mpss_ckpt_seq++;        /* (the thread writes it; this call never touches the storage) */
+}
+
 /* What the Wi-Fi's DSP and this one both use (hakios.wifi.c). */
 extern lck_mtx_t hakios_aop_mailbox_lock;
 extern lck_mtx_t hakios_smem_alloc_lock;
@@ -1525,6 +1584,8 @@ image_span(void)
 	return span;
 }
 
+static bool rmtfs_ours[4];      /* (is the data ours to free, or the image's?) */
+static bool rmtfs_settle(unsigned f);
 static unsigned rmtfs_load(void);
 static void servreg_load(void);
 
@@ -1684,6 +1745,7 @@ static bool dsp_started;
 static bool stopped_by_its_word;
 static uint32_t our_item;
 static bool smp2p_agreed, smp2p_restart_acks, smp2p_restart_acked;
+static bool imem_boot_asked;               /* (the bootloader was asked for, once) */
 
 static int32_t
 scm(const char *what, uint64_t function, uint64_t arguments, uint64_t first, uint64_t second, uint64_t third, uint64_t fourth,
@@ -3570,6 +3632,8 @@ static struct {
 static uint32_t rmtfs_requests, rmtfs_reads, rmtfs_writes, rmtfs_sectors_read, rmtfs_sectors_written, rmtfs_refused;
 static unsigned rmtfs_reads_served;
 static unsigned rmtfs_silent_after;
+static unsigned rmtfs_answered_reads;
+static bool rmtfs_frozen;
 static uint32_t rmtfs_ids[8], rmtfs_id_count;          /* the ids seen, in order */
 static uint32_t rmtfs_rd_file, rmtfs_rd_count, rmtfs_rd_sector, rmtfs_rd_sectors;
 static uint32_t rmtfs_rd_log[8], rmtfs_rd_log_sectors[8], rmtfs_rd_log_at[8];   /* every read asked for */
@@ -4054,6 +4118,45 @@ static volatile uint8_t *rmtfs_window;          /* ... and the uncached one it i
 static uint64_t rmtfs_buffer_pa;
 static bool rmtfs_shared;                       /* the modem has been let into it */
 
+
+/* A snapshot of the four file systems: the same first sector read twice must agree, or Android is still writing it. */
+static bool
+rmtfs_settle(unsigned f)
+{
+	if (option("modem_settle_off")) {
+		return true;
+	}
+
+	uint8_t *again = kalloc_data(RMTFS_SECTOR, Z_WAITOK | Z_ZERO);
+	unsigned tries;
+
+	if (again == NULL) {
+		return false;
+	}
+	for (tries = 1; tries <= 20; tries++) {
+		if (hakios_ufs_read_partition(rmtfs_files[f].partition, 0, again, RMTFS_SECTOR, NULL) != 0) {
+			break;
+		}
+		if (memcmp(again, rmtfs_files[f].data, RMTFS_SECTOR) == 0) {
+			break;
+		}
+		delay_for_interval(250, NSEC_PER_MSEC);
+		if (hakios_ufs_read_partition(rmtfs_files[f].partition, 0, rmtfs_files[f].data, rmtfs_files[f].size, NULL) != 0) {
+			break;
+		}
+	}
+	kfree_data(again, RMTFS_SECTOR);
+	if (tries > 20) {
+		tell("mpss: %u: the partition %s never settles: it is being written as we read it\n", step, rmtfs_files[f].partition);
+		return false;
+	}
+	if (tries > 1) {
+		tell("mpss: %u: the partition %s took %u reads to settle (Android was writing it)\n", step,
+		    rmtfs_files[f].partition, tries);
+	}
+	return true;
+}
+
 static unsigned
 rmtfs_load(void)
 {
@@ -4070,11 +4173,19 @@ rmtfs_load(void)
 			snprintf(name, sizeof(name), "modem/%s", rmtfs_files[f].partition);
 			image = root_file(name, &size);
 			if (image != NULL) {
-				if (rmtfs_files[f].data != NULL) {
+				uint8_t *copy = kalloc_data(size, Z_WAITOK | Z_ZERO);
+
+				if (copy == NULL) {
+					printf("mpss: %u: no memory for %s (%llu bytes)\n", step, rmtfs_files[f].partition, size);
+					continue;
+				}
+				memcpy(copy, image, size);
+				if (rmtfs_ours[f] && rmtfs_files[f].data != NULL) {
 					kfree_data(rmtfs_files[f].data, rmtfs_files[f].size);
 				}
-				rmtfs_files[f].data = (uint8_t *)image;
+				rmtfs_files[f].data = copy;
 				rmtfs_files[f].size = size;
+				rmtfs_ours[f] = true;
 				printf("mpss: %u: the partition %s (%s): %llu bytes from the image (fw/%s)\n", step,
 				    rmtfs_files[f].partition, rmtfs_files[f].path, size, name);
 				loaded++;
@@ -4086,11 +4197,12 @@ rmtfs_load(void)
 			continue;
 		}
 		if (rmtfs_files[f].data == NULL || rmtfs_files[f].size != size) {
-			if (rmtfs_files[f].data != NULL) {
+			if (rmtfs_ours[f] && rmtfs_files[f].data != NULL) {
 				kfree_data(rmtfs_files[f].data, rmtfs_files[f].size);
 			}
 			rmtfs_files[f].data = kalloc_data(size, Z_WAITOK | Z_ZERO);
 			rmtfs_files[f].size = rmtfs_files[f].data == NULL ? 0 : size;
+			rmtfs_ours[f] = rmtfs_files[f].data != NULL;
 		}
 		if (rmtfs_files[f].data == NULL) {
 			printf("mpss: %u: no memory for %s (%llu bytes)\n", step, rmtfs_files[f].partition, size);
@@ -4103,6 +4215,7 @@ rmtfs_load(void)
 		}
 		printf("mpss: %u: the partition %s (%s): %llu bytes read into memory of ours\n", step, rmtfs_files[f].partition,
 		    rmtfs_files[f].path, size);
+		rmtfs_settle(f);
 		loaded++;
 	}
 	{
@@ -4269,6 +4382,9 @@ le32(const uint8_t *p)
 static void
 rmtfs_receive(__unused void *context, uint32_t node, uint32_t port, const void *data, size_t length)
 {
+	if (rmtfs_frozen) {
+		return;
+	}
 	const uint8_t *m = data, *value;
 	uint8_t answer[256], *tlv;
 	uint16_t message, size = 0, result = 0, error = 0, extra = 0;
@@ -4444,6 +4560,15 @@ rmtfs_receive(__unused void *context, uint32_t node, uint32_t port, const void *
 				rmtfs_sectors_read += sectors;
 			}
 		}
+		if (!write && count > 0 && entries != NULL && rmtfs_reads == 0) {
+			/* (the first read of a run: what does the modem say this partition is, word by word?) */
+			tell("mpss: rmtfs: the first read asks for %u entr%s; our file %u is %s; words:", count,
+			    count == 1 ? "y" : "ies", file, rmtfs_files[file].partition);
+			for (unsigned w = 0; w < count * 3u && w < 8; w++) {
+				tell(" %08x", le32(entries + w));
+			}
+			tell("\n");
+		}
 		rmtfs_rd_file = file;
 		rmtfs_rd_count = count;
 		if (!write && count > 0 && entries != NULL) {
@@ -4522,11 +4647,25 @@ rmtfs_receive(__unused void *context, uint32_t node, uint32_t port, const void *
 	answer[12] = (uint8_t)error;
 	answer[13] = (uint8_t)(error >> 8);
 	mpss_note("%02x txn %04x len %u ans %u/%u", message, (unsigned)(m[1] << 8) | m[2], (unsigned)length, (unsigned)result, (unsigned)error);
+	mpss_checkpoint();
 	if (rmtfs_port != NULL) {
 		int sent = qrtr_send(rmtfs_port, node, port, answer, 7 + 7 + extra);
 
 		if (sent != 0) {
 			tell("mpss: rmtfs: the answer to %#x is NOT SENT (%d)\n", message, sent);
+		}
+	}
+
+	if (message == 0x3) {
+		int halt = 0;
+
+		rmtfs_answered_reads++;
+		if (PE_parse_boot_argn("modem_rmtfs_halt", &halt, sizeof(halt)) && halt != 0 &&
+		    rmtfs_answered_reads == (unsigned)halt) {
+			mpss_note("FROZEN after read %u: nothing more is touched", rmtfs_answered_reads);
+			tell("mpss: rmtfs: read %u is answered; frozen from here on purpose\n", rmtfs_answered_reads);
+			rmtfs_frozen = true;
+			return;
 		}
 	}
 }
@@ -4564,9 +4703,80 @@ static void ipa_qmi_stop(void);
 static struct hakios_qrtr_port *ipa_host_port;
 
 /* The port, and the service on it; the partitions are read in step 2, the buffer shared in step 7. */
+/*
+ * The checkpoint block of the previous run, printed at the start of this one (modem_checkpoint_read=1):
+ * the only way to read what went on in the eighty milliseconds before the modem took the platform down.
+ */
+extern int hakios_ufs_checkpoint_read(void *data, uint64_t len);
+
+/* (the read goes through the loader, and the loader is busy with the modem just then: never in the
+ * thread that starts the modem, and never before the modem has been started) */
+static void mpss_checkpoint_show_body(void);
+
+static void
+mpss_checkpoint_show_thread(__unused void *parameter, __unused wait_result_t result)
+{
+	delay_for_interval(12, NSEC_PER_SEC);
+	mpss_checkpoint_show_body();
+	thread_terminate(current_thread());
+}
+
+static void
+mpss_checkpoint_show_thread_start(void)
+{
+	static bool started;
+	thread_t thread;
+	uint32_t read = 0;
+
+	if (started || !PE_parse_boot_argn("modem_checkpoint_read", &read, sizeof(read)) || read == 0) {
+		return;
+	}
+	if (kernel_thread_start(mpss_checkpoint_show_thread, NULL, &thread) == KERN_SUCCESS) {
+		started = true;
+		thread_deallocate(thread);
+	}
+}
+static void
+mpss_checkpoint_show_body(void)
+{
+	static char block[4096];
+	char *line, *next;
+	uint32_t on = 0;
+
+	if (!PE_parse_boot_argn("modem_checkpoint_read", &on, sizeof(on)) || on == 0) {
+		return;
+	}
+	int error = 0;
+
+	for (unsigned tries = 0; tries < 40; tries++) {
+		error = hakios_ufs_checkpoint_read(block, sizeof(block) - 1);
+		if (error == 0) {
+			break;
+		}
+		sleep_ms(250);
+	}
+	if (error != 0) {
+		tell("mpss: checkpoint: the block could not be read (%d)\n", error);
+		return;
+	}
+	block[sizeof(block) - 1] = 0;
+	tell("mpss: checkpoint: the previous run wrote:\n");
+	for (line = block; line != NULL && *line != 0; line = next) {
+		next = strchr(line, '\n');
+		if (next != NULL) {
+			*next++ = 0;
+		}
+		tell("mpss: checkpoint:   %s\n", line);
+	}
+}
+
 static bool
 rmtfs_start(void)
 {
+	extern void hakios_ufs_checkpoint_probe(void);
+
+	hakios_ufs_checkpoint_probe();
+	mpss_checkpoint_show_thread_start();	/* (the read waits, and never holds the modem's start) */
 	PE_parse_boot_argn("modem_rmtfs_silent_after", &rmtfs_silent_after, sizeof(rmtfs_silent_after));
 	if (rmtfs_port == NULL) {
 		rmtfs_port = qrtr_open(rmtfs_receive, NULL, NULL);
@@ -6919,6 +7129,28 @@ soc_override(void)
 	PE_parse_boot_argn("mpss_setup_image", &mpss_setup_image, sizeof(mpss_setup_image));
 	PE_parse_boot_argn("mpss_setup_extra", &mpss_setup_extra, sizeof(mpss_setup_extra));
 	PE_parse_boot_argn("soc_imem", &ipa_imem, sizeof(ipa_imem));
+
+	if (option("modem_imem_boot") && !imem_boot_asked) {
+		/* (an experiment: ask the next boot to stop in the bootloader, so the notes outlive a reset. Done on this
+		 * thread, the one that starts the modem, because TrustZone is not to be called from the link thread.
+		 * The reason is a word whose meaning differs between the platforms; try the ones that are known and
+		 * keep the one TrustZone accepts.) */
+		static const uint32_t reasons[] = { 0x77665500u, 0x77665501u, 0x01u };
+		static const uint64_t arginfos[] = { 2, 2, 2 };
+		uint64_t said = 0;
+		int32_t asked;
+
+		for (unsigned i = 0; i < sizeof(reasons) / sizeof(reasons[0]); i++) {
+			asked = scm("to ask for the bootloader at the next boot", SCM_CALL(1, 1), arginfos[i], reasons[i], 0, 0, 0, &said);
+			printf("mpss: imem: reason %#x: TrustZone says %d (its answer %#llx)\n", reasons[i], asked, said);
+			if (asked == 0) {
+				break;
+			}
+		}
+		asked = scm("to ask for the bootloader at the next boot, one argument", SCM_CALL(1, 1), 1, 0x77665500u, 0, 0, 0, &said);
+		printf("mpss: imem: one argument: TrustZone says %d (its answer %#llx)\n", asked, said);
+		imem_boot_asked = true;
+	}
 	PE_parse_boot_argn("soc_ipa_stream", &ipa_stream, sizeof(ipa_stream));
 	PE_parse_boot_argn("soc_ipa_stream_uc", &ipa_stream_uc, sizeof(ipa_stream_uc));
 	PE_parse_boot_argn("soc_pas_mpss", &pas_mpss, sizeof(pas_mpss));

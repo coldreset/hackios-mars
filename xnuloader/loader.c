@@ -1130,7 +1130,7 @@ log_of_hung_kernel(const struct kernel_live *live, uint64_t slide)
 static void
 compose_live_log(const struct kernel_live *live, uint64_t slide)
 {
-	static const char sep[] = "\n== KERNEL LOG (the kernel is still running) ==\n";
+	static const char sep[] = "\n== KERNEL LOG (the kernel is still running, newest bytes only) ==\n";
 	const char *log = (const char *)(live->log + slide);
 	uint32_t len = *(volatile uint32_t *)(live->log_len + slide);
 	uint32_t ring_at = *(volatile uint32_t *)(live->log_ring_at + slide);
@@ -1161,9 +1161,11 @@ compose_live_log(const struct kernel_live *live, uint64_t slide)
 			total = live->log_ring;
 			from = (cap < total) ? (ring_at + total - cap) % total : ring_at;
 		}
+		int linear = (!wrapped || ring_at >= live->log_ring);
+
 		for (i = 0; i < total && n < room - 1; i++) {
-			uint64_t at = (from + i) % total;
-			uint64_t src = (!wrapped || ring_at >= live->log_ring) ? at : live->log_head + at;
+			uint64_t at = linear ? (from + i) : ((from + i) % total);
+			uint64_t src = linear ? at : live->log_head + at;
 			char c = log[src];
 
 			if (line == 0 && i + 25 <= total) {
@@ -1171,8 +1173,8 @@ compose_live_log(const struct kernel_live *live, uint64_t slide)
 				int same = 1;
 
 				for (unsigned k = 0; k < sizeof(noise) - 1; k++) {
-					uint64_t a2 = (from + i + k) % total;
-					uint64_t s2 = (!wrapped || ring_at >= live->log_ring) ? a2 : live->log_head + a2;
+					uint64_t a2 = linear ? (from + i + k) : ((from + i + k) % total);
+					uint64_t s2 = linear ? a2 : live->log_head + a2;
 
 					if (log[s2] != noise[k]) {
 						same = 0;
