@@ -162,6 +162,68 @@ replace_method(const char *class_name, const char *selector, uintptr_t expected,
 	return replace_method_of_kind('-', class_name, selector, expected, replacement);
 }
 
+/* ---- the time, under the camera's hole ------------------------------------------------------- */
+/*
+ * iOS lays the status bar out for a notch in the middle of the top edge: the clock sits in the left
+ * flank, about 27 points in from the edge, because the screen under the notch is not looked at.  This
+ * phone's front camera is a round hole at about 26 points, right where the clock is drawn, so the
+ * clock is never seen.  Nothing in the system knows about a hole off to the side -- the identity
+ * says "thin-bezel", which is the notch -- so the clock is moved here instead: after the status bar
+ * has laid itself out, every string view in that left flank is moved to the right of the hole.
+ */
+static void (*original_status_bar_layout)(id, SEL);
+
+typedef struct {
+	double x, y, width, height;
+} hakios_rect;                  /* CGRect, which this file does not link CoreGraphics to */
+
+static void
+move_left_flank(id view, double shift)
+{
+	const char *name = object_getClassName(view);
+
+	if (name != NULL && strcmp(name, "_UIStatusBarStringView") == 0) {
+		hakios_rect frame = ((hakios_rect (*)(id, SEL))objc_msgSend)(view, sel_registerName("frame"));
+
+		if (frame.x < 60.0 && frame.y < 44.0) {
+			frame.x += shift;
+			((void (*)(id, SEL, hakios_rect))objc_msgSend)(view, sel_registerName("setFrame:"), frame);
+		}
+	}
+	{
+		id children = ((id (*)(id, SEL))objc_msgSend)(view, sel_registerName("subviews"));
+		unsigned long count = ((unsigned long (*)(id, SEL))objc_msgSend)(children, sel_registerName("count"));
+		unsigned long i;
+
+		for (i = 0; i < count; i++) {
+			move_left_flank(((id (*)(id, SEL, unsigned long))objc_msgSend)(children,
+			    sel_registerName("objectAtIndex:"), i), shift);
+		}
+	}
+}
+
+static void
+status_bar_layout(id self, SEL selector)
+{
+	original_status_bar_layout(self, selector);
+	move_left_flank(self, 34.0);
+}
+
+static void
+status_bar_hook(void)
+{
+	Class cls = objc_getClass("_UIStatusBar");
+	Method method = cls ? class_getInstanceMethod(cls, sel_registerName("layoutSubviews")) : NULL;
+
+	if (method == NULL) {
+		say("hakios: no -[_UIStatusBar layoutSubviews]: the clock stays under the camera\n");
+		return;
+	}
+	original_status_bar_layout = (void (*)(id, SEL))method_getImplementation(method);
+	method_setImplementation(method, (IMP)status_bar_layout);
+	say("hakios: the status bar's left flank is moved right of the camera's hole\n");
+}
+
 /*
  * -[SBLockdownManager _setupActivationState] asks MobileActivation and keeps the answer in the
  * int at +8: 2 = activated, 1 = not, 3 = unknown; it stays 0 when there is no answer.
@@ -1612,6 +1674,7 @@ hakios_springboard_init(void)
 		    sysctl_int("kern.hakios.cellular_dbm"), sysctl_int("kern.hakios.cellular_radio"));
 	}
 	cellular_hook();
+	status_bar_hook();
 	say("hakios: battery UI: shows%% %s, set-shows%% %s, bolt %s, chargePercent %s, setChargePercent %s, lockscreen ring %s\n",
 	    original_battery_view_shows_percentage ? "ok" : "NO",
 	    original_battery_view_set_shows_percentage ? "ok" : "NO",

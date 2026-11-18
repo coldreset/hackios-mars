@@ -142,6 +142,12 @@ per transfer leaves the queue standing still.
   home-button model: no home indicator, and a swipe up from the bottom opens Control Center. The
   touch pipeline itself was never at fault -- the panel reports one finger from the bottom edge up
   the screen, and the driver posts it sample by sample.
+- **The clock is moved out from under the camera.** iOS lays the status bar out for a notch in the
+  middle of the top edge, so the clock sits in the left flank about 27 pt in; this phone's front
+  camera is a round hole in that same place and the clock was drawn underneath it. The identity
+  says `thin-bezel`, which is a notch, and nothing in the system describes a hole off to the side,
+  so `userland/src/inject_sb.c` installs `-[_UIStatusBar layoutSubviews]` and moves the string views
+  in that left flank 34 pt to the right after the bar has laid itself out.
 - **freedreno's binning path hangs the 3D core.** With GMEM rendering on, a draw never retires and
   the core stops (the CP sits in `CP_WAIT_FOR_IDLE`, the fence is never written); the driver then
   resets it, which shows up as 1-2 fps. The default is therefore sysmem (`FD_MESA_DEBUG=sysmem`,
