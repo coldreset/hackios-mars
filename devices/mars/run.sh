@@ -24,6 +24,10 @@ export DEVICE=mars
 # fb_hz and fb_ca_hz: the panel is driven at 120 Hz and CoreAnimation is asked for 240
 # (it draws at half of what it is told). Without the pair the display stays at 60.
 BASE="cpus=8 rd=md0 touchscreen=1 adsp=1 gpu=1 gl=1 adreno_nomeasure=1 cpufreq=1 sb_delay=600 fb_hz=120 fb_ca_hz=240"
+# A modem run must hand the modem the buffer the phone itself uses: Android's rmt_storage maps a UIO
+# device called "rmtfs" at 0xD6A00000, 0x300000 bytes. Anywhere else and the modem faults in its EFS code
+# and resets the machine (05:00, 19 Nov: the whole exchange completes at this address).
+MODEM_BUFFER="modem_buffer=0xd6a00000"
 EXTRA=${MARS_EXTRA:-}
 [ -n "$EXTRA" ] && BASE="$BASE $EXTRA"
 SECS=${1:-300}

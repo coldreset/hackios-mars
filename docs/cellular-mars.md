@@ -184,3 +184,31 @@ What is left, and the order to test it in:
    modem insists that both carry the same generation and we hand it a pair from two different
    generations, that is a plausible reason for it to die on the first valid read. Waiting past the
    144 s write before starting a run is the cheap half of this experiment.
+
+## The buffer address was the whole story (19 Nov, 01:00)
+
+The modem did not reset the phone because it disliked an answer. It reset the phone because the buffer we
+handed it was not a buffer its EFS code can use.
+
+`rmt_storage` on this phone maps a UIO device called `rmtfs`: physical **0xD6A00000**, size **0x300000** --
+exactly the 3,145,728 bytes the modem asks for in `ALLOC_BUFF`. We had been handing it `0xFB000000`, a hole in
+DRAM between the ramdisk and the resident image: writable, shared with the modem by TrustZone, and useless to
+the modem's EFS code, which faulted and took the machine down with it. Every observation that made this look
+like a protocol problem is explained by that: all zeros in the window survived (nothing to parse), a real IMGE
+header killed the machine (it parsed it), answering the first read and then freezing survived, answering the
+second did not, and serving fs1's bytes for fs2 did not help either -- the bytes were never the point.
+
+With 0xD6A00000 the exchange completes and the machine stays up (`logs/004228-run.log`):
+
+    mpss: rmtfs: the modem opens /boot/modem_fs1 (modemst1, 8388608 bytes): caller 1
+    mpss: rmtfs: the modem opens /boot/modem_fs2 (modemst2, 8388608 bytes): caller 2
+    mpss: rmtfs: the modem asks for a buffer of 3145728 bytes: given ours at 0xd6a00000
+    mpss: rmtfs: the modem reads 1 pieces of modemst1: served
+    mpss: rmtfs: the modem reads 1 pieces of modemst2: served
+    mpss: link: the read was of file 1 (count 1) from sector 2, 6142 sectors, at 0xd6a00400
+    mpss: link: rmtfs: 6 requests, 3 reads (6144 sectors), 0 writes, 0 refused
+    mpss: link: down; GLINK said 178 and heard 201 messages, QRTR sent 89 and received 75 datagrams
+
+What is left is the modem's own state: its entry still says 0x107 rather than "up", so DMS and NAS are not
+started. `devices/mars/run.sh` now carries `MODEM_BUFFER=modem_buffer=0xd6a00000` for every modem experiment,
+and the driver's default is that address.

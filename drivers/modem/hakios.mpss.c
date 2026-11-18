@@ -4244,7 +4244,10 @@ rmtfs_load(void)
  * no-map: nothing of ours uses it, and the CDSP is never started here), through an uncached
  * window, as the modem reads it.
  */
-#define RMTFS_BUFFER_PA_DEFAULT 0x9c700000ull   /* dt: a window into reserved-memory cdsp@... (the CDSP is not started here) */
+/* The phone's own rmtfs region: Android's rmt_storage maps a UIO device called "rmtfs" here, 0x300000
+   bytes, which is exactly the 3,145,728 the modem asks for. A hole in DRAM (0xFB000000) is not usable: the
+   modem faults in its EFS code and takes the machine down with it. */
+#define RMTFS_BUFFER_PA_DEFAULT 0xd6a00000ull   /* dt: a window into reserved-memory cdsp@... (the CDSP is not started here) */
 
 static bool
 rmtfs_buffer_make(void)
@@ -4481,6 +4484,17 @@ rmtfs_receive(__unused void *context, uint32_t node, uint32_t port, const void *
 		}
 		write = direction[0] != 0;
 		count = entries[0];
+		{
+			uint32_t mirror = 0;
+
+			/* (an experiment: every read served out of the first file, so the second answer carries bytes
+			   the modem has already taken once) */
+			if (!write && file != 0 && PE_parse_boot_argn("modem_rmtfs_mirror", &mirror, sizeof(mirror)) && mirror != 0) {
+				tell("mpss: rmtfs: %s's bytes served for %s (modem_rmtfs_mirror)\n", rmtfs_files[0].partition,
+				    rmtfs_files[file].partition);
+				file = 0;
+			}
+		}
 		{
 			/* (an experiment: the first request waited on, said aloud before and after, for the log to catch what follows) */
 			static bool first = true;
