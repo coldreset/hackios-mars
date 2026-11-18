@@ -339,6 +339,10 @@ static struct group_texture *group_of(struct eagl *e, GLuint texture);
 static __thread struct eagl *current;
 static struct eagl *contexts[8];
 static uint32_t slot_calls[SLOTS];
+static uint32_t slot_errors[SLOTS];     /* ... and of those calls, the ones that left an error behind */
+/* why a surface had to be copied rather than its memory used (surface_shared()): counted, so that the report says it */
+enum { refused_sharing, refused_invert, refused_alpha, refused_format, refused_plane, refused_part, refused_library, refused_kinds };
+static uint32_t refused_why[refused_kinds];
 static int check_errors = 1;            /* ask the library for an error after every call (the first frames) */
 static int share_surfaces = 1;          /* boot-arg glcopy=1: 0 */
 /*
@@ -406,6 +410,7 @@ eagl_leave(struct eagl *e, unsigned offset)
 	GLenum error;
 
 	if (check_errors && offset != 0x338 && (error = glGetError()) != 0) {
+		slot_errors[offset / 8]++;
 		if (e->errors++ < 60) {
 			say("hakios-gl: %s: error %#x\n", eagl_slot_name(offset), error);
 		}
@@ -511,6 +516,24 @@ summary(struct eagl *e)
 	for (unsigned offset = 8; offset < SLOTS * 8; offset += 8) {
 		if (slot_calls[offset / 8]) {
 			say("hakios-gl:   %-28s %u\n", eagl_slot_name(offset), slot_calls[offset / 8]);
+		}
+	}
+	if (e->refused) {
+		static const char *const why[refused_kinds] = { "sharing off", "turned over", "alpha first", "not BGRA bytes",
+		    "a plane", "a part of it", "the library refused" };
+
+		say("hakios-gl:   copies, by reason:");
+		for (unsigned i = 0; i < refused_kinds; i++) {
+			if (refused_why[i]) {
+				say(" %s %u;", why[i], refused_why[i]);
+			}
+		}
+		say("\n");
+	}
+	for (unsigned offset = 8; offset < SLOTS * 8; offset += 8) {
+		if (slot_errors[offset / 8]) {
+			say("hakios-gl:   %-28s %u error%s\n", eagl_slot_name(offset), slot_errors[offset / 8],
+			    slot_errors[offset / 8] == 1 ? "" : "s");
 		}
 	}
 }
@@ -647,20 +670,28 @@ surface_shared(struct eagl *e, struct image *image)
 {
 	IOSurfaceRef surface = image->surface;
 
-	if (!share_surfaces || image->invert || image->alpha_first || image->format != GL_BGRA || image->type != GL_UNSIGNED_BYTE ||
+	if (!share_surfaces || image->invert || image->alpha_first || image->format != GL_BGRA ||
+	    !(image->type == GL_UNSIGNED_BYTE || image->type == 0x8367u) /* GL_UNSIGNED_INT_8_8_8_8_REV: the same bytes */ ||
 	    image->plane != 0 || (size_t)image->width != IOSurfaceGetWidth(surface) ||
 	    (size_t)image->height != IOSurfaceGetHeight(surface) ||
 	    !hakios_gl_surface_texture(e->gl, IOSurfaceGetID(surface))) {
+		refused_why[!share_surfaces ? refused_sharing : image->invert ? refused_invert :
+		    image->alpha_first ? refused_alpha :
+		    (image->format != GL_BGRA || image->type != GL_UNSIGNED_BYTE) ? refused_format :
+		    image->plane != 0 ? refused_plane :
+		    ((size_t)image->width != IOSurfaceGetWidth(surface) ||
+		     (size_t)image->height != IOSurfaceGetHeight(surface)) ? refused_part : refused_library]++;
 		/* why a surface is copied rather than its memory used: the first ones of a run, for the copies to be made fewer */
 		if (e->refused < 40) {
-			say("hakios-gl: surface %u ('%.4s' %zu x %zu) copied, not shared: %s%s%s%s%s%s\n", IOSurfaceGetID(surface),
+			say("hakios-gl: surface %u ('%.4s' %zu x %zu) copied, not shared: %s%s%s%s%s%s (format %#x, type %#x)\n",
+			    IOSurfaceGetID(surface),
 			    (const char *)&(uint32_t){ OSSwapInt32(IOSurfaceGetPixelFormat(surface)) }, IOSurfaceGetWidth(surface),
 			    IOSurfaceGetHeight(surface), !share_surfaces ? "sharing off; " : "", image->invert ? "turned over; " : "",
 			    image->alpha_first ? "alpha first; " : "",
 			    image->format != GL_BGRA || image->type != GL_UNSIGNED_BYTE ? "not BGRA bytes; " : "",
 			    image->plane != 0 ? "a plane; " : "",
 			    (size_t)image->width != IOSurfaceGetWidth(surface) || (size_t)image->height != IOSurfaceGetHeight(surface) ?
-			    "a part of it; " : "(the library refused)");
+			    "a part of it; " : "(the library refused)", image->format, image->type);
 		}
 		e->refused++;
 		return false;
