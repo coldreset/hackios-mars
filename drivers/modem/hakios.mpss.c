@@ -2504,22 +2504,28 @@ ipa_hardware_init(void)
 	uint32_t value;
 
 	need(&ipa_regs);
+	tell("mpss: ipa: hardware 1: the QSB's outstanding counts\n");
 	/* QSB: 12 outstanding writes, 13 reads of 120 beats on the DDR master (ipa3_qmb_outstanding[IPA_4_11]) */
 	value = rd(ipa_regs.base + IPA_QSB_MAX_WRITES);
 	wr(ipa_regs.base + IPA_QSB_MAX_WRITES, (value & ~0xfu) | 12);
 	value = rd(ipa_regs.base + IPA_QSB_MAX_READS);
 	wr(ipa_regs.base + IPA_QSB_MAX_READS, (value & ~0x00ff000fu) | 13 | 120u << 16);
+	tell("mpss: ipa: hardware 2: QSB %#x %#x, now the Qtime timers\n", rd(ipa_regs.base + IPA_QSB_MAX_WRITES), rd(ipa_regs.base + IPA_QSB_MAX_READS));
 	/* Qtime: the divider off, the timestamps and pulse generators as Android leaves them, the divider 192 on */
 	wr(ipa_regs.base + IPA_TIMERS_XO_CLK_DIV_CFG, 0);
 	wr(ipa_regs.base + IPA_QTIME_TIMESTAMP_CFG, 0x180e8e);
 	wr(ipa_regs.base + IPA_TIMERS_PULSE_GRAN_CFG, 0x123);
 	wr(ipa_regs.base + IPA_TIMERS_XO_CLK_DIV_CFG, 0xbf);
 	wr(ipa_regs.base + IPA_TIMERS_XO_CLK_DIV_CFG, 0x800000bf);
+	tell("mpss: ipa: hardware 3: Qtime %#x %#x %#x, now COMP_CFG\n", rd(ipa_regs.base + IPA_TIMERS_XO_CLK_DIV_CFG),
+	    rd(ipa_regs.base + IPA_QTIME_TIMESTAMP_CFG), rd(ipa_regs.base + IPA_TIMERS_PULSE_GRAN_CFG));
 	/* COMP_CFG: GSI_MULTI_INORDER_RD_DIS and _WR_DIS */
 	value = rd(ipa_regs.base + IPA_COMP_CFG);
 	wr(ipa_regs.base + IPA_COMP_CFG, value | 1u << 7 | 1u << 8);
 	/* dynamic clock division: enter idle after 256, no constant non-idle */
 	wr(ipa_regs.base + IPA_IDLE_INDICATION_CFG, 256);
+	tell("mpss: ipa: hardware 4: COMP_CFG %#x idle %#x, now the resource groups\n",
+	    rd(ipa_regs.base + IPA_COMP_CFG), rd(ipa_regs.base + IPA_IDLE_INDICATION_CFG));
 	/* the resource groups: the sources' five types for group 0 alone; the destinations' data sectors 3 for group 0
 	 * and 25 for group 2 (DRB_IP), DPS DMARs 2 for group 0 */
 	for (unsigned n = 0; n < 5; n++) {
