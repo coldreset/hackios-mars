@@ -521,3 +521,19 @@ So the clock vote is not the gate on those writes. The candidates that are left,
    external abort, which is what a data abort on a mapped device register looks like;
 2. the IPA's own power state ("IPA_PS"), which in Android's driver is entered through `ipa3_uc_interface_init()` --
    the direct-access pair at `0x4000 + 4n` -- and not by writing the register space at all.
+
+## The IPA's block was never mapped (19 Nov, 07:50)
+
+The panic in `ipa_hardware_init()` carried its address in `x0`: `0x0000000001e00074`. That is a physical address --
+our own boot-arg override had been writing the physical value straight into the block's mapped base:
+
+    ipa_regs.base = ipa_regs_base;      /* 0x1e00000 */
+
+so `need()` saw a base that was already set and never mapped the window, and every register access went to physical
+`0x1e00074` with the MMU on. That is the data abort, and it is why the offsets, the vote and the order never changed
+anything.
+
+The override now goes into `phys` and leaves `base` at zero, so the window is mapped like every other block. With that
+one line the failure changes shape: the run no longer aborts, it **hangs** -- the write reaches the IPA and the block
+never answers, which is what an AXI access to an unclocked or unpowered IPA looks like. So the next question is the
+IPA's clock/power, and now the experiment is honest: a write either lands or the bus stops.

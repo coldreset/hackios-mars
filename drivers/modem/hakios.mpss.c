@@ -1465,7 +1465,7 @@ rpmh_command(const char *name, uint32_t value)
 static bool
 ipa_clock(bool on)
 {
-	bool ok = rpmh_command("IP0", BCM_VOTE(on, 0));   /* a clock's vote carries no level: enable and commit */
+	bool ok = rpmh_command("IP0", BCM_VOTE(on, on ? 1u : 0u));   /* one resource, as Linux's rpmh clock driver does */
 
 	/*
 	 * The buses on the IPA's way to memory, voted for as Android's driver does while the IPA is on (its
@@ -2810,9 +2810,11 @@ ipa_firmware_load(void)
 
 	PE_parse_boot_argn("modem_ipa_fw_at", &ipa_fw_memory, sizeof(ipa_fw_memory));
 	PE_parse_boot_argn("modem_ipa_regs", &ipa_regs_base, sizeof(ipa_regs_base));
-	ipa_regs.base = ipa_regs_base;
+	ipa_regs.phys = ipa_regs_base;
+	ipa_regs.base = 0;                       /* so need() maps it: a physical address here is a data abort */
 	PE_parse_boot_argn("modem_ipa_sram", &ipa_sram_base, sizeof(ipa_sram_base));
-	ipa_sram.base = ipa_sram_base;
+	ipa_sram.phys = ipa_sram_base;
+	ipa_sram.base = 0;
 	ipa_fw_size = ipa_fw_memory == 0x8b700000u ? 0x1a000u : 0xa000u;
 	{
 		uint64_t given = 0;
