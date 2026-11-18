@@ -2310,7 +2310,11 @@ static uint32_t ipa_fw_memory = 0x8b710000u, ipa_fw_size = 0xa000u;
  * response -- 1 once it has booted --, event, error, hardware state, interface version) and GSI's
  * status (bit 0: the GSI firmware is enabled) and error log, for our execution environment.
  */
-static struct block ipa_regs = { "ipa", 0x01e40000, 0x1000 };
+/* Android's device tree has the IPA itself at 1e00000 ("ipa 1e00000.qcom,ipa:ipa_smmu_ap: Adding to iommu group 44" in
+ * its dmesg). The 1e40000 this used to point at is the IPA's own SRAM window: reads there stall the bus (nothing
+ * answers), which is why ipa_status() hung every time it was allowed to run. modem_ipa_regs overrides it. */
+static uint32_t ipa_regs_base = 0x01e00000u;
+static struct block ipa_regs = { "ipa", 0x01e00000, 0x4000 };
 static struct block ipa_sram = { "ipa-shared", 0x01e50000, 0x4000 };  /* the local memory: 0x3000 bytes (SHARED_MEM_SIZE) */
 static struct block gsi_ee0 = { "gsi-ee0", 0x01e16000, 0x1000 };
 
@@ -2696,6 +2700,8 @@ ipa_firmware_load(void)
 	bool ok = false;
 
 	PE_parse_boot_argn("modem_ipa_fw_at", &ipa_fw_memory, sizeof(ipa_fw_memory));
+	PE_parse_boot_argn("modem_ipa_regs", &ipa_regs_base, sizeof(ipa_regs_base));
+	ipa_regs.base = ipa_regs_base;
 	ipa_fw_size = ipa_fw_memory == 0x8b700000u ? 0x1a000u : 0xa000u;
 	{
 		uint64_t given = 0;
@@ -2885,6 +2891,19 @@ ipa_firmware_load(void)
 	sleep_ms(50);
 	if (!option("modem_ipa_quiet")) {
 		ipa_status("after its firmware's start");
+	}
+	if (option("modem_ipa_uc_dump")) {
+		/*
+		 * The microcontroller's own area of the IPA's local memory: its shared words at 0 and its information at
+		 * 0x80. Android waits on the uC through an interrupt (`ipa3_uc_init`); without that interrupt, whether it
+		 * ever says it is up can only be seen here.
+		 */
+		need(&ipa_sram);
+		for (uint32_t at = 0; at < 0x90; at += 16) {
+			tell("mpss: %u: the IPA's uC words +%#04x: %08x %08x %08x %08x\n", step, at,
+			    rd(ipa_sram.base + ipa_mem_offset + at + 0), rd(ipa_sram.base + ipa_mem_offset + at + 4),
+			    rd(ipa_sram.base + ipa_mem_offset + at + 8), rd(ipa_sram.base + ipa_mem_offset + at + 12));
+		}
 	}
 	if (!option("modem_ipa_raw")) {
 		/* this processor's own channels and endpoints, and the IPA's tables, before the modem (hakios.ipa.c); then en1 on them */
