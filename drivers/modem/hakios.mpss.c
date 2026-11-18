@@ -521,7 +521,12 @@ static void
 need(struct block *b)
 {
 	if (b->base == 0) {
-		b->base = ml_io_map(b->phys, b->size);
+		b->base = ml_io_map_unmappable(b->phys, b->size, VM_WIMG_IO);
+
+		/* ml_io_map hands back the physical address on this kernel, and a write through it is a data abort
+		 * (that is what killed every run at ipa_memory_init). Say what came back, so a window that did not
+		 * really map is visible instead of silent. */
+		printf("mpss: %s: %#x + %#x maps to %#lx\n", b->name, b->phys, b->size, (unsigned long)b->base);
 	}
 }
 
