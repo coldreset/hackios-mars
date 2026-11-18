@@ -3356,6 +3356,18 @@ glink_reset(void)
 	}
 }
 
+static bool
+glink_ours_sane(void)
+{
+	return glink.ours_size != 0 && glink.ours < SMEM_SIZE && glink.ours_size <= SMEM_SIZE - glink.ours;
+}
+
+static bool
+glink_theirs_sane(void)
+{
+	return glink.theirs_size != 0 && glink.theirs < SMEM_SIZE && glink.theirs_size <= SMEM_SIZE - glink.theirs;
+}
+
 static uint32_t
 glink_waiting(void)
 {
@@ -3370,7 +3382,13 @@ glink_waiting(void)
 static void
 glink_peek(void *to, uint32_t offset, uint32_t count)
 {
-	uint32_t at = (smem_word(glink.descriptor + GLINK_THEIR_TAIL) + offset) % glink.theirs_size;
+	uint32_t at;
+
+	if (!glink_theirs_sane()) {
+		memset(to, 0, count);
+		return;
+	}
+	at = (smem_word(glink.descriptor + GLINK_THEIR_TAIL) + offset) % glink.theirs_size;
 
 	for (uint32_t i = 0; i < count; i++) {
 		((uint8_t *)to)[i] = smem[glink.theirs + (at + i) % glink.theirs_size];
@@ -3402,7 +3420,17 @@ glink_put(const void *first, uint32_t first_length, const void *second, uint32_t
 	uint32_t head = smem_word(glink.descriptor + GLINK_OUR_HEAD), length = first_length + second_length;
 	uint32_t padded = (length + 7) & ~7u;
 
-	if (!glink.up || glink_room() < padded) {
+	if (!glink.up || !glink_ours_sane()) {
+		static bool told;
+
+		if (!told) {
+			told = true;
+			printf("mpss: %u: glink: our queue is not where the descriptor says (%#x + %u); nothing sent\n",
+			    step, glink.ours, glink.ours_size);
+		}
+		return false;
+	}
+	if (glink_room() < padded) {
 		return false;
 	}
 	for (uint32_t i = 0; i < padded; i++) {

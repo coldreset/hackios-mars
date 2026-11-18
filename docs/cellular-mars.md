@@ -457,3 +457,18 @@ so `glink_put` is handed a channel that was never opened and computes an address
 
 So it is not the stack after all: it is that step 7 sends on a channel whose descriptor is empty. The step has to
 check the descriptor before sending, or the send has to move to the step that opens the channel (step 9).
+
+### Where it stands at 07:05: the same step, and the guard's line never printed
+
+Four runs, all ending the same way: step 6 makes the IPA's item (497) and prints the link's descriptor
+(`0x809df030`, every index zero), step 7 reports `the modem's words: item 435 is not there (at 0, 0 bytes)`, loads the
+IPA's image, and then the kernel faults inside `_glink_put` with `_dsp_listen` as the caller.
+
+Two things were added and neither moved it: `smem_peek()`'s range check is 64-bit now (a wrapped offset used to pass
+it), and `glink_put()` checks that `glink.ours`/`glink.ours_size` are inside the shared memory before writing. The
+guard's own line -- `glink: our queue is not where the descriptor says` -- never appeared, which says the fault is
+not in the queue write but in a read that happens before it, most likely `smem_word(glink.descriptor + ...)` with a
+descriptor that is not the one step 6 printed.
+
+Next: print `glink.descriptor`, `glink.ours`, `glink.ours_size`, `glink.theirs` and `glink.up` immediately before the
+send that step 7 makes, so the next run says which of them is the odd one out.
