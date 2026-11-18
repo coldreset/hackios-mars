@@ -2512,26 +2512,22 @@ ipa_hardware_init(void)
 	need(&ipa_regs);
 	tell("mpss: ipa: hardware 1: the QSB's outstanding counts\n");
 	/* QSB: 12 outstanding writes, 13 reads of 120 beats on the DDR master (ipa3_qmb_outstanding[IPA_4_11]) */
-	value = rd(ipa_regs.base + IPA_QSB_MAX_WRITES);
-	wr(ipa_regs.base + IPA_QSB_MAX_WRITES, (value & ~0xfu) | 12);
-	value = rd(ipa_regs.base + IPA_QSB_MAX_READS);
-	wr(ipa_regs.base + IPA_QSB_MAX_READS, (value & ~0x00ff000fu) | 13 | 120u << 16);
-	tell("mpss: ipa: hardware 2: QSB %#x %#x, now the Qtime timers\n", rd(ipa_regs.base + IPA_QSB_MAX_WRITES), rd(ipa_regs.base + IPA_QSB_MAX_READS));
+	/* no reads: this block answers writes and never answers reads */
+	wr(ipa_regs.base + IPA_QSB_MAX_WRITES, 12);
+	wr(ipa_regs.base + IPA_QSB_MAX_READS, 13 | 120u << 16);
+	tell("mpss: ipa: hardware 2: QSB written, now the Qtime timers\n");
 	/* Qtime: the divider off, the timestamps and pulse generators as Android leaves them, the divider 192 on */
 	wr(ipa_regs.base + IPA_TIMERS_XO_CLK_DIV_CFG, 0);
 	wr(ipa_regs.base + IPA_QTIME_TIMESTAMP_CFG, 0x180e8e);
 	wr(ipa_regs.base + IPA_TIMERS_PULSE_GRAN_CFG, 0x123);
 	wr(ipa_regs.base + IPA_TIMERS_XO_CLK_DIV_CFG, 0xbf);
 	wr(ipa_regs.base + IPA_TIMERS_XO_CLK_DIV_CFG, 0x800000bf);
-	tell("mpss: ipa: hardware 3: Qtime %#x %#x %#x, now COMP_CFG\n", rd(ipa_regs.base + IPA_TIMERS_XO_CLK_DIV_CFG),
-	    rd(ipa_regs.base + IPA_QTIME_TIMESTAMP_CFG), rd(ipa_regs.base + IPA_TIMERS_PULSE_GRAN_CFG));
-	/* COMP_CFG: GSI_MULTI_INORDER_RD_DIS and _WR_DIS */
-	value = rd(ipa_regs.base + IPA_COMP_CFG);
-	wr(ipa_regs.base + IPA_COMP_CFG, value | 1u << 7 | 1u << 8);
+	tell("mpss: ipa: hardware 3: Qtime written, now COMP_CFG\n");
+	/* COMP_CFG: GSI_MULTI_INORDER_RD_DIS and _WR_DIS, and nothing else is set in a fresh block */
+	wr(ipa_regs.base + IPA_COMP_CFG, 1u << 7 | 1u << 8);
 	/* dynamic clock division: enter idle after 256, no constant non-idle */
 	wr(ipa_regs.base + IPA_IDLE_INDICATION_CFG, 256);
-	tell("mpss: ipa: hardware 4: COMP_CFG %#x idle %#x, now the resource groups\n",
-	    rd(ipa_regs.base + IPA_COMP_CFG), rd(ipa_regs.base + IPA_IDLE_INDICATION_CFG));
+	tell("mpss: ipa: hardware 4: COMP_CFG written, now the resource groups\n");
 	/* the resource groups: the sources' five types for group 0 alone; the destinations' data sectors 3 for group 0
 	 * and 25 for group 2 (DRB_IP), DPS DMARs 2 for group 0 */
 	for (unsigned n = 0; n < 5; n++) {
@@ -2544,12 +2540,9 @@ ipa_hardware_init(void)
 	/* the default route as Android's: not disabled, default pipe 9, header table 1, fragments to pipe 9, header retained */
 	wr(ipa_regs.base + IPA_ROUTE, 0x1120052);
 	settle();
-	printf("mpss: ipa: the hardware set up as Android's driver does before the modem: QSB %#x %#x, COMP_CFG %#x, idle %#x, route %#x, "
-	    "source group 0 %u/%u/%u/%u/%u, destination sectors %#x %#x\n", rd(ipa_regs.base + IPA_QSB_MAX_WRITES),
-	    rd(ipa_regs.base + IPA_QSB_MAX_READS), rd(ipa_regs.base + IPA_COMP_CFG), rd(ipa_regs.base + IPA_IDLE_INDICATION_CFG),
-	    rd(ipa_regs.base + IPA_ROUTE), rd(ipa_regs.base + IPA_SRC_RSRC_GRP_01(0)) & 0x3f, rd(ipa_regs.base + IPA_SRC_RSRC_GRP_01(1)) & 0x3f,
-	    rd(ipa_regs.base + IPA_SRC_RSRC_GRP_01(2)) & 0x3f, rd(ipa_regs.base + IPA_SRC_RSRC_GRP_01(3)) & 0x3f,
-	    rd(ipa_regs.base + IPA_SRC_RSRC_GRP_01(4)) & 0x3f, rd(ipa_regs.base + IPA_DST_RSRC_GRP_01(0)), rd(ipa_regs.base + IPA_DST_RSRC_GRP_23(0)));
+	printf("mpss: ipa: the hardware set up as Android's driver does before the modem: QSB 12/%u, COMP_CFG written, idle 256, "
+	    "route %#x, source group 0 %u/%u/%u/%u/%u, destination sectors 3/25/2\n", 13 | 120u << 16, IPA_ROUTE,
+	    source[0], source[1], source[2], source[3], source[4]);
 }
 
 
