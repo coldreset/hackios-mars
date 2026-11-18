@@ -2315,6 +2315,10 @@ static uint32_t ipa_fw_memory = 0x8b710000u, ipa_fw_size = 0xa000u;
  * answers), which is why ipa_status() hung every time it was allowed to run. modem_ipa_regs overrides it. */
 static uint32_t ipa_regs_base = 0x01e00000u;
 static struct block ipa_regs = { "ipa", 0x01e00000, 0x4000 };
+/* The local memory's window. 0x1e50000 is what the reference device tree pairs with the IPA's registers; on this
+ * phone it may be elsewhere, and a read of a window nothing answers stalls the bus (no fault, no return), so it is
+ * a boot argument: modem_ipa_sram=ADDRESS. */
+static uint32_t ipa_sram_base = 0x01e50000u;
 static struct block ipa_sram = { "ipa-shared", 0x01e50000, 0x4000 };  /* the local memory: 0x3000 bytes (SHARED_MEM_SIZE) */
 static struct block gsi_ee0 = { "gsi-ee0", 0x01e16000, 0x1000 };
 
@@ -2323,6 +2327,15 @@ ipa_status(const char *when)
 {
 	uint32_t shared, uc0, uc3, uc5, uc7, uc8, gsi, error;
 
+	/* modem_ipa_status_off: 1 leaves out the read taken before the firmware starts (the registers do not answer
+	 * until TrustZone has started the microcontroller and its clock is on: a read there stalls the bus),
+	 * 2 leaves out every read. */
+	static unsigned status_off;
+	PE_parse_boot_argn("modem_ipa_status_off", &status_off, sizeof(status_off));
+	if (status_off >= 2 || (status_off == 1 && !ipa_loaded)) {
+		printf("mpss: ipa: %s: the status is not read (%u: %s)\n", when, status_off, status_off >= 2 ? "never" : "not before its start");
+		return;
+	}
 	need(&ipa_regs);
 	need(&ipa_sram);
 	need(&gsi_ee0);
@@ -2702,6 +2715,8 @@ ipa_firmware_load(void)
 	PE_parse_boot_argn("modem_ipa_fw_at", &ipa_fw_memory, sizeof(ipa_fw_memory));
 	PE_parse_boot_argn("modem_ipa_regs", &ipa_regs_base, sizeof(ipa_regs_base));
 	ipa_regs.base = ipa_regs_base;
+	PE_parse_boot_argn("modem_ipa_sram", &ipa_sram_base, sizeof(ipa_sram_base));
+	ipa_sram.base = ipa_sram_base;
 	ipa_fw_size = ipa_fw_memory == 0x8b700000u ? 0x1a000u : 0xa000u;
 	{
 		uint64_t given = 0;

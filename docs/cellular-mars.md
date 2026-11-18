@@ -312,3 +312,27 @@ Until that is ported, the configuration that works is the one without the IPA at
 
 which takes the modem online and registers it on a network, and loses it twenty seconds later to the assert
 quoted above (`logs/021801-run.log`).
+
+## The IPA's registers do not answer, before or after its firmware starts (19 Nov, 03:45)
+
+Three runs settled this, each with the machine's own behaviour as the evidence:
+
+* `modem_ipa_status_off=2` (no read at all) + the firmware started: the run gets through step 8 and returns
+  (`logs/032121-run.log`, `step 8: done`, and `mpss: ipa: at the end: the SMMU has refused the IPA nothing`).
+* the same run with the status read left in: **the machine hangs** (`xl: no answer`).
+* a split gate (`modem_ipa_status_off=1`, which leaves out only the read taken *before* the firmware starts):
+  the read after `SCM_PAS_AUTH_AND_RESET` hangs too (`logs/033537-run.log` is the last good one; the run after
+  it wrote no log at all).
+
+So the IPA's register window at `1e00000` (the address its own device tree gives it: Android's dmesg has
+`ipa 1e00000.qcom,ipa:ipa_smmu_ap`) does not answer a read even with its microcontroller running. Writes do not
+wait for an answer, which is why every "table written" line in earlier runs proved nothing: they were carried out
+on a block nobody was serving.
+
+That is the whole of the remaining cellular work's first step: **make the application processor's access to the
+IPA's block work.** Android's driver does `clk_prepare_enable(ipa_clk)` before its first register read; ours votes
+for the BCM `IP0` (`ipa_clock()`, `BCM_VOTE(on, 0x3fff)`) and the RSC command completes, but the block still does
+not answer, so either that name is not the IPA's clock, or a clock's vote is not a 14-bit level (`RPMH_ARC_CLK_ON`
+is one bit, not `0x3fff`). Until that is right, nothing that needs the IPA -- `INIT_DRIVER`, the GSI channels, the
+microcontroller's mailbox -- can be done at all, and the modem will keep asserting with
+`Failed to initialize GSI channel: CHID 1 IPA EPID 6 errval 5`.
