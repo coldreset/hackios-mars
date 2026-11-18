@@ -5037,6 +5037,73 @@ fb_command(char *cmd)
 				splash_redraw();
 			}
 			fb_reply("OKAY", "menu");
+		} else if (starts_with(cmd, "oem logtail")) {
+			/*
+			 * "oem logtail [hex bytes]": the end of the log and nothing else. One 192 KB fetch
+			 * parks the command channel for good (18 November); 2 KB does not, so this is what
+			 * a poll during a run can afford -- and a run that hangs still leaves its last words.
+			 */
+			uint64_t want = 4096;
+			const char *arg = cmd + 11;   /* past "oem logtail" */
+
+			while (*arg == ' ') {
+				arg++;
+			}
+			if (*arg != '\0') {
+				want = 0;
+				for (; *arg; arg++) {
+					unsigned digit;
+
+					if (*arg >= '0' && *arg <= '9') {
+						digit = (unsigned)(*arg - '0');
+					} else if (*arg >= 'a' && *arg <= 'f') {
+						digit = (unsigned)(*arg - 'a' + 10);
+					} else if (*arg >= 'A' && *arg <= 'F') {
+						digit = (unsigned)(*arg - 'A' + 10);
+					} else {
+						break;
+					}
+					want = want * 16 + digit;
+				}
+			}
+			if (want == 0) {
+				want = 4096;
+			}
+			if (want > 8192) {
+				want = 8192;
+			}
+			/* A kernel is running: its own ring is what a tail must show, never the loader's log. */
+			if (busy && running_live != NULL) {
+				compose_live_log(running_live, running_slide);
+			} else if (!log_has_kernel) {
+				compose_logs(NULL, 0);
+			}
+			{
+				const char *base = out_buf;
+				uint64_t total = staged_total;
+
+				if (total > 192u * 1024u) {
+					base += total - 192u * 1024u;
+					total = 192u * 1024u;
+				}
+				if (total > want) {
+					base += total - want;
+					total = want;
+				}
+				if (total == 0) {
+					static const char eof = '\n';
+
+					staged_data = &eof;
+					staged_len = 1;
+				} else {
+					staged_data = base;
+					staged_len = total;
+				}
+			}
+			if (staged_len > 32767) {
+				staged_len = 32767;
+			}
+			fb_reply("OKAY", "");
 		} else if (starts_with(cmd, "oem log")) {
 			/*
 			 * "oem log [hex offset]": the stock fastboot's get_staged stops at 32767 bytes, so the

@@ -297,7 +297,12 @@ power_thread(void *arg, __unused wait_result_t result)
 #define FIFO_WORDS_MSK          0x1ffffffu
 #define SE_UART_LOOPBACK_CFG    0x274
 #define UART_STOP_READ_OPCODE   (1u << 28)
-#define UART_PACKING_CFG0       0xfu
+/* The console engine at 0x98c000 prints this log, so its configuration is known to work here. Read
+   on an earlier round: 0x260 = 0x4380e, 0x264 = 0xc3e0e, 0x268 = 8, 0x28c = 8, 0x48 = 0x41. */
+#define UART_PACKING_CFG0       0x4380eu
+#define UART_PACKING_CFG1       0xc3e0eu
+#define UART_TX_WATERMARK_CONSOLE 8u
+#define UART_RX_WATERMARK_CONSOLE 8u
 
 /* GCC's QUPV3 wrapper 2: core, both AHB clocks, the 2x core and SE 4, all in one register */
 #define GCC_QUPV3_WRAP2_GATES   0x52010
@@ -370,9 +375,9 @@ uart_init(void)
 	wr(se + SE_FORCE_DEFAULT, FORCE_DEFAULT);
 
 	wr(se + SE_TX_PACKING_CFG0, UART_PACKING_CFG0);
-	wr(se + SE_TX_PACKING_CFG1, 0);
+	wr(se + SE_TX_PACKING_CFG1, UART_PACKING_CFG1);
 	wr(se + SE_RX_PACKING_CFG0, UART_PACKING_CFG0);
-	wr(se + SE_RX_PACKING_CFG1, 0);
+	wr(se + SE_RX_PACKING_CFG1, UART_PACKING_CFG1);
 	wr(se + SE_TX_TRANS_CFG, 2);	/* no flow control: the chip's RTS is not wired here */
 	wr(se + SE_TX_PARITY_CFG, 0);
 	wr(se + SE_RX_TRANS_CFG, 0);
@@ -380,7 +385,7 @@ uart_init(void)
 	wr(se + SE_TX_WORD_LEN, 8);
 	wr(se + SE_RX_WORD_LEN, 8);
 	wr(se + SE_TX_STOP_BIT_LEN, 0);
-	wr(se + SE_RX_WATERMARK, 1);
+	wr(se + SE_RX_WATERMARK, UART_RX_WATERMARK_CONSOLE);
 	wr(se + SE_RX_RFR_WATERMARK, 8);
 }
 
@@ -414,7 +419,7 @@ uart_send_raw(const uint8_t *bytes, unsigned length)
 {
 	/* U-Boot's way, without the interrupt state: the engine takes the bytes after the command is given, and the
 	   interrupt registers (which the abort sequence found unreadable) are left alone. */
-	wr(se + SE_TX_WATERMARK, 2);
+	wr(se + SE_TX_WATERMARK, UART_TX_WATERMARK_CONSOLE);
 	wr(se + SE_TX_TRANS_LEN, length);
 	/* The command carries its length: M_CMD0 is (length << 2) | opcode, as U-Boot's
 	   geni_se_setup_m_cmd writes it. Without it the engine is asked to send nothing. */
@@ -430,7 +435,7 @@ static bool
 uart_send(const uint8_t *bytes, unsigned length)
 {
 	for (unsigned i = 0; i < length; i++) {
-		wr(se + SE_TX_WATERMARK, 2);
+		wr(se + SE_TX_WATERMARK, UART_TX_WATERMARK_CONSOLE);
 		wr(se + SE_TX_TRANS_LEN, 1);
 		wr(se + SE_M_CMD0, (1u << M_CMD_PARAMS_SHFT) | UART_START_TX_OPCODE);
 		if (!uart_wait(se, SE_M_IRQ_STATUS, M_TX_FIFO_WATERMARK_EN, M_TX_FIFO_WATERMARK_EN, 50)) {
@@ -858,6 +863,26 @@ uart_after_power(void)
 			say("bt: uart: 37b. %u byte(s) after the EDL reset\n", got);
 		}
 		wr(se + SE_S_CMD0, UART_STOP_READ_OPCODE);
+		return;
+	}
+	if (bt_dry == 40) {
+		/* Read-only, and only our engine: the console's numbers are baked in from the level 25 read,
+		   because touching the console's registers again would take this log away with it. */
+		static const struct { uint32_t at, theirs; } reference[] = {
+			{ 0x0048, 0x41 }, { 0x004c, 0x41 }, { 0x025c, 0x02 }, { 0x0260, 0x4380e },
+			{ 0x0264, 0xc3e0e }, { 0x0268, 0x08 }, { 0x0270, 0x13 }, { 0x0284, 0x4380e },
+			{ 0x0288, 0xc3e0e }, { 0x028c, 0x08 },
+		};
+
+		say("bt: uart: 40. our engine alone, %u registers against the console's\n",
+		    (unsigned)(sizeof(reference) / sizeof(reference[0])));
+		for (unsigned i = 0; i < sizeof(reference) / sizeof(reference[0]); i++) {
+			say("bt: uart: 40. %#04x: ours %#x, the console had %#x\n", reference[i].at,
+			    rd(se + reference[i].at), reference[i].theirs);
+		}
+		say("bt: uart: 40. loopback cfg %#x, if disable %#x, status %#x, ser_m %#x, ser_s %#x\n",
+		    rd(se + SE_UART_LOOPBACK_CFG), rd(se + SE_IF_DISABLE_RO), rd(se + SE_STATUS),
+		    rd(se + SE_SER_M_CLK_CFG), rd(se + SE_SER_S_CLK_CFG));
 		return;
 	}
 	if (bt_dry == 36) {

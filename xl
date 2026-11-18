@@ -162,6 +162,17 @@ enter() {
 	echo "xl: loader did not come up on USB (state: $(state))"; return 1
 }
 
+tail_log() { # tail_log <file>: the end of the log, cheaply, while the kernel runs
+	local piece staged
+	fb oem logtail 800 >/dev/null 2>&1 || return 1
+	rm -f "$1.part"
+	# fastboot is a Windows binary: "/mnt/d/..." cannot be opened, "D:\\..." can
+	staged=$(wslpath -w "$1.part" 2>/dev/null || printf '%s' "$1.part")
+	FB_TIMEOUT=20 fb get_staged "$staged" >/dev/null 2>&1 || return 1
+	[ -s "$1.part" ] || return 1
+	tr -d '\0' < "$1.part" >> "$1"
+}
+
 fetch_log() { # fetch_log <file>
 	# The stock fastboot's get_staged stops at 32767 bytes (it is what the loader's "oem log <hex
 	# offset>" exists for): ask for the log piece by piece until a short piece arrives.
@@ -391,6 +402,8 @@ ramdisk) ramdisk "$2" ;;
 run) if [ -n "$XL_PARK" ]; then run "oem run park${2:+ $2}" "run${2:+-cp$2}"; else run "oem run $2" "run${2:+-cp$2}"; fi ;;
 selftest) run "oem selftest" selftest ;;
 log) enter && fb oem log >/dev/null && fetch_log logs/loader.log && cat logs/loader.log ;;
+tail) # the last bytes of the running kernel's log: xl tail <file>
+	tail_log "${2:-/tmp/xl-tail.log}" ;;
 stop) not_anothers_run stop && fb oem stop | grep -q OKAY && echo "xl: asked the kernel to come back" ;;
 memmap) enter && fb oem memmap >/dev/null && fb oem log >/dev/null && fetch_log logs/loader.log && sed -n '/^memory map/,$p' logs/loader.log ;;
 hang) enter && fb oem hang; echo "xl: waiting for the watchdog..."; t0=$(date +%s); wait_for android 150 && echo "xl: back in Android after $(( $(date +%s) - t0 )) s" || echo "xl: not back (state: $(state))" ;;
