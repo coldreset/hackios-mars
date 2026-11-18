@@ -164,14 +164,16 @@ per transfer leaves the queue standing still.
   charger protocols this boot chain does not have, so `battery=1` reads nothing; with `adsp=1` the DSP's
   battery manager answers over `PMIC_RTR_ADSP_APPS` (`adsp: battmgr: the DSP says: capacity ... uV, uA,
   temperature ...`) and the percentage follows it.
-- **The buttons are seen by the driver but do nothing yet.** Presses and releases (with their
-  duration) are logged, and userland turns them into HID consumer events, but neither the lock nor
-  the volume keys have an effect on the system. For the volume keys the press is not the missing
-  part: `drivers/input/hakios.buttons.c` reads them (it is on with the touch screen, `buttons=0` turns
-  it off) and `userland/src/inject.c` posts page 0x0C usages 0xE9 and 0xEA through the virtual HID
-  service. What does not happen is the system's side of it -- the volume HUD and whoever owns the
-  audio route (`AVSystemController` through mediaremoted) never react, which is the same gap as the
-  lock button's.
+- **The volume keys are read but do not change the volume.** All three keys are read
+  (`drivers/input/hakios.buttons.c`, on with the touch screen, `buttons=0` turns it off): a run's log
+  has `buttons: volume down PRESSED at 294.740 s ... after 221 ms` and the same for volume up and for
+  power. The power key's **effect** works (the screen locks: userland publishes it through
+  `com.hakios.button.lock`, `userland/src/inject.c`), while the volume keys' does not: the same file
+  posts page 0x0C usages 0xE9 and 0xEA as keyboard events on the virtual HID service, and neither the
+  volume HUD nor the audio route (`AVSystemController`, `mediaremoted`) reacts. So the press and the
+  event are there and the missing part is on the system's side -- most likely the virtual service's
+  report descriptor does not declare the consumer collection, so the events are dispatched but match
+  nothing. To be looked at when it is convenient; it is not on the critical path.
 - **A few pages of Settings exit at once**: wallpaper, Emergency SOS, software update. Wallpaper is
   killed by RunningBoard (`reason namespace 15`) while the poster extension never starts; the SOS
   page draws coloured boxes. Both are tracked in the project's problem list.
