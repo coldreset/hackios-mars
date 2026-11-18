@@ -142,6 +142,12 @@ per transfer leaves the queue standing still.
   home-button model: no home indicator, and a swipe up from the bottom opens Control Center. The
   touch pipeline itself was never at fault -- the panel reports one finger from the bottom edge up
   the screen, and the driver posts it sample by sample.
+- **CoreAnimation draws 60 frames a second and telling it 240 does not change that.** The framebuffer
+  hands the panel's rate to CoreAnimation (`fb_hz`, 120) and CoreAnimation draws at half of what it is
+  told; `fb_ca_hz=240` was tried on 18 November and the scrolling in Settings looked the same
+  (`MARS_EXTRA='fb_ca_hz=240' devices/mars/run.sh`). A frame costs 2.8 to 4.5 ms to hand over and draw
+  with no GL errors, so the frame rate is not the renderer's doing: measure the intervals
+  (`tools/frames.py`) before changing anything else.
 - **The clock is moved out from under the camera.** iOS lays the status bar out for a notch in the
   middle of the top edge, so the clock sits in the left flank about 27 pt in; this phone's front
   camera is a round hole in that same place and the clock was drawn underneath it. The identity

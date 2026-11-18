@@ -14,11 +14,16 @@
 #
 #   ./devices/mars/run.sh --check    verify only
 #   ./devices/mars/run.sh [seconds]  verify, then run (default 300 s)
+#
+# MARS_EXTRA adds switches for one experiment without editing the line above:
+#   MARS_EXTRA='fb_ca_hz=240' ./devices/mars/run.sh 130
 set -u
 cd "$(dirname "$0")/../.." || exit 1
 export DEVICE=mars
 
 BASE="cpus=8 rd=md0 touchscreen=1 adsp=1 gpu=1 gl=1 adreno_nomeasure=1 cpufreq=1 sb_delay=600"
+EXTRA=${MARS_EXTRA:-}
+[ -n "$EXTRA" ] && BASE="$BASE $EXTRA"
 SECS=${1:-300}
 CHECK=no
 [ "${1:-}" = "--check" ] && { CHECK=yes; SECS=300; }
