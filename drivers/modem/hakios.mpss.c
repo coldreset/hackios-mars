@@ -2374,7 +2374,7 @@ static uint32_t ipa_fw_memory = 0x8b710000u, ipa_fw_size = 0xa000u;
  * its dmesg). The 1e40000 this used to point at is the IPA's own SRAM window: reads there stall the bus (nothing
  * answers), which is why ipa_status() hung every time it was allowed to run. modem_ipa_regs overrides it. */
 static uint32_t ipa_regs_base = 0x01e00000u;
-static struct block ipa_regs = { "ipa", 0x01e00000, 0x4000 };
+static struct block ipa_regs = { "ipa", 0x01e00000, 0x84000 };   /* dt: reg = <0x1e00000 0x84000> */
 /* The local memory's window. 0x1e50000 is what the reference device tree pairs with the IPA's registers; on this
  * phone it may be elsewhere, and a read of a window nothing answers stalls the bus (no fault, no return), so it is
  * a boot argument: modem_ipa_sram=ADDRESS. */
@@ -2797,7 +2797,7 @@ ipa_firmware_load(void)
 	announce("turn the IPA's clock on (RPMh), load the IPA's firmware (image 15) into its memory and have TrustZone start it, as "
 	    "Android does before the modem");
 	printf("mpss: %u: the IPA's image goes at %#x (%#x bytes allowed)\n", step, ipa_fw_memory, ipa_fw_size);
-	if (!ipa_clock(true)) {
+	if (!option("modem_ipa_clk_off") && !ipa_clock(true)) {
 		printf("mpss: %u: the IPA's clock is not on: its firmware is not loaded (a start without the clock ends the kernel)\n", step);
 		return false;
 	}
@@ -3024,7 +3024,9 @@ ipa_firmware_stop(void)
 	(void)scm("to shut the IPA's firmware down", SCM_PAS_SHUTDOWN, SCM_ONE_VALUE, pas_ipa, 0, 0, 0, &answer);
 	if (!leaving) {
 		ipa_space_off();
-		ipa_clock(false);
+		if (!option("modem_ipa_clk_off")) {
+			ipa_clock(false);
+		}
 	}
 }
 
