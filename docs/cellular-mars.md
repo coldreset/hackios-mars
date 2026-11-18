@@ -472,3 +472,18 @@ descriptor that is not the one step 6 printed.
 
 Next: print `glink.descriptor`, `glink.ours`, `glink.ours_size`, `glink.theirs` and `glink.up` immediately before the
 send that step 7 makes, so the next run says which of them is the odd one out.
+
+## The command line was being cut, and the shared memory was mapped at physical zero (19 Nov, 07:15)
+
+`mpss: the shared memory is at 0xfffffffaa2d44000, 2097152 bytes for 0` -- the second number is the physical address,
+and it was zero. The kernel's boot-arg buffer is 607 bytes and the loader takes about 130 of them; this run's line
+ended `... soc_mpss_size=0x10000000 $soc`, with `soc_smem=0x80900000` inside `$soc` near the end, so the buffer was cut
+in the middle of that argument and `PE_parse_boot_argn("soc_smem", ...)` read `0`.
+
+Everything that lives in the shared memory then lived at physical zero instead: the SMP2P items (`item 435 is not
+there`), the GLINK queues (`our queue read to 0 and written to 0`), the IPA's item 497, the crash reason. That is the
+one thing that explains why the faults moved from `dsp_words` to `glink_put` to `ipa_hardware_init` from run to run.
+
+Two things are in now: `soc_smem` of zero is refused (the built-in `0x80900000` is kept, with a line saying the line was
+cut), and the same run is the first one in a long time whose SMP2P and GLINK blocks are the real ones. The scripts must
+also keep the line short enough -- `soc_smem` belongs near the front, not at the end.

@@ -626,6 +626,12 @@ smem_peek(uint64_t offset, void *to, uint32_t size)
 {
 	if (smem == NULL) {
 		smem = (const volatile uint8_t *)ml_io_map_unmappable(smem_phys, SMEM_SIZE, VM_WIMG_WCOMB);
+		if (smem == NULL) {
+			printf("mpss: the shared memory at %#x could not be mapped (%u bytes); nothing can be read\n",
+			    smem_phys, SMEM_SIZE);
+			return false;
+		}
+		printf("mpss: the shared memory is at %p, %u bytes for %#x\n", (const void *)smem, SMEM_SIZE, smem_phys);
 	}
 	if ((uint64_t)offset + (uint64_t)size > (uint64_t)SMEM_SIZE) {
 		return false;
@@ -639,12 +645,18 @@ smem_peek(uint64_t offset, void *to, uint32_t size)
 static void
 smem_poke(uint32_t offset, uint32_t value)
 {
+	if (smem == NULL || offset > SMEM_SIZE - sizeof(value)) {
+		return;
+	}
 	wr((vm_offset_t)smem + offset, value);
 }
 
 static uint32_t
 smem_word(uint32_t offset)
 {
+	if (smem == NULL || offset > SMEM_SIZE - sizeof(uint32_t)) {
+		return 0;
+	}
 	return rd((vm_offset_t)smem + offset);
 }
 
@@ -7329,7 +7341,14 @@ soc_override(void)
 			said++;
 		}
 	}
-	PE_parse_boot_argn("soc_smem", &smem_phys, sizeof(smem_phys));
+	if (PE_parse_boot_argn("soc_smem", &smem_phys, sizeof(smem_phys)) && smem_phys == 0) {
+		/* So the line was cut: "soc_smem=0x80900000" became "soc_smem=0". The boot-arg buffer is 607 bytes. */
+		smem_phys = SMEM_PHYS_DEFAULT;
+		printf("mpss: soc_smem was zero -- the command line was cut short; the shared memory stays at %#x\n", smem_phys);
+	}
+	if (smem_phys == 0) {
+		smem_phys = SMEM_PHYS_DEFAULT;
+	}
 	PE_parse_boot_argn("soc_cmd_db", &cmd_db_phys, sizeof(cmd_db_phys));
 	PE_parse_boot_argn("soc_mpss_mem", &mpss_memory, sizeof(mpss_memory));
 	PE_parse_boot_argn("soc_mpss_size", &mpss_size, sizeof(mpss_size));
