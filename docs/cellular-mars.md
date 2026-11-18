@@ -238,3 +238,32 @@ What is left: a full run (`modem_step=11`) with the IPA up stalls the kernel. Th
 (`ipa_memory_init()`, `ipa_hardware_init()`, `hakios_ipa_data_setup()`) are still skipped by
 `modem_ipa_raw=1`; those writes are the next thing to attribute, one at a time, with `modem_ipa_quiet=1`
 (the reads of the IPA's registers stall the bus when its clock is not really on).
+
+### After the IPA's firmware: where it stops (19 Nov, 02:05)
+
+The IPA's firmware being loaded changed the failure, and the steps say how far each run gets
+(`modem_step=N` stops after step N; step 7 starts the IPA, 8 the queues, 9 the link, 10 QRTR, 11 NAS):
+
+| run | IPA firmware | our IPA tables | stop after step | result |
+|---|---|---|---|---|
+| `logs/012034-run.log` | loaded | skipped (`modem_ipa_raw=1`) | 8 | finishes, the IPA is shut down again |
+| `logs/014321-run.log` | loaded | skipped | 9 | finishes |
+| this one | loaded | skipped | 10 | **the phone is gone, no log** |
+| `logs/015441-run.log` | not loaded | skipped | 10 | finishes, but `THE MODEM DOES NOT ACKNOWLEDGE THE STOP after 5000.026 ms` (its entry 0x106) |
+| this one | loaded | enabled | 10 | **the phone is gone, no log** |
+
+So the IPA being started is what makes step 10 fatal, and it is fatal with and without our own IPA
+table/hardware initialisation. In step 10 we ask the modem's IPA driver to initialise — `mpss: ipa: about to
+ask the modem's IPA driver (node 0 port 28) to initialize with the IPA's memory layout (154 bytes, offset 0)`
+— and with the IPA's firmware running that request takes the phone down within a few hundred milliseconds.
+Without the firmware the same request leaves the modem alive but stuck (`0x106`, ignoring the stop request),
+which is what a modem whose IPA cannot come up looks like from outside.
+
+The next things to try, in order:
+
+1. Do not send that request at all (`modem_ipa_skip_qmi=1`, to be added): if step 10 then completes with the
+   IPA's firmware loaded, the request is the trigger and its 154-byte layout is wrong for this phone.
+2. Program the IPA's hardware before the modem is started rather than after (the order in which Android does
+   it: IPA hands its GSI/CE registers over, then the modem binds channels through QMI).
+3. Compare the 154 bytes against what Android's IPA driver sends on this phone (`/sys/kernel/debug/ipa` is
+   not available to us; its dmesg does print the IPA's memory layout at boot).
