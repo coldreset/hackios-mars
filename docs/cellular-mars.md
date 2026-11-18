@@ -487,3 +487,18 @@ one thing that explains why the faults moved from `dsp_words` to `glink_put` to 
 Two things are in now: `soc_smem` of zero is refused (the built-in `0x80900000` is kept, with a line saying the line was
 cut), and the same run is the first one in a long time whose SMP2P and GLINK blocks are the real ones. The scripts must
 also keep the line short enough -- `soc_smem` belongs near the front, not at the end.
+
+## IP0 is a BCM with four levels, and it was being voted as if it were a rail (19 Nov, 07:40)
+
+The command database's own dump (one run of `modem_dbdump=1`) gives the missing input:
+
+    mpss: db: IPA? IP0 at 0x5007c, 8 bytes of levels: 40 0 8 7
+
+`0x5007c` is the command address and the eight bytes are four 16-bit levels: 40, 0, 8 and 7. A BCM is not voted by
+writing a frequency into the rail's command word: it is voted by sending the *index* of the level wanted, in the
+BCM form of the TCS message, and the level list above is what those indexes point at. The vote that took the phone
+down three times in a row (`BCM_VOTE(on, 0)` with a level of 300, then 40, then a moved commit bit) was the rail form
+of that message, which is why the bus hung rather than the clock coming on.
+
+So the next run votes index 0 (the level the modem asks for, 40) in the BCM form, and the check is the same one that
+has always answered: does `GSI_CFG` still read `0x205`, and does `ipa: hardware 1` print without the bus going away.
