@@ -2411,17 +2411,10 @@ ipa_status(const char *when)
 	    "hw_state %u warnings %u, interface %#x; GSI status %#x (%s), error log %#x\n", when, shared, 8 * (shared >> 16),
 	    8 * (shared & 0xffff), uc0 & 0xff, uc3 & 0xff, uc5 & 0xff, uc7, uc8 & 0xff, (uc8 >> 8) & 0xff, rd(ipa_sram.base + 0x24) & 0xffff,
 	    gsi, gsi & 1 ? "ENABLED" : "NOT ENABLED", error);
-	/* 0x54 is the microcontroller's: 0 until it has run, so wait for it rather than zero memory at 0 */
-	for (unsigned tries = 0; tries < 40 && 8 * (shared >> 16) == 0; tries++) {
-		delay_for_interval(5, NSEC_PER_MSEC);
-		shared = rd(ipa_regs.base + 0x54);
-	}
-	if (8 * (shared >> 16) == 0) {
-		printf("mpss: ipa: the microcontroller has not said where its memory is (0x54 = %#x): the memory is left alone\n", shared);
-		ipa_mem_offset = 0;
-		return;
-	}
-	ipa_mem_offset = 8 * (shared >> 16);
+	/* 0x54 is not read: a read of it wedges this path (19 November), and Android's own layout starts at the
+	 * window's beginning anyway. */
+	ipa_mem_offset = 0;
+	tell("mpss: ipa: the local memory is taken at the window's beginning (0x54 is not read)\n");
 }
 
 
@@ -2906,7 +2899,9 @@ ipa_firmware_load(void)
 		 * Doing this after the start is what the runs of 19 November did, and each of them took the phone down in
 		 * the step after.
 		 */
-		ipa_memory_init();
+		if (!option("modem_ipa_mem_off")) {
+			ipa_memory_init();
+		}
 		ipa_hardware_init();
 	}
 	result = scm("to take the IPA's header", SCM_PAS_INIT_IMAGE, SCM_VALUE_AND_BUFFER, pas_ipa, kvtophys(page), 0, 0, &answer);
