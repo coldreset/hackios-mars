@@ -1205,6 +1205,54 @@ static struct block rsc = { "rsc", 0x18220000, 0x10000 };
 #define RPMH_TCS                0                       /* the first of the two for requests made at once */
 
 /* The level position RPMh takes for that rail and level; -1: not found. */
+/* modem_dbdump=1: print every name the command database holds, eight to a line, and in full every name that
+ * begins with "IP" (the IPA's clock is one of those, and which one it is has not been found by guessing). */
+static void
+cmd_db_dump(void)
+{
+	char line[160];
+	unsigned total = 0;
+
+	if (cmd_db == NULL) {
+		cmd_db = (const struct cmd_db_header *)ml_io_map_unmappable(cmd_db_phys, CMD_DB_SIZE, VM_WIMG_WCOMB);
+	}
+	if (cmd_db->magic[0] != 0xdb || cmd_db->magic[1] != 0x30 || cmd_db->magic[2] != 0x03 || cmd_db->magic[3] != 0x0c) {
+		printf("mpss: db: the command database is not there\n");
+		return;
+	}
+	for (unsigned s = 0; s < 8; s++) {
+		const struct cmd_db_slave *slave = &cmd_db->slave[s];
+		const struct cmd_db_entry *entry = (const struct cmd_db_entry *)(cmd_db->data + slave->header_offset);
+		int at = 0;
+
+		if (slave->id == 0 || slave->count > 512) {
+			continue;
+		}
+		printf("mpss: db: slave %u: %u entries, id %#x\n", s, slave->count, slave->id);
+		for (unsigned i = 0; i < slave->count; i++) {
+			const char *id = (const char *)entry[i].id;
+
+			at += snprintf(line + at, sizeof(line) - (size_t)at, "%s%.8s", at ? "," : "", id);
+			if (at > 120 || i + 1 == slave->count) {
+				printf("mpss: db:   %s\n", line);
+				at = 0;
+				line[0] = 0;
+			}
+			if (id[0] == 'I' && id[1] == 'P') {
+				const uint8_t *data = cmd_db->data + slave->data_offset + entry[i].offset;
+
+				printf("mpss: db: IPA? %.8s at %#x, %u bytes of levels:", id, entry[i].address, entry[i].length);
+				for (unsigned l = 0; l < entry[i].length / 2u && l < 16; l++) {
+					printf(" %u", data[2 * l] | data[2 * l + 1] << 8);
+				}
+				printf("\n");
+			}
+			total++;
+		}
+	}
+	printf("mpss: db: %u names in all\n", total);
+}
+
 static int
 rail_position(const char *name, uint32_t level, uint32_t *address)
 {
@@ -1417,6 +1465,9 @@ step_survey(void)
 
 	announce("read our partition with the modem in the shared memory (0x80900000), and its items");
 	show_partition();
+	if (option("modem_dbdump")) {
+		cmd_db_dump();
+	}
 	if (dsp_words(&words)) {
 		show_words("the DSP's item (435) is there: it has run since the phone was started", &words);
 	} else {
