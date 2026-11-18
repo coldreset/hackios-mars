@@ -1377,13 +1377,17 @@ rpmh_command(const char *name, uint32_t value)
 	return done != 0;
 }
 
-#define BCM_VOTE(on, vote)      (1u << 30 | (uint32_t)(on) << 29 | ((vote) & 0x3fffu))
+/* Linux's clk-rpmh.c: #define BCM_TCS_CMD(commit, abort, enable, vote) \
+ *     ((commit) << 31 | (abort) << 30 | (enable) << 29 | ((vote) & 0x3fff))
+ * and rpmh_clk_update_vote() sends BCM_TCS_CMD(commit, false, enable, 0). The commit bit is 31; this used to set
+ * bit 30, which is abort -- the sequencer took the write and reported done, and the clock was never asked for. */
+#define BCM_VOTE(on, vote)      (1u << 31 | (uint32_t)(on) << 29 | ((vote) & 0x3fffu))
 
 /* The IPA's clock, on or off: the BCM "IP0" (dt of Linux: clocks = <&rpmhcc RPMH_IPA_CLK>). */
 static bool
 ipa_clock(bool on)
 {
-	bool ok = rpmh_command("IP0", BCM_VOTE(on, on ? 0x3fffu : 0));
+	bool ok = rpmh_command("IP0", BCM_VOTE(on, 0));   /* a clock's vote carries no level: enable and commit */
 
 	/*
 	 * The buses on the IPA's way to memory, voted for as Android's driver does while the IPA is on (its
