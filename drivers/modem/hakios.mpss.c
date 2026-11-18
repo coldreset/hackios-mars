@@ -2793,6 +2793,16 @@ ipa_firmware_load(void)
 		__asm__ volatile ("dc civac, %0" : : "r" (line));
 	}
 	settle();
+	if (!option("modem_ipa_raw")) {
+		/*
+		 * Before the microcontroller is asked for, as Android does it: its local memory (the canaries, the modem's
+		 * processing contexts) and the hardware (QSB, the Qtime timers, the resource groups, the default route).
+		 * Doing this after the start is what the runs of 19 November did, and each of them took the phone down in
+		 * the step after.
+		 */
+		ipa_memory_init();
+		ipa_hardware_init();
+	}
 	result = scm("to take the IPA's header", SCM_PAS_INIT_IMAGE, SCM_VALUE_AND_BUFFER, pas_ipa, kvtophys(page), 0, 0, &answer);
 	if (result != 0 || answer != 0) {
 		printf("mpss: %u: TRUSTZONE DOES NOT TAKE THE IPA'S HEADER (%d, %#llx)\n", step, result, answer);
@@ -2877,8 +2887,6 @@ ipa_firmware_load(void)
 		ipa_status("after its firmware's start");
 	}
 	if (!option("modem_ipa_raw")) {
-		ipa_memory_init();
-		ipa_hardware_init();
 		/* this processor's own channels and endpoints, and the IPA's tables, before the modem (hakios.ipa.c); then en1 on them */
 		if (hakios_ipa_data_setup()) {
 			hakios_cell_attach();

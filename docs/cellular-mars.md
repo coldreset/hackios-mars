@@ -297,3 +297,18 @@ What is left, then, is the IPA itself: its microcontroller's ready interrupt (`i
 waits on through `ipa3_uc_init`), and the order Android keeps -- memory and hardware initialisation, then the
 microcontroller, then INIT_DRIVER. Our `ipa_memory_init()` and `ipa_hardware_init()` run after the firmware is
 already started; whether that order is what kills the phone is the next thing to settle.
+
+### The order of the IPA's own initialisation was not it (19 Nov, 02:30)
+
+`ipa_memory_init()` and `ipa_hardware_init()` now run before TrustZone is asked for the IPA's header, as
+Android's driver has them, rather than after the microcontroller has started. With the IPA's firmware in the
+image and INIT_DRIVER sent, step 10 still takes the phone down with no log, exactly as before.
+
+So what is left is the IPA's microcontroller handshake itself -- Android waits on `ipa3_uc_ready` (its
+`ipa3_uc_init` and the uC's interrupt) before it sends INIT_DRIVER, and we have no such interrupt wired.
+Until that is ported, the configuration that works is the one without the IPA at all:
+
+    modem_ipa_fw=0 modem_ipa_quiet=1 modem_ipa_skip_qmi=1 modem_buffer=0xd6a00000
+
+which takes the modem online and registers it on a network, and loses it twenty seconds later to the assert
+quoted above (`logs/021801-run.log`).
