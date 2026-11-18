@@ -2411,6 +2411,16 @@ ipa_status(const char *when)
 	    "hw_state %u warnings %u, interface %#x; GSI status %#x (%s), error log %#x\n", when, shared, 8 * (shared >> 16),
 	    8 * (shared & 0xffff), uc0 & 0xff, uc3 & 0xff, uc5 & 0xff, uc7, uc8 & 0xff, (uc8 >> 8) & 0xff, rd(ipa_sram.base + 0x24) & 0xffff,
 	    gsi, gsi & 1 ? "ENABLED" : "NOT ENABLED", error);
+	/* 0x54 is the microcontroller's: 0 until it has run, so wait for it rather than zero memory at 0 */
+	for (unsigned tries = 0; tries < 40 && 8 * (shared >> 16) == 0; tries++) {
+		delay_for_interval(5, NSEC_PER_MSEC);
+		shared = rd(ipa_regs.base + 0x54);
+	}
+	if (8 * (shared >> 16) == 0) {
+		printf("mpss: ipa: the microcontroller has not said where its memory is (0x54 = %#x): the memory is left alone\n", shared);
+		ipa_mem_offset = 0;
+		return;
+	}
 	ipa_mem_offset = 8 * (shared >> 16);
 }
 
@@ -2883,7 +2893,7 @@ ipa_firmware_load(void)
 		__asm__ volatile ("dc civac, %0" : : "r" (line));
 	}
 	settle();
-	if (!option("modem_ipa_raw")) {
+	if (!option("modem_ipa_raw") && !option("modem_ipa_after")) {
 		/*
 		 * Before the microcontroller is asked for, as Android does it: its local memory (the canaries, the modem's
 		 * processing contexts) and the hardware (QSB, the Qtime timers, the resource groups, the default route).
@@ -2925,6 +2935,15 @@ ipa_firmware_load(void)
 		goto out;
 	}
 	tell("mpss: %u: THE IPA'S FIRMWARE IS LOADED AND STARTED (image 15, %u segments)\n", step, loaded);
+	if (option("modem_ipa_after") && !option("modem_ipa_raw")) {
+		/*
+		 * After the microcontroller runs, as Android does it: 0x54 only holds the local memory's offset once the
+		 * microcontroller has written it, and with the window mapped at the device tree's 0x84000 there is no
+		 * reason for this to take the bus down.
+		 */
+		ipa_memory_init();
+		ipa_hardware_init();
+	}
 	/*
 	 * Whether TrustZone has copied the segments where the image says they run (their virtual addresses:
 	 * GSI's instruction memory at 0x1e1f000 and the microcontroller's at 0x1e81000, both in the IPA's
