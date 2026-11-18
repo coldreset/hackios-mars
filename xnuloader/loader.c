@@ -33,7 +33,19 @@ struct payload_entry { char name[16]; uint32_t size; uint32_t reserved; };
  * number of kernel runs (nothing writes to it: the root is read-only).
  */
 #define RESIDENT_RD_OFFSET  0x08000000ULL
-#define RESIDENT_RD_RESERVE 0x30000000ULL         /* RAM that must remain for the kernel itself */
+#define RESIDENT_RD_RESERVE 0x30000000ULL
+/* where the size of the resident image is kept so that a later loader instance knows it */
+#define RESIDENT_RECORD_PHYS  0x80afff00ULL
+#define RESIDENT_RECORD_MAGIC 0x44524452u     /* "RDRD" */
+struct resident_record {
+	uint32_t magic;
+	uint32_t base_lo;
+	uint32_t size_lo;
+	uint32_t count;
+};
+static void resident_record_save(void);
+static void resident_record_load(void);
+         /* RAM that must remain for the kernel itself */
 #define PAGE_SIZE_MAX       0x4000ULL
 
 #define LOG_PARTITION       u"logdump"
@@ -2975,6 +2987,35 @@ static struct {
 } SCREEN;
 static uint64_t win_base, win_size; /* XNU's physical memory window, claimed once */
 static uint64_t resident_rd_size;   /* root image kept at win_base + RESIDENT_RD_OFFSET, 0 if none */
+/* the resident image is in DRAM across a warm reset, but its size is only in this instance's memory */
+static void resident_record_save(void)
+{
+	volatile struct resident_record *r = (volatile struct resident_record *)(uintptr_t)RESIDENT_RECORD_PHYS;
+
+	r->base_lo = (uint32_t)win_base;
+	r->size_lo = (uint32_t)resident_rd_size;
+	r->count = r->count + 1;
+	r->magic = RESIDENT_RECORD_MAGIC;
+}
+
+static void resident_record_load(void)
+{
+	volatile struct resident_record *r = (volatile struct resident_record *)(uintptr_t)RESIDENT_RECORD_PHYS;
+
+	if (r->magic != RESIDENT_RECORD_MAGIC) {
+		return;
+	}
+	if (r->base_lo != (uint32_t)win_base || r->size_lo == 0) {
+		return;    /* a different window this time: the record says nothing about it */
+	}
+	if ((uint64_t)r->size_lo > win_size - RESIDENT_RD_OFFSET - RESIDENT_RD_RESERVE) {
+		return;
+	}
+	resident_rd_size = r->size_lo;
+	print("resident image remembered: %x bytes at %x\n", (uint64_t)r->size_lo, win_base + RESIDENT_RD_OFFSET);
+}
+
+
 static char last_result[64] = "idle";
 
 static void
@@ -3078,6 +3119,7 @@ choose_window(const struct payload_info *pi)
 	}
 	win_base = best_base;
 	win_size = best_size;
+	resident_record_load();
 	return 1;
 }
 
@@ -4921,6 +4963,7 @@ fb_command(char *cmd)
 				}
 				if (to_ramdisk) {
 					resident_rd_size = total;
+					resident_record_save();
 				}
 				fb_reply("OKAY", "");
 			} else {
