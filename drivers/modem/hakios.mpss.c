@@ -2433,6 +2433,15 @@ ipa_memory_init(void)
 
 	need(&ipa_sram);
 	need(&ipa_regs);
+	/* A window that did not map is left at 0, and writing there is a data abort in the middle of the modem's
+	 * start-up (it happened at every run: pc _wr, lr ipa_memory_init+0x80). Say so and leave the memory alone. */
+	if (ipa_sram.base == 0 || ipa_regs.base == 0) {
+		printf("mpss: ipa: the windows did not map (registers %#lx at %#x, local memory %#lx at %#x): the memory is left alone\n",
+		    (unsigned long)ipa_regs.base, ipa_regs_base, (unsigned long)ipa_sram.base, ipa_sram_base);
+		return;
+	}
+	printf("mpss: ipa: the windows are in (registers %#lx at %#x, local memory %#lx at %#x, offset %#x)\n",
+	    (unsigned long)ipa_regs.base, ipa_regs_base, (unsigned long)ipa_sram.base, ipa_sram_base, ipa_mem_offset);
 	/* from 0x288: the microcontroller's own area (its shared words at 0, its info at 0x80) is left alone, as Linux leaves it */
 	for (uint32_t at = 0x288; at < size; at += 4) {
 		wr(ipa_sram.base + ipa_mem_offset + at, 0);
