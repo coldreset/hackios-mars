@@ -5744,7 +5744,10 @@ ipa_init_driver(void)
 	packet[6] = (uint8_t)((at - 7) >> 8);
 	printf("mpss: ipa: about to ask the modem's IPA driver (node %u port %u) to initialize with the IPA's memory layout (%u bytes, "
 	    "offset %#x)\n", ipa_modem_node, ipa_modem_port, at, o);
-	if (qrtr_send(ipa_client_port, ipa_modem_node, ipa_modem_port, packet, at) != 0) {
+	if (option("modem_ipa_skip_qmi")) {
+		/* asked for once, to see whether this request is what takes the phone down when the IPA's firmware runs */
+		printf("mpss: ipa: INIT_DRIVER left out (modem_ipa_skip_qmi)\n");
+	} else if (qrtr_send(ipa_client_port, ipa_modem_node, ipa_modem_port, packet, at) != 0) {
 		printf("mpss: ipa: INIT_DRIVER not sent\n");
 	}
 	if (!option("modem_ipa_no_probe")) {
