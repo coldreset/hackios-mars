@@ -408,3 +408,24 @@ Until that handshake exists, the configuration that works is the one without the
 modem_ipa_skip_qmi=1 modem_buffer=0xd6a00000`. It brings the modem up, registers with a network
 (`REGISTERED WITH A NETWORK; signal -119 dBm (NR), 2 bars`) and holds for about twenty seconds before the modem
 asserts in its own IPA path (`ipa_sio.c:2517 IPA Assert: ipa_ipfltr.init_done == TRUE failed`).
+
+## The uC's block: reached through a register, not by mapping its address (19 Nov, 06:15)
+
+Both of our orders failed for the same reason, and Android's source says what it is. In
+`drivers/platform/msm/ipa/ipa_v3/ipa_uc.c`:
+
+    ipa3_uc_interface_init(): phys_addr = ipa_wrapper_base + ipa_reg_base_ofst +
+                                          ipahal_get_reg_n_ofst(IPA_SRAM_DIRECT_ACCESS_n, 0);
+                              ioremap(phys_addr, IPA_RAM_UC_SMEM_SIZE);
+    send_uc_command():        shared->command = command; shared->command_param = param;
+                              shared->response = 0; shared->response_param = 0;
+                              write IPA_IRQ_UC.UC_INTR to tell the microcontroller.
+
+The 128-byte block the microcontroller talks through is reached **through a register of the IPA**
+(`IPAHAL_SRAM_DIRECT_ACCESS`) with an address/data pair -- not by mapping 0x1e50000 and reading it. Our mapping of
+0x1e50000 and the reads at +0x00/+0x0c/+0x14/+0x1c are therefore reads of a window the IPA is not answering, which
+is exactly the "reads hang the bus" behaviour that took every run down.
+
+So the next step is not another order: it is the direct-access register pair. Read the uC's response word through
+it, poll for `IPA_HW_2_CPU_RESPONSE_INIT_COMPLETED` (0x1) with a bounded wait, and only then read 0x54 and zero the
+local memory.
