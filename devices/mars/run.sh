@@ -21,7 +21,9 @@ set -u
 cd "$(dirname "$0")/../.." || exit 1
 export DEVICE=mars
 
-BASE="cpus=8 rd=md0 touchscreen=1 adsp=1 gpu=1 gl=1 adreno_nomeasure=1 cpufreq=1 sb_delay=600"
+# fb_hz and fb_ca_hz: the panel is driven at 120 Hz and CoreAnimation is asked for 240
+# (it draws at half of what it is told). Without the pair the display stays at 60.
+BASE="cpus=8 rd=md0 touchscreen=1 adsp=1 gpu=1 gl=1 adreno_nomeasure=1 cpufreq=1 sb_delay=600 fb_hz=120 fb_ca_hz=240"
 EXTRA=${MARS_EXTRA:-}
 [ -n "$EXTRA" ] && BASE="$BASE $EXTRA"
 SECS=${1:-300}
@@ -43,6 +45,8 @@ GL=$(grep -ac 'libOSMesa' userland/root.apfs 2>/dev/null || true)
 
 case "$BASE" in *adsp=1*) ;; *) fail "adsp=1 is missing: the battery would read empty" ;; esac
 case "$BASE" in *gpu=1*)  ;; *) fail "gpu=1 is missing: the GL libraries would not load" ;; esac
+case "$BASE" in *fb_hz=120*) ;; *) fail "fb_hz=120 is missing: the panel would stay at 60 Hz" ;; esac
+case "$BASE" in *fb_ca_hz=240*) ;; *) fail "fb_ca_hz=240 is missing: CoreAnimation would draw 60 frames a second" ;; esac
 case "$BASE" in *gl=1*)   ;; *) fail "gl=1 is missing: the UI would be painted by the CPU" ;; esac
 [ "${#BASE}" -le 470 ] || fail "the line is ${#BASE} characters; the buffer is 607 and the loader takes about 130"
 

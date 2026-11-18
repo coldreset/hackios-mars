@@ -63,16 +63,19 @@ def log(line):
     print('darwin-write: ' + line)
 
 
+SU = os.environ.get('DARWIN_SU', 'su')   # mars keeps it at /debug_ramdisk/su, off the shell's path
+
+
 def phone(script, binary=False):
     """Run a script in the phone's root shell (on its standard input, as flash-fingerprint.sh does)."""
-    r = subprocess.run(['adb', 'shell', 'su -c sh'], input=script.encode(), capture_output=True, timeout=3600)
+    r = subprocess.run(['adb', 'shell', '%s -c sh' % SU], input=script.encode(), capture_output=True, timeout=3600)
     if r.returncode != 0:
         raise Refused('the phone said %d: %s' % (r.returncode, (r.stdout + r.stderr).decode(errors='replace')[-400:]))
     return r.stdout if binary else r.stdout.decode(errors='replace')
 
 
 def phone_bytes(command):
-    r = subprocess.run(['adb', 'exec-out', 'su -c "%s"' % command], capture_output=True, timeout=600)
+    r = subprocess.run(['adb', 'exec-out', '%s -c "%s"' % (SU, command)], capture_output=True, timeout=600)
     if r.returncode != 0:
         raise Refused('reading from the phone: exit %d' % r.returncode)
     return r.stdout
