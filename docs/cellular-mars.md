@@ -389,3 +389,22 @@ running does the driver read the local-memory offset from register 0x54 and zero
 comes back 0 -- the microcontroller has not written it yet -- so the offset is meaningless and the run stops at the
 IPA's header. So: start the microcontroller (TrustZone's AUTH), then poll 0x54 for a non-zero offset, then zero the
 local memory at that offset, then send INIT_DRIVER.
+
+## The two orders, and why neither holds yet (19 Nov, 06:10)
+
+Android does it in this order: start the IPA's microcontroller (TrustZone), then read the local-memory offset from
+register 0x54, then zero that memory, then send INIT_DRIVER. We have now tried both halves of it:
+
+* the memory first (the old order): the run returns, but 0x54 is still 0 -- the microcontroller has not written it
+  -- so step 7 ends at the IPA's header and the modem never starts (logs/055719-run.log);
+* the microcontroller first (`modem_ipa_after=1`): the run hangs, with no log and no answer from the loader.
+
+So the missing piece is not the order but the handshake: something between "TrustZone has started the
+microcontroller" and "the local memory may be written" is not done. Android decides `ipa3_uc_ready()` by reading the
+microcontroller's command, response and event words in that memory; ours reads them at the wrong time, and one of
+those reads is what takes the bus down.
+
+Until that handshake exists, the configuration that works is the one without the IPA: `modem_ipa_fw=0
+modem_ipa_skip_qmi=1 modem_buffer=0xd6a00000`. It brings the modem up, registers with a network
+(`REGISTERED WITH A NETWORK; signal -119 dBm (NR), 2 bars`) and holds for about twenty seconds before the modem
+asserts in its own IPA path (`ipa_sio.c:2517 IPA Assert: ipa_ipfltr.init_done == TRUE failed`).
