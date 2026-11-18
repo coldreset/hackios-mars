@@ -364,3 +364,28 @@ microcontroller's mailbox -- can be done at all, and the modem will keep asserti
 
 What is left, in order: map the IPA's window at its real size, vote IP0 with a level from its own table, then
 read 0x54 and zero the local memory at that offset -- and only then the IPA's INIT_DRIVER can be answered.
+
+## The IPA's window and its clock (19 Nov, 06:00)
+
+Two things the device tree settles, and one that a run settled.
+
+The window is 0x84000 bytes, not 0x4000:
+
+    qcom,ipa@1e00000 { reg = <0x1e00000 0x84000  0x1e04000 0x23000>;
+                       reg-names = "ipa-base\0gsi-base"; };
+
+Every experiment that read past 0x4000 did not fault: it wedged the bus, which is why "reads hang, writes do not"
+looked like a rule about the hardware. With the window mapped at its real size, `ipa_memory_init()` runs and the
+panics that used to be at `pc _wr, lr _ipa_memory_init+0x80` are gone.
+
+The clock does not need a vote of ours. `GSI_CFG` at 0x1e04000 reads back 0x205 with no vote at all, and the
+firmware loads and starts (its three segments read back byte for byte). And a level on "IP0" -- which the command
+database puts in the same slave as MC0, SH0, SN8 and ACV, the interconnect -- takes the machine down three times
+out of three, with no log and no answer from the loader. `modem_ipa_clk_off=1` skips the vote; a full run then
+returns (logs/055719-run.log, 221,680 bytes).
+
+What is left is the order Android uses and we do not: the microcontroller is started first, and only once it is
+running does the driver read the local-memory offset from register 0x54 and zero that memory. Our read of 0x54
+comes back 0 -- the microcontroller has not written it yet -- so the offset is meaningless and the run stops at the
+IPA's header. So: start the microcontroller (TrustZone's AUTH), then poll 0x54 for a non-zero offset, then zero the
+local memory at that offset, then send INIT_DRIVER.
