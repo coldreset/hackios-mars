@@ -502,3 +502,22 @@ of that message, which is why the bus hung rather than the clock coming on.
 
 So the next run votes index 0 (the level the modem asks for, 40) in the BCM form, and the check is the same one that
 has always answered: does `GSI_CFG` still read `0x205`, and does `ipa: hardware 1` print without the bus going away.
+
+## The vote is not what stops the registers (19 Nov, 07:45)
+
+Three runs after the shared memory was fixed:
+
+* `modem_ipa_clk_off=1` (no vote at all): the write to `ipa_regs.base + IPA_QSB_MAX_WRITES` in
+  `ipa_hardware_init()` is a kernel data abort, immediately after `ipa: hardware 1`.
+* The clock voted the Linux way (`BCM_TCS_CMD(commit=1, enable=1, vote=0)` for `IP0`, whose command database entry
+  is `0x5007c` and whose level list holds one level, 40): the same data abort at the same write.
+* `IP0` voted `0x3fff` (what the buses on the IPA's path are voted for "on"): the whole machine hangs instead, with no
+  log at all -- so `0x3fff` is not a value `IP0` accepts.
+
+So the clock vote is not the gate on those writes. The candidates that are left, in the order worth trying:
+
+1. the register offsets. `IPA_QSB_MAX_WRITES` and the rest were written from memory of another version's `ipa_reg.h`;
+   v4.11's offsets have to be checked one by one, and a write to an offset that does not exist on this revision is an
+   external abort, which is what a data abort on a mapped device register looks like;
+2. the IPA's own power state ("IPA_PS"), which in Android's driver is entered through `ipa3_uc_interface_init()` --
+   the direct-access pair at `0x4000 + 4n` -- and not by writing the register space at all.
