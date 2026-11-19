@@ -1476,7 +1476,9 @@ ipa_clock(bool on)
 	 * what this tells (modem_ipa_bus=0: not voted).
 	 */
 	if (!option("modem_ipa_bus_off")) {
-		static const char *const buses[] = { "SN8", "SH0", "MC0", "ACV" };
+		/* ACV is left out: cmd_db gives it one level and a "max" vote never comes back
+		 * (2026-11-20: the machine went down at that command), while SN8, SH0 and MC0 take it. */
+		static const char *const buses[] = { "SN8", "SH0", "MC0" };
 
 		for (unsigned b = 0; b < sizeof(buses) / sizeof(buses[0]); b++) {
 			rpmh_command(buses[b], BCM_VOTE(on, on ? 0x3fffu : 0));

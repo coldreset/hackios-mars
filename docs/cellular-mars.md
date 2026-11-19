@@ -604,3 +604,38 @@ GSI registers only configure channels, and the modem's first requirement -- `ipa
 What this means for the modem: the state we already had is the ceiling without the vendor's IPA bring-up.
 The modem agrees, comes online, registers with a network (`REGISTERED WITH A NETWORK; signal -119 dBm (NR)`),
 and about twenty seconds later its own IPA client asserts because the host never told it the filter is up.
+
+## 2026-11-20: the IPA's firmware address is another machine's, and the ACV vote takes the phone down
+
+Two things measured today, both with the modem ladder (step 7):
+
+1. `ipa_fw_memory` (devices/modem/hakios.mpss.c:2385) defaulted to `0x8b710000`, and the comment
+   beside it quotes another machine's dmesg (`yupik_ipa_fws: loading from 0x8b710000`). This
+   phone's own device tree has `qcom,ipa_fws` with `memory-region = <&pil_ipa_gsi_region>`,
+   `reg = <0x8e710000 0xa000>`, and Android's own log says `ipa_fws: loading from 0x8e710000 to
+   0x8e717000`, then `ipa_fws: Brought out of reset`, `IPA FW loaded successfully`, `IPA driver is
+   now in ready state`. So the IPA's microcontroller firmware has never been loaded where
+   TrustZone expects it on mars.
+
+   The obvious correction, `modem_ipa_fw_at=0x8e710000`, does not work either: the ladder reaches
+   `step 7: turn the IPA's clock on (RPMh), load the IPA's firmware (image 15) into its memory and
+   have TrustZone start it` and the machine then goes silent (the live log stops on that line and
+   the phone comes back after the watchdog). `0x8e710000` lies outside the window the loader gives
+   this kernel (`0xf4000000` plus 6 GB), so that stretch of DDR is not ours to write; a write into
+   it is probably the hypervisor's to refuse. The address has to satisfy both sides: TrustZone
+   accepts it, and the memory is ours. A block inside our own window (say `0xfa000000`) is the next
+   thing to try, and `SCM_PAS_MEM_SETUP` is what tells TrustZone the address, so it may accept any
+   DDR that we own.
+
+2. `ipa_clock()` votes four interconnect BCMs (SN8, SH0, MC0, ACV) at a hardcoded "maximum" level
+   `0x3fff`. cmd_db reports `ACV ... levels: 1`, i.e. one valid level, and the vote never came
+   back: the log stops at `mpss: 7: about to ask RPMh, through TCS 0, for ACV (0x500a0) =
+   0xa0003fff`, nothing more is printed and the phone is reset by the watchdog. SN8, SH0 and MC0
+   all answered the same vote with `RPMh HAS DONE IT ... status 0x10101`. ACV is now left out of
+   the vote list, with the reason in the code.
+
+3. (A third, smaller thing, for the record: four runs died silently at the start of step 2 because
+   `userland/root.apfs` had been replaced by the `add_fw_alt.sh` repack -- 18,493,440 bytes against
+   the real image's 19,783,680, with the modem firmware truncated. Restoring `/tmp/root.apfs-full`
+   made step 2 pass at once: `27 segments, 85097810 bytes of files`, the four file systems, the
+   service registry.)
