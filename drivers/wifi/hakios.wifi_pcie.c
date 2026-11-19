@@ -472,7 +472,7 @@ static bool route_endpoint(void) {
 #define WIFI_FSR_FAULT 0xc00001feu /* excludes read-only translation-format bits [10:9] */
 #define WIFI_MHI_IOVA 0xa0200000ull
 #define WIFI_MHI_SIZE (8u * 1024 * 1024)
-#define WIFI_DATA_IOVA 0xa1000000ull
+#define WIFI_DATA_IOVA 0xfb000000ull
 /* Everything handed out for rings and buffers starts here, so the two windows
  * the radio asks for (its DDR heap at 0xa1000000, calibration at 0xa1600000)
  * stay free and can be mapped where stock CNSS puts them. */
@@ -1700,7 +1700,7 @@ static bool driver_probe(void) {
     if (wifi_mem_real && !mem_host_ready) {
         /* Stock CNSS gives the firmware a DDR heap at 0xa1000000 and calibration
          * memory at 0xa1600000, and its heap must not be one of our rings. */
-        static const uint64_t at[2] = { 0xa1000000ull, 0xa1600000ull };
+        static const uint64_t at[2] = { 0xfb000000ull, 0xfb600000ull };
         static const unsigned size[2] = { 6160384u, 3801088u };
         vm_offset_t memory = 0;
         uint64_t iova = 0;
