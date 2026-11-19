@@ -96,6 +96,9 @@ static unsigned board_file_total; /* 1: hand out the vendor ELF, which ath11k se
 static unsigned wifi_mem_real = 1;
 /* wifi_m3: kilobytes of host memory to offer the radio for its crash dump */
 static unsigned wifi_m3;
+/* wifi_fw: another firmware file in the image's fw/ directory, for trying a different
+ * image of the same DSP; empty means the phone's own amss.bin with its identity check */
+static char wifi_fw[32];
 /* the two regions the radio asked for, mapped once before the conversation starts */
 static uint64_t mem_host_iova[2];
 static vm_offset_t mem_host_memory[2];
@@ -943,7 +946,8 @@ static uint32_t wifi_crc32(const uint8_t *data, unsigned count) {
 extern const uint8_t *hakios_image_file(const char *, const char *, uint64_t *, int *);
 static bool firmware_probe(void) {
     uint64_t size = 0;
-    const uint8_t *firmware = hakios_image_file("fw", "amss.bin", &size, NULL);
+    const char *name = wifi_fw[0] ? wifi_fw : "amss.bin";
+    const uint8_t *firmware = hakios_image_file("fw", name, &size, NULL);
     /*
      * The size and the checksum are this phone's own image, not the OnePlus 9's: the driver
      * arrived with the lemonade firmware's fingerprint (5,178,848 bytes, CRC 0xaf54a935) and
@@ -951,13 +955,21 @@ static bool firmware_probe(void) {
      * from the phone's own NON-HLOS.bin (image/amss.bin, sha256
      * 7c2b2a98265da095...); the check is still an identity check, it just names the right file.
      */
-    if (!firmware || size != 5236304 || memcmp(firmware, "\177ELF", 4) ||
-        wifi_crc32(firmware, WIFI_DMA_SIZE) != 0xb163aa48u) {
+    uint32_t given = firmware ? wifi_crc32(firmware, WIFI_DMA_SIZE) : 0;
+    if (!firmware || size < WIFI_DMA_SIZE || size > (32u << 20) || memcmp(firmware, "\177ELF", 4)) {
+        hakiospcie_tl("wifi-pcie: firmware %s is missing, too small, or not an ELF image\n", name);
+        return false;
+    }
+    if (!wifi_fw[0] && (size != 5236304 || given != 0xb163aa48u)) {
         hakiospcie_tl("wifi-pcie: original-device firmware missing or BHI prefix checksum mismatch\n");
         return false;
     }
+    if (wifi_fw[0]) {
+        hakiospcie_tl("wifi-pcie: firmware %s: %llu bytes, BHI prefix crc %#x, identity not checked\n",
+            name, (unsigned long long)size, given);
+    }
     memcpy((void *)dma_space.data, firmware, WIFI_DMA_SIZE);
-    if (wifi_crc32((const uint8_t *)dma_space.data, WIFI_DMA_SIZE) != 0xb163aa48u) {
+    if (wifi_crc32((const uint8_t *)dma_space.data, WIFI_DMA_SIZE) != given) {
         hakiospcie_tl("wifi-pcie: the copy in the DMA buffer is not the image we were given\n");
         return false;
     }
@@ -1494,14 +1506,21 @@ static bool mhi_ready(void) {
 }
 static bool mhi_full_firmware(void) {
     uint64_t size = 0;
-    const uint8_t *image = hakios_image_file("fw", "amss.bin", &size, NULL);
+    const char *name = wifi_fw[0] ? wifi_fw : "amss.bin";
+    const uint8_t *image = hakios_image_file("fw", name, &size, NULL);
     /* mars's own build of the same QCA6490 firmware (see firmware_probe above). */
-    if (!image || size != 5236304 || wifi_crc32(image, size) != 0xb4376a2au) { return false; }
+    uint32_t crc = image ? wifi_crc32(image, size) : 0;
+    if (!image || !size || size > (32u << 20) ||
+        (!wifi_fw[0] && (size != 5236304 || crc != 0xb4376a2au))) { return false; }
+    if (wifi_fw[0]) {
+        hakiospcie_tl("wifi-pcie: firmware %s: %llu bytes, crc %#x, identity not checked\n",
+            name, (unsigned long long)size, crc);
+    }
     unsigned bhie = rd(bar, 0x2c);
     if (bhie < 0x100 || bhie > 0x1fff00 || bhie & 3) { return false; }
     vm_offset_t copy = dma_space.extra + 0x20000;
     memcpy((void *)copy, image, size);
-    if (wifi_crc32((const uint8_t *)copy, size) != 0xb4376a2au) { return false; }
+    if (wifi_crc32((const uint8_t *)copy, size) != crc) { return false; }
     dma_flush(copy, size);
     volatile struct hakiospcie_bhie_vector *vectors = (void *)(dma_space.control + 0x1000);
     unsigned count = 0;
@@ -2236,6 +2255,7 @@ void hakiospcie_wifi_init(void) {
     PE_parse_boot_argn("board_repeat_first", &board_repeat_first, sizeof(board_repeat_first));
     PE_parse_boot_argn("wifi_mem_real", &wifi_mem_real, sizeof(wifi_mem_real));
     PE_parse_boot_argn("wifi_m3", &wifi_m3, sizeof(wifi_m3));
+    PE_parse_boot_argn("wifi_fw", wifi_fw, sizeof(wifi_fw));
     hakiospcie_tl("wifi-pcie: begin PCIe/CNSS survey mode %u\n", mode);
     wifi_mode = mode;
     bool ok = inspect();
