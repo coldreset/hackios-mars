@@ -574,3 +574,12 @@ takes them; then read `0x1e00000` once. If that read returns, the block was neve
 the usual bring-up. If it hangs again, the IPA is not meant to be driven from the AP on this phone without the
 vendor's XPU setup, and the honest answer for the modem is the one we already have: it registers, and then its
 own IPA assert stops it about twenty seconds later.
+
+That experiment was run on the evening of 19 November (`logs/183611-run.log`). With `soc_ipa_stream=0x5c0`
+and `soc_ipa_stream_uc=0x5c2` the SMMU takes the IPA's streams **the first time** -- the refusal we had been
+reading all week ("THE SMMU DID NOT TAKE WHAT WAS WRITTEN") was our own wrong pair of stream ids, and the
+default in the driver is now those two.
+
+The write to `QSB_MAX_WRITES` still raises a data abort in the same place (`pc 0xfffffff0074e3d98`), so the
+SMMU is not what closes the register block either. That leaves the two candidates above, and they are the
+kind that needs the vendor's own configuration path rather than another guess from us.
