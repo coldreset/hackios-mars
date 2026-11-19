@@ -537,3 +537,40 @@ The override now goes into `phys` and leaves `base` at zero, so the window is ma
 one line the failure changes shape: the run no longer aborts, it **hangs** -- the write reaches the IPA and the block
 never answers, which is what an AXI access to an unclocked or unpowered IPA looks like. So the next question is the
 IPA's clock/power, and now the experiment is honest: a write either lands or the bus stops.
+
+### What the IPA's register block actually does (19 Nov, evening)
+
+Three things are now measured rather than assumed:
+
+* The window is mapped and it is the right window: `0x1e00000 + 0x84000 maps to 0xfffffff8...`, and the
+  device tree of this phone says exactly that size (`reg = <0x1e00000 0x84000 0x1e04000 0x23000>`).
+* A **write** to `COMP_CFG` (0x1e0003c) raises a data abort within microseconds.
+* A **read** of the same block does not abort: it never completes, and the bus hangs (the loader cannot be
+  reached either, because it lives in the same DRAM).
+
+With the IPA clock voted (`IP0`, the BCM that `DEFINE_CLK_RPMH_BCM(sm8350, ipa, "IP0")` in Linux names after
+the IPA) the abort turns into a hang: `vote 0` -> abort, `vote 1` -> hang, `vote 40` (the level the command
+database itself lists) -> hang, `vote 0x3fff` -> hang. So the vote reaches the hardware (RPMh answers
+`0x10101`), and the block behaves differently with the clock on -- but it still does not answer the way a
+register file should.
+
+Two candidates remain, and they are cheap to tell apart:
+
+1. **The block is not out of reset.** On this platform the IPA's own reset is released by TrustZone when the
+   `ipa_fws` subsystem is authenticated. We load that image ourselves (`image 15`, three segments, and GSI
+   answers `0x205`), so this is only half a candidate -- but `GSI_CFG` is the *gsi* window (0x1e04000), and the
+   part that aborts is the *ipa-base* window (0x1e00000). The two overlap in the device tree, which means the
+   AP's view of the first 0x84000 bytes is not a plain register file.
+2. **The AP is not in the IPA's XPU.** Android's IPA driver runs after `ipa_fws` has been authenticated *and*
+   after the IPA's SMMU contexts have been programmed; the XPU that guards the IPA's registers is configured by
+   that path. Our SMMU programming for the IPA's streams does not take (`THE SMMU DID NOT TAKE WHAT WAS
+   WRITTEN: streams 0x480 and 0x482 are not both going through context 7`), and our device tree has no
+   `iommus` on the `ipa@1e00000` node, so 0x480/0x482 are the driver's guess while the platform's own
+   `sm8350.dtsi` uses 0x5c0/0x5c2.
+
+What is left is therefore one experiment with two outcomes: program the IPA's SMMU contexts with the streams
+the platform really uses (0x5c0/0x5c2, which is what `soc_ipa_stream` already accepts) and confirm the SMMU
+takes them; then read `0x1e00000` once. If that read returns, the block was never closed to us and the rest is
+the usual bring-up. If it hangs again, the IPA is not meant to be driven from the AP on this phone without the
+vendor's XPU setup, and the honest answer for the modem is the one we already have: it registers, and then its
+own IPA assert stops it about twenty seconds later.
