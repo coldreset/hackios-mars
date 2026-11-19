@@ -2576,8 +2576,12 @@ ipa_hardware_init(void)
  * gives the IPA's streams the mask 0, so each takes a match register of its own, with the mask 0,
  * both sending to the one context.
  */
-#define IPA_STREAM_DEFAULT      0x480u
-#define IPA_STREAM_UC_DEFAULT   0x482u          /* the IPA's microcontroller: its own match register */
+/* 19 November: with these two, the SMMU takes the IPA's streams the first time
+ * ("THE IPA'S STREAMS GO THROUGH CONTEXT 7 OF THE SMMU"); with 0x480 and 0x482 it
+ * refused them every time ("THE SMMU DID NOT TAKE WHAT WAS WRITTEN").  The platform's
+ * own device tree says iommus 0x5c0 and 0x5c2 for the IPA. */
+#define IPA_STREAM_DEFAULT      0x5c0u
+#define IPA_STREAM_UC_DEFAULT   0x5c2u          /* the IPA's microcontroller: its own match register */
 static uint32_t ipa_stream = IPA_STREAM_DEFAULT, ipa_stream_uc = IPA_STREAM_UC_DEFAULT;  /* dt: iommus of ipa_smmu_ap and ipa_smmu_uc */
 #define IPA_SPACE_BASE          0x80000000ull   /* a gigabyte from here, as it is */
 #define IPA_IMEM_DEFAULT        0x14600000u   /* the 2 MB block that holds the SoC internal memory (dt: qcom,msm-imem) */
