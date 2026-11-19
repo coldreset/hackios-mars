@@ -472,7 +472,7 @@ static bool route_endpoint(void) {
 #define WIFI_FSR_FAULT 0xc00001feu /* excludes read-only translation-format bits [10:9] */
 #define WIFI_MHI_IOVA 0xa0200000ull
 #define WIFI_MHI_SIZE (8u * 1024 * 1024)
-#define WIFI_DATA_IOVA 0xfb000000ull
+#define WIFI_DATA_IOVA 0xf0000000ull
 /* Everything handed out for rings and buffers starts here, so the two windows
  * the radio asks for (its DDR heap at 0xa1000000, calibration at 0xa1600000)
  * stay free and can be mapped where stock CNSS puts them. */
@@ -1497,7 +1497,14 @@ unsigned hakiospcie_wifi_driver_mode(void) {
 }
 void *hakiospcie_wifi_driver_memory(unsigned long size, unsigned long long *iova) {
     vm_offset_t memory = 0; uint64_t address = 0;
-    if (!hakiospcie_wifi_driver_mode() || driver_runtime.failed || size > 64u * 1024 * 1024 || !dma_allocate(size, true, &memory, &address)) { return NULL; }
+    if (!hakiospcie_wifi_driver_mode()) { hakiospcie_tl("wifi-pcie: radio memory: not in driver mode\n"); return NULL; }
+    if (driver_runtime.failed) { hakiospcie_tl("wifi-pcie: radio memory: the driver has already failed\n"); return NULL; }
+    if (size > 64u * 1024 * 1024) { hakiospcie_tl("wifi-pcie: radio memory: %lu bytes is over the 64 MB this path gives\n", size); return NULL; }
+    if (!dma_allocate(size, true, &memory, &address)) {
+        hakiospcie_tl("wifi-pcie: radio memory: %lu bytes could not be had (dma_allocate said no)\n", size);
+        return NULL;
+    }
+    hakiospcie_tl("wifi-pcie: radio memory: %lu bytes at %#llx\n", size, address);
     *iova = address; return (void *)memory;
 }
 /* the fallback path asks this before handing out the regulatory database */
@@ -1700,7 +1707,7 @@ static bool driver_probe(void) {
     if (wifi_mem_real && !mem_host_ready) {
         /* Stock CNSS gives the firmware a DDR heap at 0xa1000000 and calibration
          * memory at 0xa1600000, and its heap must not be one of our rings. */
-        static const uint64_t at[2] = { 0xfb000000ull, 0xfb600000ull };
+        static const uint64_t at[2] = { 0xf0000000ull, 0xf4000000ull };
         static const unsigned size[2] = { 6160384u, 3801088u };
         vm_offset_t memory = 0;
         uint64_t iova = 0;
