@@ -1634,11 +1634,19 @@ static bool ipcr_probe(unsigned step) {
         0x15,4,0, 0x4c,0x45,0x4e,0x4b, /* kernel client */
         0x16,1,0,1, 0x17,1,0,1, 0x18,1,0,1, 0x1b,1,0,1
     };
+    /* The vendor stack tells the radio which host addresses are its own before
+     * it asks for memory: the SMMU window as a ddr_range (tlv 0x1f, one entry of
+     * start and size) and the wake MSI it may raise (tlv 0x11).  Without the
+     * window the radio is handed addresses it has no way to place. */
     static const uint8_t host[] = {
         0x10,4,0,1,0,0,0, /* one client */
+        0x11,4,0, 0x00,0x08,0x00,0x00, /* wake MSI base data 0x800 */
         0x14,1,0,1, /* board data */
         0x16,1,0,1, 0x17,1,0,1, /* original M3 image/cache */
-        0x1a,1,0,0 /* calibration not yet done */
+        0x1a,1,0,0, /* calibration not yet done */
+        0x1f,16,0, /* the host window: start 0xa0000000, size 0x10010000 */
+        0x00,0x00,0x00,0xa0, 0x00,0x00,0x00,0x00,
+        0x00,0x00,0x01,0x00, 0x00,0x00,0x00,0x00
     };
     if (!ipcr_qmi_request(0x20, registration, sizeof(registration)) ||
         !ipcr_qmi_request(0x34, host, sizeof(host))) { return false; }
