@@ -2522,6 +2522,23 @@ ipa_hardware_init(void)
 	uint32_t value;
 
 	need(&ipa_regs);
+	{
+		uint32_t probe_on = 0, probe_at = 0;
+
+		PE_parse_boot_argn("modem_ipa_rprobe_on", &probe_on, sizeof(probe_on));
+		PE_parse_boot_argn("modem_ipa_rprobe", &probe_at, sizeof(probe_at));
+		if (probe_on != 0) {
+			volatile uint32_t *word = (volatile uint32_t *)(ipa_regs.base + probe_at);
+			uint32_t value_read;
+
+			tell("mpss: ipa: read probe: about to read %#x at %p\n", probe_at, (void *)word);
+			value_read = *word;
+			tell("mpss: ipa: read probe: %#x reads %#x\n", probe_at, value_read);
+			settle();
+			tell("mpss: ipa: read probe: done\n");
+			return;
+		}
+	}
 	tell("mpss: ipa: hardware 1: the QSB's outstanding counts\n");
 	/* QSB: 12 outstanding writes, 13 reads of 120 beats on the DDR master (ipa3_qmb_outstanding[IPA_4_11]) */
 	/* no reads: this block answers writes and never answers reads */

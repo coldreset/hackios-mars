@@ -583,3 +583,24 @@ default in the driver is now those two.
 The write to `QSB_MAX_WRITES` still raises a data abort in the same place (`pc 0xfffffff0074e3d98`), so the
 SMMU is not what closes the register block either. That leaves the two candidates above, and they are the
 kind that needs the vendor's own configuration path rather than another guess from us.
+
+### The register block does not answer the AP at all (19 Nov, 19:10)
+
+Two more probes, both with the clock voted and the SMMU taking the platform's own streams:
+
+* A **read** of `0x1e00000 + 0` (the base the device tree names) never completes: the run returns
+  `xl: no answer -- the kernel hung` and leaves no log at all.  Writes to `+0x3c` had been aborting; a read
+  simply hangs, which is what an undecoded or powered-down slave does.
+* The IPA's registers may instead sit at `+0x40000` inside that window -- mainline's `ipa-reg` is
+  `0x1e40000 + 0x8000`, and the phone's device tree lumps `ipa-reg`, `gsi` (`+0x4000`) and `ipa-shared`
+  (`+0x50000`) into one `0x84000` range.  Writing there (`modem_ipa_regs=0x1e40000`) hangs the bus as well.
+
+So the AP's path to the IPA's register file is closed on this phone: `gsi` answers (`GSI_CFG` reads 0x205
+because the IPA's own firmware is running), and everything the modem needs from the IPA it gets from the
+microcontroller, but the AP cannot program the block itself.  Program it from `gsi` alone is not a thing: the
+GSI registers only configure channels, and the modem's first requirement -- `ipa_ipfltr.init_done`, the
+"InIT message from A7" it names in its last words -- is set by the IPA's own filter code in that block.
+
+What this means for the modem: the state we already had is the ceiling without the vendor's IPA bring-up.
+The modem agrees, comes online, registers with a network (`REGISTERED WITH A NETWORK; signal -119 dBm (NR)`),
+and about twenty seconds later its own IPA client asserts because the host never told it the filter is up.
