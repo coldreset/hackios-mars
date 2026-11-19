@@ -2947,16 +2947,19 @@ ipa_firmware_load(void)
 		}
 		ipa_hardware_init();
 	}
+	printf("mpss: %u: HANDING TRUSTZONE THE IPA'S HEADER\n", step);
 	result = scm("to take the IPA's header", SCM_PAS_INIT_IMAGE, SCM_VALUE_AND_BUFFER, pas_ipa, kvtophys(page), 0, 0, &answer);
 	if (result != 0 || answer != 0) {
 		printf("mpss: %u: TRUSTZONE DOES NOT TAKE THE IPA'S HEADER (%d, %#llx)\n", step, result, answer);
 		goto out;
 	}
+	printf("mpss: %u: TELLING TRUSTZONE WHERE THE IPA'S IMAGE GOES (%#x, %#x)\n", step, ipa_fw_memory, size);
 	result = scm("where the IPA's image will be", SCM_PAS_MEM_SETUP, SCM_THREE_VALUES, pas_ipa, ipa_fw_memory, size, 0, &answer);
 	if (result != 0 || answer != 0) {
 		printf("mpss: %u: TRUSTZONE DOES NOT TAKE THE IPA'S PLACE (%d, %#llx)\n", step, result, answer);
 		goto out;
 	}
+	printf("mpss: %u: WRITING %#x BYTES INTO %#x\n", step, size, ipa_fw_memory);
 	memory = (volatile uint8_t *)ml_io_map_unmappable(ipa_fw_memory, size, VM_WIMG_WCOMB);
 	if (memory == NULL) {
 		goto out;
@@ -2973,6 +2976,7 @@ ipa_firmware_load(void)
 	}
 	settle();
 	ml_io_unmap((vm_offset_t)memory, size);
+	printf("mpss: %u: ASKING TRUSTZONE TO START THE IPA\n", step);
 	result = scm("to authenticate the IPA's image and start it", SCM_PAS_AUTH_AND_RESET, SCM_ONE_VALUE, pas_ipa, 0, 0, 0, &answer);
 	if (result != 0 || answer != 0) {
 		printf("mpss: %u: TRUSTZONE DOES NOT START THE IPA'S FIRMWARE (%d, %#llx)\n", step, result, answer);
