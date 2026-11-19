@@ -472,13 +472,30 @@ static bool route_endpoint(void) {
 #define WIFI_FSR_FAULT 0xc00001feu /* excludes read-only translation-format bits [10:9] */
 #define WIFI_MHI_IOVA 0xa0200000ull
 #define WIFI_MHI_SIZE (8u * 1024 * 1024)
-#define WIFI_DATA_IOVA 0xf0000000ull
 /* Everything handed out for rings and buffers starts here, so the two windows
  * the radio asks for (its DDR heap at 0xa1000000, calibration at 0xa1600000)
- * stay free and can be mapped where stock CNSS puts them. */
+ * stay free and can be mapped where stock CNSS puts them. Only pool
+ * allocations are held below WIFI_DATA_LIMIT; a caller that names its own
+ * address, as the radio's two windows do, may sit anywhere this address space
+ * reaches, which is why the ceiling is not applied to those.
+ */
 #define WIFI_ALLOC_IOVA 0xa6000000ull
 #define WIFI_DATA_LIMIT 0xb0000000ull
-#define WIFI_TABLE_PAGES (7u + 120u)
+/* Page 0 is the level-1 table; page 1 is the level-2 table for the 0x80000000
+ * gigabyte that holds the transport, the MHI arena and the pool; page 2 is the
+ * transport leaf and pages 3-6 the four MHI leaves; page 7 is the level-2
+ * table for the 0xc0000000 gigabyte, where the radio's own windows are; pages
+ * 8-127 are spare leaves, one per 2 MB slot, handed out as slots are used.
+ * 120 leaves is 240 MB of ring and buffer address space.
+ */
+#define WIFI_L2_HIGH_GB 3u
+#define WIFI_L2_HIGH_PAGE 7u
+#define WIFI_LEAF_FIRST 8u
+/* Page-number ceilings tried for the two host-memory windows, smallest first: 0x40000 is
+ * 4 GB if the kernel counts 16 KB pages, 0x100000 is 4 GB if it counts 4 KB ones. The radio
+ * is the only reader of these pages, so a failed attempt costs nothing. */
+static const unsigned wifi_window_ceilings[] = { 0x40000u, 0x100000u, 0x400000u };
+#define WIFI_TABLE_PAGES (WIFI_LEAF_FIRST + 120u)
 #define WIFI_TABLE_SIZE (WIFI_TABLE_PAGES * 4096)
 static const unsigned dma_cb_offsets[] = {0, 0x10, 0x20, 0x24, 0x28, 0x2c, 0x30, 0x38, 0x3c};
 static struct {
@@ -488,6 +505,7 @@ static struct {
     bool owned, retain_pages;
     unsigned allocation_count;
     uint64_t next_iova;
+    unsigned leaf_next;
     struct { vm_offset_t cached, uncached; unsigned size; uint64_t iova; } allocations[32];
 } dma_space;
 
@@ -570,34 +588,106 @@ static bool dma_translate(uint64_t address, uint64_t *result) {
     *result = rd64(dma_space.cb + 0x50);
     return true;
 }
-static bool dma_walk(uint64_t address, uint64_t *physical) {
-    if (address >> 39) { return false; }
-    uint64_t *l1 = (void *)dma_space.tables, *l2 = (void *)(dma_space.tables + 4096), *l3 = NULL;
-    if ((l1[(address >> 30) & 511] & (WIFI_PHYS_MASK | 3)) != (kvtophys((vm_offset_t)l2) | 3)) { return false; }
-    uint64_t entry = l2[(address >> 21) & 511] & (WIFI_PHYS_MASK | 3);
-    for (unsigned page = 2; page < WIFI_TABLE_PAGES; page++) {
-        vm_offset_t candidate = dma_space.tables + page * 4096;
-        if (entry == (kvtophys(candidate) | 3)) { l3 = (void *)candidate; break; }
+/* Table pages come from one allocation but are not physically contiguous, so a
+ * physical address found in an entry is mapped back to the page it came from
+ * by comparison, never by arithmetic on the physical difference. Anything that
+ * does not name a page of our own table fails, which is what makes an unmapped
+ * guard address an answer rather than a guess. */
+static int dma_table_page(uint64_t physical) {
+    if (!physical) { return -1; }
+    for (unsigned page = 0; page < WIFI_TABLE_PAGES; page++) {
+        if (kvtophys(dma_space.tables + page * 4096) == physical) { return (int)page; }
     }
-    if (!l3) { return false; }
-    uint64_t pte = l3[(address >> 12) & 511];
+    return -1;
+}
+static uint64_t *dma_l2(uint64_t address) {
+    if (!dma_space.tables || address >> 39) { return NULL; }
+    uint64_t *l1 = (void *)dma_space.tables;
+    uint64_t entry = l1[(address >> 30) & 511];
+    if ((entry & 3) != 3) { return NULL; }
+    int page = dma_table_page(entry & WIFI_PHYS_MASK);
+    if (page < 0) { return NULL; }
+    return (void *)(dma_space.tables + page * 4096);
+}
+static bool dma_walk(uint64_t address, uint64_t *physical) {
+    uint64_t *l2 = dma_l2(address);
+    if (!l2) { return false; }
+    uint64_t entry = l2[(address >> 21) & 511];
+    if ((entry & 3) != 3) { return false; }
+    int page = dma_table_page(entry & WIFI_PHYS_MASK);
+    if (page < 0) { return false; }
+    uint64_t pte = ((uint64_t *)(dma_space.tables + page * 4096))[(address >> 12) & 511];
     if ((pte & 3) != 3) { return false; }
     *physical = (pte & WIFI_PHYS_MASK) | (address & 4095);
     return true;
 }
+/* The leaf page for the 2 MB slot that holds address: the one already
+ * published there when it is ours (two allocations can share a slot, because a
+ * pool allocation may start on the page after the previous one), otherwise a
+ * fresh one from the spare pages. An entry that is not one of our pages is
+ * refused rather than overwritten. */
+static uint64_t *dma_leaf(uint64_t address) {
+    uint64_t *l2 = dma_l2(address);
+    if (!l2) { return NULL; }
+    unsigned index = (address >> 21) & 511;
+    if (l2[index]) {
+        if ((l2[index] & 3) != 3) { return NULL; }
+        int page = dma_table_page(l2[index] & WIFI_PHYS_MASK);
+        if (page < (int)WIFI_LEAF_FIRST || page >= (int)WIFI_TABLE_PAGES) { return NULL; }
+        return (void *)(dma_space.tables + page * 4096);
+    }
+    if (dma_space.leaf_next >= WIFI_TABLE_PAGES) { return NULL; }
+    vm_offset_t leaf = dma_space.tables + dma_space.leaf_next++ * 4096;
+    l2[index] = kvtophys(leaf) | 3;
+    return (void *)leaf;
+}
 /* Only allocated pages are published, separated by a native-page guard. The
- * mapping stays owned until endpoint reset; a failure never frees live DMA. */
+ * mapping stays owned until endpoint reset; a failure never frees live DMA.
+ * Every refusal names the step it stopped at: a bare no costs a phone cycle. */
 static bool dma_allocate_at(unsigned requested, bool coherent, uint64_t at, vm_offset_t *memory, uint64_t *address) {
     if (!dma_space.owned || !requested || requested > 64u * 1024 * 1024 ||
-        dma_space.allocation_count == 32) { return false; }
+        dma_space.allocation_count == 32) {
+        hakiospcie_tl("QMI probe: DMA allocation refused: %s\n",
+            !dma_space.owned ? "the address space is not owned" : !requested ? "nothing was asked for" :
+            requested > 64u * 1024 * 1024 ? "more than 64 MB was asked for" : "all 32 slots are used");
+        return false;
+    }
     unsigned size = round_page(requested);
     uint64_t iova = at ? at : (dma_space.next_iova ? dma_space.next_iova : WIFI_ALLOC_IOVA);
-    if (iova > WIFI_DATA_LIMIT - size - PAGE_SIZE) { return false; }
+    if ((iova >> 39) || (!at && iova > WIFI_DATA_LIMIT - size - PAGE_SIZE)) {
+        hakiospcie_tl("QMI probe: DMA allocation refused: %#llx + %u bytes is outside the window\n", iova, size);
+        return false;
+    }
     vm_offset_t cached = 0, uncached = 0;
-    kern_return_t result = coherent ?
-        kmem_alloc_contig(kernel_map, &cached, size, 0, 0, 0, KMA_KOBJECT | KMA_ZERO | KMA_DATA, VM_KERN_MEMORY_IOKIT) :
-        kmem_alloc(kernel_map, &cached, size, KMA_KOBJECT | KMA_ZERO | KMA_DATA, VM_KERN_MEMORY_IOKIT);
-    if (result != KERN_SUCCESS) { return false; }
+    kern_return_t result = KERN_FAILURE;
+    if (!coherent) {
+        result = kmem_alloc(kernel_map, &cached, size, KMA_KOBJECT | KMA_ZERO | KMA_DATA, VM_KERN_MEMORY_IOKIT);
+    } else if (at) {
+        for (unsigned attempt = 0; attempt < 3; attempt++) {
+            result = kmem_alloc_contig(kernel_map, &cached, size, 0, wifi_window_ceilings[attempt], 0,
+                KMA_KOBJECT | KMA_ZERO | KMA_DATA, VM_KERN_MEMORY_IOKIT);
+            if (result == KERN_SUCCESS) {
+                hakiospcie_tl("QMI probe: the window at %#llx took ceiling %#x on attempt %u\n",
+                    iova, wifi_window_ceilings[attempt], attempt);
+                break;
+            }
+        }
+    } else {
+        for (unsigned attempt = 0; attempt < 4; attempt++) {
+            ppnum_t ceiling = attempt < 3 ? wifi_window_ceilings[attempt] : 0;
+            result = kmem_alloc_contig(kernel_map, &cached, size, 0, ceiling, 0,
+                KMA_KOBJECT | KMA_ZERO | KMA_DATA, VM_KERN_MEMORY_IOKIT);
+            if (result == KERN_SUCCESS) {
+                hakiospcie_tl("QMI probe: the pool memory for %#llx took ceiling %#x on attempt %u\n",
+                    iova, ceiling, attempt);
+                break;
+            }
+        }
+    }
+    if (result != KERN_SUCCESS) {
+        hakiospcie_tl("QMI probe: DMA allocation refused: %u bytes of memory could not be had\n", size);
+        return false;
+    }
     unsigned allocation = dma_space.allocation_count++;
     dma_space.allocations[allocation].cached = cached;
     dma_space.allocations[allocation].size = size;
@@ -605,37 +695,48 @@ static bool dma_allocate_at(unsigned requested, bool coherent, uint64_t at, vm_o
     if (!at) { dma_space.next_iova = iova + size + PAGE_SIZE; }
     hakiospcie_tl("QMI probe: DMA allocation %u: %u bytes asked, %u mapped, at %#llx\n",
         allocation, requested, size, iova);
+    hakiospcie_tl("QMI probe: DMA allocation %u: its memory is at %#llx, %u bytes\n",
+        allocation, (unsigned long long)kvtophys(cached), size);
     dma_flush(cached, size);
     if (coherent) {
         uncached = ml_io_map_unmappable(kvtophys(cached), size, VM_WIMG_WCOMB);
-        if (!uncached) { return false; }
+        if (!uncached) {
+            hakiospcie_tl("QMI probe: DMA allocation %u refused: it has no uncached alias\n", allocation);
+            return false;
+        }
         dma_space.allocations[allocation].uncached = uncached;
     }
-    uint64_t *l2 = (void *)(dma_space.tables + 4096);
+    const char *why = NULL;
     lck_mtx_lock(&hakios_smmu_lock);
-    bool ok = true;
-    for (unsigned offset = 0; offset < size; offset += 4096) {
-        uint64_t at = iova + offset, physical = kvtophys(cached + offset);
-        unsigned page = 7 + ((at - WIFI_DATA_IOVA) >> 21);
-        uint64_t *leaf = (void *)(dma_space.tables + page * 4096);
-        unsigned index = (at >> 21) & 511;
-        uint64_t expected = kvtophys((vm_offset_t)leaf) | 3;
-        if (page >= WIFI_TABLE_PAGES || !physical || physical >> 36 || physical & 4095 ||
-            (coherent && physical != kvtophys(cached) + offset) ||
-            (l2[index] && l2[index] != expected) || leaf[(at >> 12) & 511]) { ok = false; break; }
-        l2[index] = expected;
-        leaf[(at >> 12) & 511] = physical | 3ull | (1ull << 6) | (2ull << 8) | (1ull << 10) |
+    for (unsigned offset = 0; !why && offset < size; offset += 4096) {
+        uint64_t iova_page = iova + offset, physical = kvtophys(cached + offset);
+        uint64_t *leaf = dma_leaf(iova_page);
+        if (!leaf) { why = "no leaf page is left for its 2 MB slot"; break; }
+        if (!physical || physical >> 36 || physical & 4095) { why = "its memory is not 36-bit addressable"; break; }
+        if (coherent && physical != kvtophys(cached) + offset) { why = "its memory is not physically contiguous"; break; }
+        if (leaf[(iova_page >> 12) & 511]) { why = "its 4 KB entry is already in use"; break; }
+        leaf[(iova_page >> 12) & 511] = physical | 3ull | (1ull << 6) | (2ull << 8) | (1ull << 10) |
             (1ull << 11) | (1ull << 53) | (1ull << 54);
     }
     dma_flush(dma_space.tables, WIFI_TABLE_SIZE);
-    if (ok) { ok = dma_tlb_sync(); }
+    if (!why && !dma_tlb_sync()) { why = "the table invalidation never completed"; }
     lck_mtx_unlock(&hakios_smmu_lock);
-    for (unsigned offset = 0; ok && offset < size; offset += 4096) {
+    for (unsigned offset = 0; !why && offset < size; offset += 4096) {
         uint64_t physical = 0;
-        ok = dma_walk(iova + offset, &physical) && physical == kvtophys(cached + offset);
+        if (!dma_walk(iova + offset, &physical) || physical != kvtophys(cached + offset)) {
+            why = "the table did not read back what was written";
+        }
     }
-    uint64_t unused = 0;
-    if (!ok || dma_walk(iova - 4096, &unused) || dma_walk(iova + size, &unused)) { return false; }
+    if (!why) {
+        uint64_t unused = 0;
+        if (dma_walk(iova - 4096, &unused)) { why = "the guard page below it is mapped"; }
+        else if (dma_walk(iova + size, &unused)) { why = "the guard page above it is mapped"; }
+    }
+    if (why) {
+        hakiospcie_tl("QMI probe: DMA allocation %u refused: %s (at %#llx, %u bytes)\n",
+            allocation, why, iova, size);
+        return false;
+    }
     *memory = coherent ? uncached : cached; *address = iova;
     hakiospcie_tl("wifi-pcie: owned DMA allocation %u requested %u mapped %u pages %u guards verified\n",
         allocation, requested, size, size / 4096);
@@ -644,7 +745,31 @@ static bool dma_allocate_at(unsigned requested, bool coherent, uint64_t at, vm_o
 static bool dma_allocate(unsigned requested, bool coherent, vm_offset_t *memory, uint64_t *address) {
     return dma_allocate_at(requested, coherent, 0, memory, address);
 }
+/* The radio cannot be given memory above its own reach.  On this board the
+ * loader hands the kernel a window that starts at 0xf4000000, so the whole
+ * first four gigabytes is a 192 MB strip; measure what is left of it before the
+ * driver asks for its own buffers. */
+extern unsigned int vm_page_free_count;
+
+static void dma_low_probe(void) {
+	static const unsigned sizes[] = { 1u << 20, 2u << 20, 4u << 20, 6160384u, 8u << 20 };
+	hakiospcie_tl("wifi-pcie: low memory: %u pages free\n", vm_page_free_count);
+	for (unsigned i = 0; i < sizeof(sizes) / sizeof(sizes[0]); i++) {
+		vm_offset_t got = 0;
+		kern_return_t r = kmem_alloc_contig(kernel_map, &got, sizes[i], 0, 0x40000u, 0,
+		    KMA_KOBJECT | KMA_ZERO | KMA_DATA, VM_KERN_MEMORY_IOKIT);
+		if (r != KERN_SUCCESS) {
+			hakiospcie_tl("wifi-pcie: low memory: %u bytes below 4 GB no\n", sizes[i]);
+			continue;
+		}
+		hakiospcie_tl("wifi-pcie: low memory: %u bytes below 4 GB yes, at %#llx\n",
+		    sizes[i], kvtophys(got));
+		kmem_free(kernel_map, got, sizes[i]);
+	}
+}
+
 static bool dma_prepare(bool extended) {
+    dma_low_probe();
     if ((rd(config, 4) | rd(dbi, 4)) & 4) { return false; }
     dma_space.mmio = ml_io_map_unmappable(0x15000000, 0x100000, VM_WIMG_IO);
     if (!dma_space.mmio) { return false; }
@@ -659,6 +784,8 @@ static bool dma_prepare(bool extended) {
         kmem_alloc(kernel_map, &dma_space.data, round_page(WIFI_DMA_SIZE), KMA_KOBJECT | KMA_ZERO | KMA_DATA,
         VM_KERN_MEMORY_IOKIT) != KERN_SUCCESS) { return false; }
     uint64_t *l1 = (void *)dma_space.tables, *l2 = (void *)(dma_space.tables + 4096), *l3 = (void *)(dma_space.tables + 8192);
+    dma_space.leaf_next = WIFI_LEAF_FIRST;
+    l1[WIFI_L2_HIGH_GB] = kvtophys((vm_offset_t)(dma_space.tables + WIFI_L2_HIGH_PAGE * 4096)) | 3;
     l1[(WIFI_DMA_IOVA >> 30) & 511] = kvtophys((vm_offset_t)l2) | 3;
     l2[(WIFI_DMA_IOVA >> 21) & 511] = kvtophys((vm_offset_t)l3) | 3;
     for (unsigned offset = 0; offset < WIFI_DMA_SIZE; offset += 4096) {
@@ -1174,13 +1301,25 @@ static bool mhi_events(void) {
                 mhi_ring_offset[n] + mhi.consumed[n] * 16);
             uint32_t word0 = event->word0, word1 = event->word1;
             unsigned type = (word1 >> 16) & 255, value = word0 >> 24;
+            if (n == 0) {
+                hakiospcie_tl("wifi-pcie: MHI event ring 0 raw word0 %#x word1 %#x at %#llx\n",
+                    word0, word1, (unsigned long long)(base + mhi.consumed[n] * 16));
+            }
             if (mhi.events < 32) {
                 hakiospcie_tl("wifi-pcie: MHI event ring %u type %#x value %u channel %u\n", n, type, value, word1 >> 24);
             }
             mhi.events++;
             if (type == 0x20) {
                 if (value == 2) { mhi.m0_seen = true; mhi.m0_events++; }
-                else if (value == 0xff) { return false; }
+                else if (value == 0xff) {
+                    /* HAKIOS: the radio reports 0xff here right after it is handed its
+                     * memory. Nobody made it say that on 15 November, so keep reading
+                     * events and log what the entry really held. */
+                    hakiospcie_tl("wifi-pcie: MHI event ring %u says 0xff: word0 %#x word1 %#x "
+                        "read %#llx consumed %u returned %u; carrying on\n", n, word0, word1,
+                        (unsigned long long)(base + mhi.consumed[n] * 16), mhi.consumed[n],
+                        mhi.returned[n]);
+                }
             } else if (type == 0x40) {
                 mhi.ee_events++;
                 if (value == 2 || value == 4) { mhi.mission_seen = true; }
@@ -1497,6 +1636,7 @@ unsigned hakiospcie_wifi_driver_mode(void) {
 }
 void *hakiospcie_wifi_driver_memory(unsigned long size, unsigned long long *iova) {
     vm_offset_t memory = 0; uint64_t address = 0;
+    if (wifi_mem_real == 4) { hakiospcie_tl("wifi-pcie: radio memory: skipped by the wifi_mem_real=4 argument\n"); return NULL; }
     if (!hakiospcie_wifi_driver_mode()) { hakiospcie_tl("wifi-pcie: radio memory: not in driver mode\n"); return NULL; }
     if (driver_runtime.failed) { hakiospcie_tl("wifi-pcie: radio memory: the driver has already failed\n"); return NULL; }
     if (size > 64u * 1024 * 1024) { hakiospcie_tl("wifi-pcie: radio memory: %lu bytes is over the 64 MB this path gives\n", size); return NULL; }
@@ -1704,10 +1844,13 @@ static bool driver_probe(void) {
     /* The radio asks for host memory in the middle of the handshake; handing it
        addresses we own means mapping them here, before any QMI traffic, not
        while a reply is on its way out. */
+    /* wifi_mem_real is 1 (map and hand over), 2 (map but hand over the unmapped
+       fallback, which separates a bad mapping from the radio writing into it) or
+       0 (do not map at all). */
     if (wifi_mem_real && !mem_host_ready) {
         /* Stock CNSS gives the firmware a DDR heap at 0xa1000000 and calibration
          * memory at 0xa1600000, and its heap must not be one of our rings. */
-        static const uint64_t at[2] = { 0xf0000000ull, 0xf4000000ull };
+        static const uint64_t at[2] = { 0xa1000000ull, 0xa1600000ull };
         static const unsigned size[2] = { 6160384u, 3801088u };
         vm_offset_t memory = 0;
         uint64_t iova = 0;
@@ -1763,6 +1906,34 @@ static bool driver_probe(void) {
         for (unsigned waited = 0; waited < 30; waited++) { delay(100000); }
         hakiospcie_tl("QMI probe: after the wait, MHI BHI %#x BHIE %#x EE %#x\n",
             rd(bar, 0x28), rd(bar, 0x224), rd(bar, 0x128));
+        /* Did the radio write anything into the buffer it was told to use, and
+           did the SMMU see a translation fault on the way?  The two addresses
+           are the ones ath11k's own reply named (0xa6000000 + 0x11b00 and
+           0xa6000000 + 0x5f1b00), which is where the firmware keeps its DDR
+           heap and its calibration data when it accepts the host memory. */
+        {
+            static const uint64_t asked[2] = { 0xa6011b00ull, 0xa65f1b00ull };
+            for (unsigned n = 0; n < dma_space.allocation_count; n++) {
+                vm_offset_t cached = dma_space.allocations[n].cached;
+                unsigned size = dma_space.allocations[n].size;
+                uint64_t iova = dma_space.allocations[n].iova;
+                if (!cached || !size || size < 8 * 4) { continue; }
+                for (unsigned i = 0; i < 2; i++) {
+                    if (asked[i] < iova || asked[i] >= iova + size) { continue; }
+                    volatile const uint32_t *w =
+                        (volatile const uint32_t *)(cached + (vm_offset_t)(asked[i] - iova));
+                    hakiospcie_tl("QMI probe: the buffer at %#llx holds %08x %08x %08x %08x %08x %08x %08x %08x\n",
+                        asked[i], w[0], w[1], w[2], w[3], w[4], w[5], w[6], w[7]);
+                }
+                if (size >= 44u << 20) {
+                    volatile const uint32_t *base = (volatile const uint32_t *)cached;
+                    hakiospcie_tl("QMI probe: the whole buffer %#llx starts %08x %08x %08x %08x\n",
+                        iova, base[0], base[1], base[2], base[3]);
+                }
+            }
+            hakiospcie_tl("QMI probe: SMMU fault status %#x far %#llx, MHI status %#x EE %#x\n",
+                rd(dma_space.cb, 0x58), rd64(dma_space.cb + 0x60), rd(bar, 0x12c), rd(bar, 0x128));
+        }
     }
     if (ok) { hakiospcie_tl("wifi-pcie: stage 22 QCA6490 major-1 ath11k startup completed\n"); }
     return ok;
@@ -2025,14 +2196,12 @@ void hakiospcie_wifi_init(void) {
         ok = power_root(mode);
         hakiospcie_tl("wifi-pcie: stage %u %s; networking not yet verified\n", mode, ok ? "passed" : "failed");
         if (!ok && mem_host_ready && mem_host_memory[0]) {
-            /* Did the radio write anything into the heap we handed it? */
-            const uint32_t *ddr = (const uint32_t *)mem_host_memory[0];
-            const uint32_t *cal = (const uint32_t *)mem_host_memory[1];
-
-            hakiospcie_tl("QMI probe: the radio's heap now starts %08x %08x %08x %08x\n",
-                ddr[0], ddr[1], ddr[2], ddr[3]);
-            hakiospcie_tl("QMI probe: the calibration window starts %08x %08x %08x %08x\n",
-                cal[0], cal[1], cal[2], cal[3]);
+            /* The heap was handed over, so name the two windows rather than read
+               them: a read through an uncached alias of live device memory is the
+               one access that can take the machine with it, and it told us
+               nothing the addresses do not. */
+            hakiospcie_tl("QMI probe: the heap was at %#llx and the calibration window at %#llx\n",
+                mem_host_iova[0], mem_host_iova[1]);
         }
         if (ok && mode == 24) {
             hakiospcie_tl("wifi-pcie: station offered to iOS; runtime kept until normal stop\n");
@@ -2279,7 +2448,7 @@ qrtr_send(struct hakios_qrtr_port *port, uint32_t node, uint32_t to_port, const 
 		for (unsigned at = 7; at + 17 <= length; at++) {
 			uint64_t address = 0;
 			memcpy(&address, editable + at, sizeof(address));
-			if (address < WIFI_DATA_IOVA || address >= WIFI_DATA_LIMIT) { continue; }
+			if (address < WIFI_ALLOC_IOVA || address >= WIFI_DATA_LIMIT) { continue; }
 			uint32_t size = 0;
 			memcpy(&size, editable + at + 9, sizeof(size));
 			uint32_t fixed = size >> 8;
@@ -2312,7 +2481,7 @@ qrtr_send(struct hakios_qrtr_port *port, uint32_t node, uint32_t to_port, const 
 			}
 			hakiospcie_tl("%s\n", line);
 		}
-	} else if (ipcr.memory_count && length >= 7 && ((const uint8_t *)data)[3] == 0x36 &&
+	} else if (wifi_mem_real != 6 && ipcr.memory_count && length >= 7 && ((const uint8_t *)data)[3] == 0x36 &&
 	    ((const uint8_t *)data)[4] == 0) {
 		/*
 		 * Answer from our own reading of the request, not from ath11k's decode of it:
@@ -2338,9 +2507,9 @@ qrtr_send(struct hakios_qrtr_port *port, uint32_t node, uint32_t to_port, const 
 
 			/* real host memory, published in the card's own stage one table: the
 			 * radio writes the board data and the calibration straight into it */
-			if (mem_host_ready && i < 2 && mem_host_iova[i]) {
+			if (wifi_mem_real != 2 && mem_host_ready && i < 2 && mem_host_iova[i]) {
 				addr = mem_host_iova[i];
-			} else if (!wifi_mem_real) {
+			} else if (wifi_mem_real != 1) {
 				addr = 0xa3000000ull + (uint64_t)i * 0x2000000ull;
 			} else if (seg_iova[i] && seg_size[i] >= size) {
 				addr = seg_iova[i];
@@ -2408,7 +2577,7 @@ qrtr_send(struct hakios_qrtr_port *port, uint32_t node, uint32_t to_port, const 
 		for (unsigned at = 7; at + 8 <= length && found < 2; at++) {
 			uint64_t value = 0;
 			memcpy(&value, (const uint8_t *)data + at, sizeof(value));
-			if (value < WIFI_DATA_IOVA || value >= WIFI_DATA_LIMIT || (value & 4095)) { continue; }
+			if (value < WIFI_ALLOC_IOVA || value >= WIFI_DATA_LIMIT || (value & 4095)) { continue; }
 			if (found == 0) { first = value; } else { second = value; }
 			found++;
 		}
@@ -2436,7 +2605,7 @@ qrtr_send(struct hakios_qrtr_port *port, uint32_t node, uint32_t to_port, const 
 		for (unsigned at = 7; at + 8 <= length; at++) {
 			uint64_t value = 0;
 			memcpy(&value, editable + at, sizeof(value));
-			if (value < WIFI_DATA_IOVA || value >= WIFI_DATA_LIMIT || (value & mask) == 0) { continue; }
+			if (value < WIFI_ALLOC_IOVA || value >= WIFI_DATA_LIMIT || (value & mask) == 0) { continue; }
 			uint64_t fixed = value & ~mask;
 			memcpy(editable + at, &fixed, sizeof(fixed));
 			hakiospcie_tl("QMI probe: segment address %#llx aligned down to %#llx\n",

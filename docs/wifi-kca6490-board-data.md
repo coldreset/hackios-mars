@@ -64,3 +64,57 @@ export DEVICE=mars
 # 见 default-workspace/r128.sh（跳过 regdb、ELF 板级数据）
 bash r128.sh
 ```
+
+## 2026-11-20：44 MB 分配打通，内存握手卡在固件内部
+
+**分配修好了，并且是通用修法，不是挪常量。** 老代码有三处互相纠缠的错误：
+
+- `dma_allocate_at()` 里 `page = 7 + ((at - WIFI_DATA_IOVA) >> 21)`：`at` 是池起点，常量却是另一个地址，
+  无符号相减下溢，页号越界，函数在写任何东西之前就 `return false`；
+- 前面的 `iova > WIFI_DATA_LIMIT - size - PAGE_SIZE` 把显式的 `at` 全部拒绝（`0xf0000000` 永远大于 `0xb0000000`）；
+- L1 索引 3（`0xc0000000` 以上）根本没有 L2 表，所以即使页号修好也走不了表。
+
+现在改成真的走表：`dma_l2()`/`dma_table_page()`/`dma_leaf()`/`dma_walk()`，表块第 7 页是 L1[3] 的 L2 表，
+叶子从第 8 页起（`WIFI_LEAF_FIRST`，共 120 张，`WIFI_TABLE_PAGES` 128）。每次运行的日志都是
+
+    wifi-pcie: owned DMA allocation 2 requested 46137344 mapped 46137344 pages 11264 guards verified
+
+每种拒绝都带原因（`QMI probe: DMA allocation %u refused: %s (at %#llx, %u bytes)`），下一次不用再猜。
+
+**`ladder.sh` 每轮都在上传 2.69 GB 的系统镜像。** `./xl ramdisk userland/system.apfs` 之后，
+loader 把它当作 md0 驻留，内核在 bootstrap 就 wired 2.65 GB（`219511 free pages, 173705 wired pages`），
+6 GB 窗口里 4 GiB 以下**没有一个连续的 MB**，wifi 的所有缓冲因此落在 0x19f…（约 6.9 GB）。
+换成 `run_low.sh`（`./xl ramdisk none`，只带 19.7 MB 的 `root.apfs`）后：
+
+    vm_page_bootstrap: 386117 free pages, 7099 wired pages
+    DMA allocation 0: its memory is at 0xfe0cc000 / 1: 0xfe6ac000 / 2: 0xfea4c000
+
+与 11-15 那轮（0xfd17…/0xfd7d…/0xfdab…）形状一致。这一点以后跑 wifi 一定要用 `run_low.sh`。
+
+**固件仍然在内存握手处崩，而且崩在它自己内部。** 我们回的 0x36 与 11-15 **逐字节相同**
+（`00 03 00 36 00 26 00 01 23 00 02 00 1b 01 a6 00 … 1b 5f a6 00 …`，池地址 0xa6011b00 / 0xa65f1b00），
+QMI 序列（0x20 → 0x34 → 0x35 → 0x36）也逐行相同；11-15 在 4.6 ms 后回 `0x36 … result 0`，今天没有任何回应，
+0.2 秒后 `MHI event ring 0 … value 255`（SYS_ERR），`EE 0x3`。加在失败路径上的探针读出：
+
+    the buffer at 0xa6011b00 holds 00000000 …      (8 words, all zero)
+    the buffer at 0xa65f1b00 holds 00000000 …
+    the whole buffer 0xa6000000 starts 00000000 …
+    SMMU fault status 0x400 far 0x…, MHI status 0x80000001 EE 0x3
+
+即：固件**从未读写**我们交给它的那块主机内存，SMMU 也没有任何 fault——它在处理这个应答时自己崩了。
+把 6.16 MB 的**窗口**地址交给它（`wifi_mem_real=1`）更糟：整机静默死机，说明它写超了窗口；
+交给它池里的地址（`wifi_mem_real=6`，也就是 11-15 的原始行为）只是静默。
+
+**已经排除的（都做了对照实验）**：回包字节（逐字节相同）；宿主驱动代码（11-10、11-15、HEAD 三个树，
+含把 `BUILD/obj` 删干净的全量重编，`hakios-kernel` 15,926,200 B、md5 `b36b6e3b…`，仍然死机）；
+loader 二进制（`xnuloader/loader.efi` 被 gitignore，一直是 11-19 05:37 那个；从 `2543d95` 重建 242,176 B 后一样）；
+固件镜像（镜像里 `fw/amss.bin` 与 `/opt/hackios/fw-wifi/amss.bin` 逐字节相同、CRC 通过）；
+内存落点（全部 < 4 GiB）；stage 号（23/24）；冷启动；电量 100%/25 ℃；userland（用 `JOBS= WIFID=0`
+做了 13,295,616 B 的最小镜像，无 launchd，结果相同）；Android 侧 Wi-Fi 开关。
+11-15 的完整启动参数不能复现（加 `gpu=1` 后内核在 adreno 里 panic）。
+
+**同一台手机的 Android Wi-Fi 是正常的**（`cmd wifi status`：Wi-Fi 6、5200 MHz、2401 Mbps、RSSI −19、
+`wpa_supplicant` 在跑），所以射频硬件、供电、固件镜像都没问题。
+
+结论：卡点在固件处理"主机内存应答"的内部路径上，主机侧已无可调变量；要再往下走需要固件自己的
+crash dump（要先在它崩之前用 QMI 的 m3/dump 告诉它地址），那是另一条线。
