@@ -94,6 +94,8 @@ static unsigned wifi_board_cap;   /* hand ath11k only this many bytes of board d
 static unsigned board_file_total; /* 1: hand out the vendor ELF, which ath11k sends as bdf type 1 */
 /* wifi_mem_real: name memory we really allocated, not a spot in the window */
 static unsigned wifi_mem_real = 1;
+/* wifi_m3: kilobytes of host memory to offer the radio for its crash dump */
+static unsigned wifi_m3;
 /* the two regions the radio asked for, mapped once before the conversation starts */
 static uint64_t mem_host_iova[2];
 static vm_offset_t mem_host_memory[2];
@@ -1054,6 +1056,42 @@ static bool ipcr_qrtr_send(uint32_t type, uint32_t source_port, uint32_t node, u
     return ipcr_send_parts(&header, sizeof(header), payload, size, length);
 }
 /*
+ * ath11k only tells the firmware where to put a crash dump after the memory
+ * reply has been answered (ATH11K_QMI_EVENT_FW_MEM_READY), which never happens
+ * here.  Say it before the reply instead, so a firmware that dies on the reply
+ * still has somewhere to write its last words: QMI_WLANFW_M3_INFO_REQ_V01
+ * (0x3C), TLV 1 the address (u64), TLV 2 the size (u32).
+ */
+static vm_offset_t wifi_m3_memory;
+static uint64_t wifi_m3_address;
+static unsigned wifi_m3_size;
+static unsigned wifi_m3_transaction;
+static void wifi_m3_tell(void) {
+    uint8_t request[7 + 18] = {0};
+    unsigned transaction;
+
+    if (!wifi_m3 || wifi_m3_address) { return; }
+    if (!dma_allocate(wifi_m3 << 10, true, &wifi_m3_memory, &wifi_m3_address)) {
+        hakiospcie_tl("QMI probe: no dump area for the radio (%u KB)\n", wifi_m3);
+        return;
+    }
+    wifi_m3_size = wifi_m3 << 10;
+    transaction = ++wifi_m3_transaction + 0x800;
+    request[1] = transaction; request[2] = transaction >> 8;
+    request[3] = 0x3c; request[4] = 0;
+    request[5] = 18; request[6] = 0;
+    request[7] = 1; request[8] = 8; request[9] = 0;
+    memcpy(request + 10, &wifi_m3_address, 8);
+    request[18] = 2; request[19] = 4; request[20] = 0;
+    memcpy(request + 21, &wifi_m3_size, 4);
+    if (!ipcr_qrtr_send(1, 0x4000, ipcr.service_node, ipcr.service_port, request, sizeof(request))) {
+        hakiospcie_tl("QMI probe: the dump area could not be announced\n");
+        return;
+    }
+    hakiospcie_tl("QMI probe: told the radio its dump area is %#llx, %u bytes\n",
+        wifi_m3_address, wifi_m3_size);
+}
+/*
  * The memory request has to be understood here, not further down: once ath11k is running
  * every packet goes straight to driver_receive() and never reaches the TLV walk in
  * ipcr_receive(), so ipcr.memory[] stayed empty and the reply was built from ath11k's
@@ -1104,6 +1142,7 @@ hakiospcie_note_memory_request(const uint8_t *data, unsigned size)
             if (at2 != end) { return; }
             ipcr.memory_count = count;
             hakiospcie_tl("QMI probe: the request is understood, %u segments\n", count);
+            wifi_m3_tell();
         }
         pos += length;
     }
@@ -1931,6 +1970,14 @@ static bool driver_probe(void) {
                         iova, base[0], base[1], base[2], base[3]);
                 }
             }
+            if (wifi_m3_memory && wifi_m3_size) {
+                volatile const uint32_t *dump = (volatile const uint32_t *)wifi_m3_memory;
+                unsigned non_zero = 0, words = wifi_m3_size / 4u;
+                hakiospcie_tl("QMI probe: the dump area %#llx starts %08x %08x %08x %08x %08x %08x %08x %08x\n",
+                    wifi_m3_address, dump[0], dump[1], dump[2], dump[3], dump[4], dump[5], dump[6], dump[7]);
+                for (unsigned w = 0; w < words; w++) { if (dump[w]) { non_zero++; } }
+                hakiospcie_tl("QMI probe: the dump area holds %u non-zero words of %u\n", non_zero, words);
+            }
             hakiospcie_tl("QMI probe: SMMU fault status %#x far %#llx, MHI status %#x EE %#x\n",
                 rd(dma_space.cb, 0x58), rd64(dma_space.cb + 0x60), rd(bar, 0x12c), rd(bar, 0x128));
         }
@@ -2188,6 +2235,7 @@ void hakiospcie_wifi_init(void) {
     PE_parse_boot_argn("board_total_constant", &board_total_constant, sizeof(board_total_constant));
     PE_parse_boot_argn("board_repeat_first", &board_repeat_first, sizeof(board_repeat_first));
     PE_parse_boot_argn("wifi_mem_real", &wifi_mem_real, sizeof(wifi_mem_real));
+    PE_parse_boot_argn("wifi_m3", &wifi_m3, sizeof(wifi_m3));
     hakiospcie_tl("wifi-pcie: begin PCIe/CNSS survey mode %u\n", mode);
     wifi_mode = mode;
     bool ok = inspect();
