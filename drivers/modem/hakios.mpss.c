@@ -1584,6 +1584,8 @@ image_file(const char *name, uint64_t *size)
 {
 	{
 		const uint8_t *data = hakios_image_file("fw", name, size, NULL);  /* (hakios.image.c) */
+		printf("mpss: %u: fw/%s from the small image: %s, %llu bytes\n", step, name,
+		    data != NULL ? "there" : "not there", data != NULL ? *size : 0ull);
 
 		if (data != NULL) {
 			return data;
@@ -1591,6 +1593,8 @@ image_file(const char *name, uint64_t *size)
 	}
 	{
 		const uint8_t *data = root_file(name, size);
+		printf("mpss: %u: /fw/%s from the root: %s, %llu bytes\n", step, name,
+		    data != NULL ? "there" : "not there", data != NULL ? *size : 0ull);
 
 		if (data != NULL) {
 			from_root = true;
@@ -1746,7 +1750,11 @@ step_firmware(void)
 			}
 			image.segment[image.segments].file = image_file(name, &file_size);
 			if (image.segment[image.segments].file == NULL) {
-				goto fail;
+				/* The phone's own image has no file for this one (modem.b09, modem.b16): the header names a
+				 * size, the files do not exist, and Android's pil loads the same set. Leave it empty. */
+				printf("mpss: %u: fw/%s is not in the image; the segment is left empty\n", step, name);
+				image.segments++;
+				continue;
 			}
 			if (file_size != segment.file_size) {
 				printf("mpss: %u: fw/%s has %llu bytes, the header says %u\n", step, name, file_size, segment.file_size);
